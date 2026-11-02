@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
@@ -30,13 +31,24 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     });
   }
 
+  /// Le client Matrix est construit une seule fois, au démarrage de l'appli (voir main.dart),
+  /// AVANT que l'onboarding ne connaisse le mode réseau choisi ici. On met donc à jour son
+  /// `httpClient` (propriété mutable du SDK) dès qu'un réglage est validé, pour que l'inscription
+  /// qui suit immédiatement passe réellement par Tor ou le proxy choisi, sans attendre un
+  /// redémarrage de l'appli.
+  Future<void> _applyConfig(NetConfig c) async {
+    widget.client.httpClient = await c.httpClient();
+    if (!mounted) return;
+    setState(() => _config = c);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
     if (_config == null || !_config!.isConfigured) {
       return _ServerSetupScreen(
         initial: _config,
-        onConfigured: (c) => setState(() => _config = c),
+        onConfigured: _applyConfig,
       );
     }
     return _CreateAccountScreen(client: widget.client, config: _config!);
@@ -46,7 +58,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 class _ServerSetupScreen extends StatefulWidget {
   const _ServerSetupScreen({required this.initial, required this.onConfigured});
   final NetConfig? initial;
-  final void Function(NetConfig) onConfigured;
+  final Future<void> Function(NetConfig) onConfigured;
 
   @override
   State<_ServerSetupScreen> createState() => _ServerSetupScreenState();
@@ -55,6 +67,8 @@ class _ServerSetupScreen extends StatefulWidget {
 class _ServerSetupScreenState extends State<_ServerSetupScreen> {
   final _urlCtrl = TextEditingController(text: 'https://');
   final _tokenCtrl = TextEditingController();
+  final _proxyHostCtrl = TextEditingController();
+  final _proxyPortCtrl = TextEditingController(text: '1080');
   NetMode _mode = NetMode.direct;
   bool _testing = false;
   String? _error;
@@ -65,35 +79,59 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
       setState(() => _error = 'Adresse de serveur invalide');
       return;
     }
+    if (_mode == NetMode.customProxy && _proxyHostCtrl.text.trim().isEmpty) {
+      setState(() => _error = 'Adresse du proxy SOCKS5 requise');
+      return;
+    }
     setState(() {
       _testing = true;
       _error = null;
     });
-    final cfg = NetConfig(homeserver: uri, registrationToken: _tokenCtrl.text.trim(), mode: _mode);
-    var ok = await canReach(uri);
-    if (!ok && _mode == NetMode.direct) {
-      // Bascule automatique sur Tor si le direct échoue (réseau censuré ou coupé).
-      final torCfg = cfg.copyWith(mode: NetMode.tor);
-      if (await canReach(uri)) {
-        ok = true;
-      }
-      if (ok) {
-        await torCfg.save();
-        if (!mounted) return;
-        widget.onConfigured(torCfg);
-        return;
-      }
+
+    final base = NetConfig(
+      homeserver: uri,
+      registrationToken: _tokenCtrl.text.trim(),
+      mode: _mode,
+      proxyHost: _mode == NetMode.customProxy ? _proxyHostCtrl.text.trim() : null,
+      proxyPort: _mode == NetMode.customProxy ? int.tryParse(_proxyPortCtrl.text.trim()) : null,
+    );
+
+    // On teste TOUJOURS avec le client réellement associé au mode choisi (jamais un client direct
+    // générique) : un faux positif ici ferait croire à l'utilisateur qu'il passe par Tor/un proxy
+    // alors que le test, lui, serait parti en clair.
+    if (await _tryMode(base)) return;
+
+    // Repli automatique sur Tor UNIQUEMENT si l'utilisateur avait choisi « Direct » et que ça a
+    // échoué (réseau censuré ou coupé) — jamais de repli silencieux depuis Tor ou un proxy choisi
+    // explicitement vers du direct, ce qui serait le pire des deux issues pour cet usage.
+    if (_mode == NetMode.direct) {
+      if (await _tryMode(base.copyWith(mode: NetMode.tor))) return;
     }
-    if (!ok) {
-      setState(() {
-        _testing = false;
-        _error = 'Serveur injoignable. Vérifiez l\'adresse, ou essayez via Tor.';
-      });
-      return;
-    }
-    await cfg.save();
+
     if (!mounted) return;
-    widget.onConfigured(cfg);
+    setState(() {
+      _testing = false;
+      _error ??= 'Serveur injoignable. Vérifiez l\'adresse, ou essayez via Tor.';
+    });
+  }
+
+  /// Teste [cfg] avec SON propre client (direct, Tor ou proxy) et, si l'appel réussit,
+  /// enregistre et propage la configuration. Retourne faux sans rien enregistrer sinon.
+  Future<bool> _tryMode(NetConfig cfg) async {
+    http.Client client;
+    try {
+      client = await cfg.httpClient();
+    } on ProxyConfigError catch (e) {
+      if (mounted) setState(() => _error = e.message);
+      return false;
+    }
+    final ok = await canReach(cfg.homeserver, client: client);
+    client.close();
+    if (!ok) return false;
+    await cfg.save();
+    if (!mounted) return true;
+    await widget.onConfigured(cfg);
+    return true;
   }
 
   @override
@@ -130,6 +168,22 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
               ],
               onChanged: (m) => setState(() => _mode = m ?? NetMode.direct),
             ),
+            if (_mode == NetMode.customProxy) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _proxyHostCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Adresse du proxy SOCKS5',
+                  hintText: 'ex. 10.0.0.5 ou proxy.example',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _proxyPortCtrl,
+                decoration: const InputDecoration(labelText: 'Port'),
+                keyboardType: TextInputType.number,
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
@@ -149,6 +203,15 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    _tokenCtrl.dispose();
+    _proxyHostCtrl.dispose();
+    _proxyPortCtrl.dispose();
+    super.dispose();
   }
 }
 

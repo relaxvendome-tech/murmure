@@ -221,7 +221,7 @@ class Mesh {
     await db.insert('seen', {'id': env.id, 'seen_at': DateTime.now().millisecondsSinceEpoch});
 
     final me = await identity();
-    if (_bytesEqual(env.recipientPublicKey, me.publicKeyBytes)) {
+    if (_bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes))) {
       final plain = await meshDecrypt(identity: me, envelope: env);
       if (plain != null) {
         await db.insert('inbox', {
@@ -241,7 +241,7 @@ class Mesh {
         'outbox',
         {
           'id': env.id,
-          'recipient': env.recipientPublicKey,
+          'recipient': env.recipientHint,
           'payload': env.relayed().serialize(),
           'created_at': env.createdAt.millisecondsSinceEpoch,
         },
@@ -257,7 +257,7 @@ class Mesh {
     final db = await _database();
     await db.insert('outbox', {
       'id': env.id,
-      'recipient': env.recipientPublicKey,
+      'recipient': env.recipientHint,
       'payload': env.serialize(),
       'created_at': env.createdAt.millisecondsSinceEpoch,
     });

@@ -22,6 +22,11 @@ dependencies:
   intl: ^0.19.0
   flutter_blue_plus: ^1.36.0
   permission_handler: ^11.3.1
+  socks5_proxy: ^2.1.1
+  # Déjà utilisé en transitif par network.dart (via `matrix`) avant cette revue, mais jamais
+  # déclaré en direct : on le fixe explicitement puisqu'on en étend l'usage (SOCKS5 réel) et qu'on
+  # ne veut pas dépendre silencieusement d'une version choisie par un autre paquet.
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:

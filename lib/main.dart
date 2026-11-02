@@ -3,6 +3,7 @@ import 'package:matrix/matrix.dart';
 
 import 'account.dart';
 import 'media.dart';
+import 'network.dart';
 import 'ui/lock_screens.dart';
 import 'ui/onboarding_screen.dart';
 import 'ui/rooms_screen.dart';
@@ -37,10 +38,21 @@ class _MurmureAppState extends State<MurmureApp> {
   Future<void> _boot() async {
     try {
       final db = await Account.openDatabase();
+      // Le client Matrix DOIT recevoir le client HTTP adapté au mode réseau choisi (direct, Tor,
+      // proxy SOCKS5 personnalisé) dès sa construction : avant cette correction, ce paramètre
+      // n'était jamais renseigné, et le SDK utilisait son client HTTP interne par défaut, qui
+      // part toujours en direct — autrement dit, choisir « Tor » dans les réglages n'avait AUCUN
+      // effet sur le trafic réel (inscription, messages, médias), seulement sur un test de
+      // connectivité qui, lui non plus, ne passait pas par Tor (voir network.dart). Pour une
+      // personne qui compte sur Tor pour ne pas révéler son IP réelle en manifestation, c'était
+      // une fuite silencieuse et invisible. Voir aussi onboarding_screen.dart, qui met à jour
+      // `client.httpClient` en direct si le mode change après ce démarrage.
+      final net = await NetConfig.load();
       final client = Client(
         'Murmure',
         databaseBuilder: (_) async => MatrixSdkDatabase('murmure', database: db),
         logLevel: Level.warning,
+        httpClient: await net.httpClient(),
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
       if (!mounted) return;

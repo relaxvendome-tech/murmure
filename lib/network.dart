@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart' as io;
+import 'package:socks5_proxy/socks_client.dart';
 
 import 'account.dart';
 import 'config.dart';
@@ -91,30 +92,71 @@ class NetConfig {
   bool get isConfigured => homeserver.hasScheme && homeserver.host.isNotEmpty;
 
   /// Client HTTP adapté au mode choisi.
-  http.Client httpClient() {
+  ///
+  /// IMPORTANT : `HttpClient.findProxy` (dart:io) ne comprend QUE les formats "DIRECT" et
+  /// "PROXY host:port" (un proxy HTTP CONNECT) — "SOCKS5 host:port" n'est pas un format reconnu
+  /// et était silencieusement ignoré dans une version antérieure de ce fichier, ce qui faisait
+  /// croire à l'utilisateur qu'il passait par Tor alors que tout partait en direct. On utilise
+  /// maintenant un vrai client SOCKS5 (`socks5_proxy`) qui enveloppe les connexions TCP, y compris
+  /// TLS, au niveau du socket.
+  ///
+  /// Échoue plutôt que de retomber sur une connexion directe (« fail closed ») : pour quelqu'un
+  /// qui compte sur Tor ou un proxy pour ne pas révéler son IP réelle, un repli silencieux vers le
+  /// direct serait pire qu'une erreur visible.
+  Future<http.Client> httpClient() async {
     switch (mode) {
       case NetMode.direct:
         return http.Client();
       case NetMode.tor:
-        return _socksClient('127.0.0.1', 9050);
+        return _socksClient(InternetAddress.loopbackIPv4, 9050);
       case NetMode.customProxy:
-        if (proxyHost == null || proxyPort == null) return http.Client();
-        return _socksClient(proxyHost!, proxyPort!);
+        if (proxyHost == null || proxyHost!.isEmpty || proxyPort == null) {
+          throw const ProxyConfigError('Adresse ou port du proxy SOCKS5 manquant');
+        }
+        final addr = InternetAddress.tryParse(proxyHost!) ??
+            (await InternetAddress.lookup(proxyHost!)).firstOrNull;
+        if (addr == null) {
+          throw ProxyConfigError('Impossible de résoudre l\'adresse du proxy : $proxyHost');
+        }
+        return _socksClient(addr, proxyPort!);
     }
   }
 
-  static http.Client _socksClient(String host, int port) {
-    final inner = HttpClient()..findProxy = (uri) => 'SOCKS5 $host:$port';
+  static http.Client _socksClient(InternetAddress host, int port) {
+    final inner = HttpClient();
+    SocksTCPClient.assignToHttpClient(inner, [ProxySettings(host, port)]);
     return io.IOClient(inner);
   }
 }
 
+/// Le mode choisi exige un proxy (Tor, SOCKS5 personnalisé) mais ses réglages sont absents ou
+/// invalides. Volontairement distinct d'un simple échec réseau : l'appelant ne doit jamais
+/// confondre « proxy mal configuré » avec « serveur injoignable » et basculer en direct par erreur.
+class ProxyConfigError implements Exception {
+  const ProxyConfigError(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+extension _FirstOrNull<T> on List<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
+
 /// Test simple de blocage : si la connexion au homeserver échoue en mode direct, Murmure propose
 /// de basculer automatiquement sur Tor (voir ui/onboarding_screen.dart).
-Future<bool> canReach(Uri homeserver, {Duration timeout = const Duration(seconds: 6)}) async {
+///
+/// Prend le client à utiliser EN PARAMÈTRE plutôt que d'en créer un en direct à l'intérieur : la
+/// version précédente créait toujours un `http.get` direct ici, donc même le test « est-ce que Tor
+/// fonctionne ? » ne passait jamais par Tor — il retestait deux fois la même connexion directe.
+Future<bool> canReach(
+  Uri homeserver, {
+  required http.Client client,
+  Duration timeout = const Duration(seconds: 6),
+}) async {
   if (!homeserver.hasScheme) return false;
   try {
-    final resp = await http
+    final resp = await client
         .get(Uri.parse('${homeserver.origin}/_matrix/client/versions'))
         .timeout(timeout);
     return resp.statusCode == 200;

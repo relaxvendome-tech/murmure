@@ -50,11 +50,22 @@ class MeshIdentity {
 }
 
 /// Un message chiffré prêt à être relayé sur le maillage.
+///
+/// NOTE SUR LES MÉTADONNÉES EN CLAIR : [senderPublicKey] circule nécessairement en clair — le
+/// destinataire en a besoin pour recalculer le secret ECDH avant même de pouvoir déchiffrer quoi
+/// que ce soit. En revanche, la clé publique du DESTINATAIRE n'a plus besoin de voyager en clair :
+/// on transmet [recipientHint] = SHA-256(clé publique du destinataire), que seul le téléphone
+/// possédant cette clé peut reconnaître (en hachant la sienne et en comparant), exactement comme
+/// avant, mais sans jamais révéler la clé elle-même à un relais ou à quelqu'un qui écoute le
+/// Bluetooth en passant. Ça ne masque pas la liaison entre deux empreintes observées plusieurs
+/// fois (toujours possible de recorréler « la même empreinte revient » dans le temps), mais ça
+/// empêche de récupérer la clé publique réelle d'un destinataire juste en écoutant passivement —
+/// utile si cette même clé est aussi montrée par QR à un moment ou un autre.
 class MeshEnvelope {
   MeshEnvelope({
     required this.id,
     required this.senderPublicKey,
-    required this.recipientPublicKey,
+    required this.recipientHint,
     required this.nonce,
     required this.ciphertext,
     required this.mac,
@@ -65,7 +76,9 @@ class MeshEnvelope {
   /// Identifiant aléatoire de 16 octets (déduplication lors du relais).
   final Uint8List id;
   final Uint8List senderPublicKey;
-  final Uint8List recipientPublicKey;
+
+  /// SHA-256 de la clé publique du destinataire — jamais la clé elle-même (voir doc de classe).
+  final Uint8List recipientHint;
   final Uint8List nonce;
   final Uint8List ciphertext;
   final Uint8List mac;
@@ -81,7 +94,7 @@ class MeshEnvelope {
     final b = BytesBuilder();
     b.add(id);
     b.add(senderPublicKey);
-    b.add(recipientPublicKey);
+    b.add(recipientHint);
     b.add(nonce);
     b.add(_u16(ciphertext.length));
     b.add(ciphertext);
@@ -105,7 +118,7 @@ class MeshEnvelope {
 
       final id = take(16);
       final sender = take(32);
-      final recipient = take(32);
+      final recipientHint = take(32);
       final nonce = take(12);
       final ctLen = ByteData.sublistView(take(2)).getUint16(0, Endian.big);
       final ct = take(ctLen);
@@ -116,7 +129,7 @@ class MeshEnvelope {
       return MeshEnvelope(
         id: id,
         senderPublicKey: sender,
-        recipientPublicKey: recipient,
+        recipientHint: recipientHint,
         nonce: nonce,
         ciphertext: ct,
         mac: mac,
@@ -131,7 +144,7 @@ class MeshEnvelope {
   MeshEnvelope relayed() => MeshEnvelope(
         id: id,
         senderPublicKey: senderPublicKey,
-        recipientPublicKey: recipientPublicKey,
+        recipientHint: recipientHint,
         nonce: nonce,
         ciphertext: ciphertext,
         mac: mac,
@@ -141,6 +154,14 @@ class MeshEnvelope {
 
   bool get expired =>
       ttl <= 0 || DateTime.now().difference(createdAt).inHours > maxAgeHours;
+}
+
+/// SHA-256 d'une clé publique, utilisé comme [MeshEnvelope.recipientHint] : permet à un téléphone
+/// de reconnaître qu'une enveloppe lui est destinée (il hache sa propre clé et compare) sans que
+/// la clé elle-même n'ait jamais à circuler en clair sur le canal Bluetooth.
+Future<Uint8List> meshRecipientHint(Uint8List publicKey) async {
+  final hash = await Sha256().hash(publicKey);
+  return Uint8List.fromList(hash.bytes);
 }
 
 /// Chiffre un message en clair pour [recipientPublicKey], avec la clé privée de [identity].
@@ -160,7 +181,7 @@ Future<MeshEnvelope> meshEncrypt({
   return MeshEnvelope(
     id: randomBytes(16),
     senderPublicKey: identity.publicKeyBytes,
-    recipientPublicKey: recipientPublicKey,
+    recipientHint: await meshRecipientHint(recipientPublicKey),
     nonce: nonce,
     ciphertext: Uint8List.fromList(box.cipherText),
     mac: Uint8List.fromList(box.mac.bytes),

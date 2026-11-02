@@ -1,17 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
 
-/// Mode Bluetooth maillé : fonctionnement sans réseau ni serveur (coupure, brouillage).
-///
-/// Avertissement honnête affiché à l'utilisateur : voir le commentaire en tête de mesh.dart — ce
-/// mode ne fonctionne aujourd'hui qu'en scan + connexion sortante (rôle BLE central). Il permet de
-/// relayer vers un appareil déjà repéré, mais un maillage pleinement symétrique demande encore un
-/// serveur GATT natif (rôle BLE peripheral) qui reste à écrire côté Android.
+/// Mode Bluetooth maillé : fonctionnement sans réseau ni serveur (coupure, brouillage). Scanne ET
+/// s'annonce simultanément (rôles BLE central + peripheral, voir mesh.dart) : deux téléphones
+/// Murmure à portée se découvrent mutuellement, pas seulement celui qui scanne en premier.
 class MeshScreen extends StatefulWidget {
   const MeshScreen({super.key});
 
@@ -119,9 +117,13 @@ class _MeshScreenState extends State<MeshScreen> {
                 subtitle: Text(_myCode!, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
                 trailing: IconButton(
                   icon: const Icon(Icons.copy),
-                  onPressed: () {
-                    // Copie dans le presse-papiers ; échange hors-ligne du code entre contacts
-                    // (lecture à voix haute, ou QR dans une version future de cet écran).
+                  tooltip: 'Copier',
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: _myCode!));
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Code copié')),
+                    );
                   },
                 ),
               ),
