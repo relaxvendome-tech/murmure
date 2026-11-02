@@ -108,25 +108,44 @@ Au moment d'implémenter, vérifier dans cet ordre, pour chaque plugin Flutter W
   aucune vérification par capture réseau (voir checklist ci-dessus) n'a encore été faite sur un
   plugin WebRTC réel — la politique seule ne suffit pas à activer les appels en toute confiance.
 
-## `flutter_webrtc` et l'écran d'appel : ce qui est fait, ce qui ne l'est pas
+## `flutter_webrtc` + signalisation Matrix VoIP : ce qui est fait, ce qui ne l'est pas
 
-`lib/calls/ui/call_session_screen.dart` intègre maintenant `flutter_webrtc` : flux local
-(micro/caméra) réellement capté et envoyé (`getUserMedia` + `addTrack`), flux distant affiché
-(`onTrack`), configuration ICE construite par `CallPolicy.buildIceConfig` (zéro STUN, `relay`
-forcé, identifiants TURN dynamiques), et l'appel refusé avec un message explicite dès que
-`CallPolicy.isAllowed(mode)` est faux — conformément au point « Comportement par défaut »
-ci-dessus. Une proposition reçue pendant le développement de cet écran appelait des méthodes
-(`CallPolicy.isAllowed()` sans argument, `CallPolicy.generateSecureRtcConfig()`) qui n'existaient
-pas et n'ajoutait jamais le flux local à la connexion — corrigé.
+Découverte importante faite en construisant la signalisation : le paquet `matrix` déjà utilisé
+par ce projet (`matrix-dart-sdk`) embarque sa propre implémentation complète du VoIP Matrix —
+les classes `VoIP`, `CallSession`, `WebRTCDelegate` — qui gère déjà correctement `party_id`, le
+versionnage, la résolution de « glare » (deux appareils qui s'appellent en même temps), etc. Une
+proposition reçue pendant le développement de cette fonctionnalité réimplémentait à la main
+l'envoi des événements `m.call.*` (`lib/calls/services/matrix_voip_signaling.dart` dans cette
+proposition, jamais intégré) — avec un bug réel et sérieux : elle appelait `room.sendEvent(content)`
+sans jamais préciser le paramètre nommé `type:`, qui vaut par défaut `m.room.message` dans
+`matrix-dart-sdk`. Ses événements seraient donc partis comme de simples messages de discussion
+chiffrés contenant un `msgtype` non standard — invisibles pour tout client Matrix respectant la
+spec, y compris ce SDK lui-même côté réception — jamais comme de vrais événements d'appel. Elle
+omettait aussi `party_id` et prétendait gérer la réception des appels alors qu'aucun code de
+réception n'y figurait. **Décision retenue : utiliser directement `VoIP`/`CallSession` au lieu de
+réimplémenter un protocole déjà normalisé.**
 
-**Ce qui MANQUE encore, et qui empêche un appel réel entre deux appareils** : la signalisation.
-`createOffer`/`createAnswer`/les candidats ICE locaux sont bien générés, mais rien dans ce dépôt
-ne les transmet au correspondant — il n'y a pas encore d'intégration avec les événements VoIP de
-Matrix (`m.call.invite`, `m.call.candidates`, `m.call.answer`, `m.call.hangup`) ni avec le module
-`Voip` de `matrix-dart-sdk`. L'écran expose `onLocalIceCandidate`/`onLocalOffer` (à appeler vers
-ce transport) et `setRemoteDescription`/`addRemoteIceCandidate` (à alimenter depuis ce même
-transport) précisément pour que cette intégration vienne s'y brancher sans retoucher le reste du
-fichier — mais tant qu'elle n'existe pas, un appel ne peut pas aboutir, même en mode direct.
+Architecture retenue (voir `lib/calls/services/call_manager.dart` et
+`lib/calls/ui/call_session_screen.dart`) :
+
+- `CallManager` construit un unique `VoIP(client, delegate)` aux côtés du `Client` Matrix
+  (`main.dart`). `VoIP` s'abonne lui-même à `client.onCallEvents` — aucun routage d'événements à
+  faire à la main, dans un sens comme dans l'autre.
+- `MurmureWebRTCDelegate.createPeerConnection` est le SEUL point par lequel `CallSession` crée
+  réellement une `RTCPeerConnection`, qu'il s'agisse d'un appel sortant ou d'un appel entrant. On
+  y ignore délibérément la configuration ICE que `CallSession` calcule elle-même, et on la
+  remplace TOUJOURS par celle de `CallPolicy.buildIceConfig` (zéro STUN, `relay` forcé,
+  identifiants TURN dynamiques) — fail-closed structurel : si la politique refuse, aucune
+  connexion WebRTC n'est créée, point final, quel que soit ce que `CallSession` aurait tenté.
+  `CallManager.startCall` vérifie aussi la politique avant même d'envoyer l'invite, pour ne pas
+  faire sonner inutilement le correspondant d'un appel qui ne pourra jamais aboutir.
+- `CallSessionScreen` ne construit plus rien elle-même : elle affiche les flux que `CallSession`
+  lui donne via `onStreamAdd`/`onStreamRemoved`, et pilote l'appel via `session.answer()` /
+  `session.reject()` / `session.hangup()`. Écran de sonnerie séparé pour un appel entrant
+  (décrocher n'est jamais automatique).
+- Bouton d'appel ajouté dans `ChatScreen` (`lib/ui/rooms_screen.dart`) : vérifie
+  `CallPolicy.isAllowed(mode)` et affiche un message explicite au lieu d'un échec silencieux si
+  l'appel est refusé — cohérent avec le point « Comportement par défaut » ci-dessus.
 
 ## Ce qui reste à faire dans ce dépôt
 
@@ -136,15 +155,20 @@ fichier — mais tant qu'elle n'existe pas, un appel ne peut pas aboutir, même 
       README de ce dossier.
 - [x] Politique d'appel pure écrite (`lib/calls/call_policy.dart`) : zéro STUN,
       `iceTransportPolicy: 'relay'` forcé, identifiants dynamiques via `getTurnServer()`.
-- [x] `flutter_webrtc` intégré et écran d'appel (`lib/calls/ui/call_session_screen.dart`) : flux
-      local/distant réels, politique réseau respectée, refus visible et explicite hors mode
-      direct — voir la section ci-dessus pour ce qu'il reste à y brancher.
-- [ ] Brancher la signalisation Matrix VoIP (`m.call.*` / `matrix-dart-sdk` `Voip`) sur
-      `onLocalIceCandidate`/`onLocalOffer`/`setRemoteDescription`/`addRemoteIceCandidate` — sans
-      ça, aucun appel ne peut aboutir entre deux appareils, quel que soit le mode réseau
-- [ ] Ajouter le bouton d'appel dans l'UI des conversations (`rooms_screen.dart`/`ChatScreen`),
-      qui n'existe pas encore — pousse vers `CallSessionScreen` une fois la signalisation branchée
-- [ ] Vérifier par capture réseau (Wireshark/tcpdump) qu'aucun paquet STUN ni IP locale ne fuit
-      réellement avec `flutter_webrtc`, avant de changer `CallPolicy.isAllowed` pour autoriser les
-      appels hors mode direct — non fait, et ne doit pas être présenté comme fait avant de l'être
-      réellement sur un appareil
+- [x] `flutter_webrtc` intégré, écran d'appel réel (flux local/distant, politique réseau
+      respectée, refus visible et explicite hors mode direct).
+- [x] Signalisation Matrix VoIP branchée via `VoIP`/`CallSession` (voir section ci-dessus), pas de
+      réimplémentation à la main de `m.call.*`.
+- [x] Bouton d'appel dans l'UI des conversations.
+- [ ] Appels de groupe (`GroupCallSession`) : non implémentés, `handleNewGroupCall` est un no-op
+      explicite dans `MurmureWebRTCDelegate` — Murmure ne propose aucune action pour en démarrer.
+- [ ] Notification d'appel manqué / sonnerie audible : non implémentées (`handleMissedCall` et
+      `playRingtone`/`stopRingtone` sont des no-op documentés dans `call_manager.dart`).
+- [ ] **Vérifier par capture réseau (Wireshark/tcpdump) qu'aucun paquet STUN ni IP locale ne fuit
+      réellement avec `flutter_webrtc`**, avant de changer `CallPolicy.isAllowed` pour autoriser
+      les appels hors mode direct — non fait, et ne doit pas être présenté comme fait avant de
+      l'être réellement sur un appareil. C'est la seule étape qui sépare encore ce code de
+      « appels activés en mode Tor/proxy », et elle ne peut pas être cochée depuis ce bac à sable.
+- [ ] Test réel sur deux appareils (CI ne construit que l'APK/AAB, elle ne lance pas d'appel) : la
+      signalisation `VoIP`/`CallSession` et l'application de `CallPolicy` n'ont été vérifiées que
+      par la compilation, jamais par un appel effectivement passé entre deux téléphones.

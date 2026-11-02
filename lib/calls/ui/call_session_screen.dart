@@ -1,67 +1,26 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:matrix/matrix.dart';
 
-import '../../network.dart';
-import '../call_policy.dart';
-
-/// Écran d'appel (audio/vidéo). Corrige une proposition reçue pendant le développement de cette
-/// fonctionnalité qui, mal relue, ne pouvait pas fonctionner telle quelle :
+/// Écran d'appel : UI fine au-dessus d'une [CallSession] (`matrix-dart-sdk`), qui possède
+/// elle-même la connexion WebRTC et la signalisation Matrix (`m.call.*`, avec `party_id` et
+/// gestion du « glare » déjà correctement gérées par le SDK).
 ///
-/// - Elle appelait `CallPolicy.isAllowed()` et `CallPolicy.generateSecureRtcConfig()` sans
-///   argument — ces méthodes n'existent pas sous cette forme (la vraie politique,
-///   `lib/calls/call_policy.dart`, exige explicitement un `NetMode` et, pour la config ICE, le
-///   `Client` Matrix nécessaire à `getTurnServer()` — sans ça, aucune garantie fail-closed n'est
-///   réellement appliquée, le code ne compilerait même pas).
-/// - Elle n'ajoutait JAMAIS le flux local (micro/caméra) à la connexion : `_localRenderer` était
-///   initialisé mais jamais nourri, et rien n'était envoyé au correspondant — un appel « muet et
-///   noir » des deux côtés même si tout le reste fonctionnait.
-/// - Elle n'avait aucun gestionnaire `onIceCandidate` : sans échange des candidats ICE (et de
-///   l'offre/réponse SDP) via la signalisation Matrix, deux appareils ne peuvent tout simplement
-///   jamais se connecter entre eux, quelle que soit la qualité du serveur TURN.
-///
-/// LIMITE HONNÊTE — ce qui N'EST PAS encore fait ici, volontairement signalé plutôt que caché :
-/// la signalisation (échange de l'offre/réponse SDP et des candidats ICE via les événements
-/// `m.call.*` de Matrix, voir `docs/CALLS_ARCHITECTURE.md` point 5) n'est PAS branchée. Cet écran
-/// construit correctement la connexion WebRTC locale (flux local envoyé, flux distant affiché,
-/// politique réseau respectée) et expose les callbacks [onLocalIceCandidate]/[onLocalOffer] pour
-/// qu'une future intégration `matrix-dart-sdk` VoIP les transmette au correspondant — mais tant
-/// que rien n'appelle ces callbacks vers un vrai transport, et tant que [remoteDescription]/
-/// [addRemoteIceCandidate] ne sont pas alimentés par ce même transport côté réception, un appel
-/// ne peut pas encore aboutir entre deux appareils réels. Ne pas présenter cet écran comme un
-/// appel fonctionnel de bout en bout avant que cette intégration existe et soit testée.
+/// Remplace une version antérieure de cet écran qui créait sa propre `RTCPeerConnection` à la
+/// main ET une version proposée pendant le développement qui hand-roulait l'envoi des événements
+/// `m.call.*` (avec un bug réel : `type:` jamais précisé sur `sendEvent`, donc des messages de
+/// discussion ordinaires au lieu de vrais événements d'appel — voir
+/// `lib/calls/services/call_manager.dart` pour le détail). Toute l'application de la politique
+/// réseau (zéro STUN, `iceTransportPolicy: relay` forcé, identifiants TURN dynamiques,
+/// fail-closed) vit maintenant dans `MurmureWebRTCDelegate.createPeerConnection` — le seul point
+/// par lequel [CallSession] crée réellement une connexion WebRTC. Cet écran n'a plus besoin de
+/// s'en occuper, et ne pourrait de toute façon pas la contourner : il ne voit que ce que
+/// [CallSession] choisit de lui montrer (flux locaux/distants, état de l'appel).
 class CallSessionScreen extends StatefulWidget {
-  const CallSessionScreen({
-    super.key,
-    required this.client,
-    required this.mode,
-    required this.peerName,
-    required this.isOutgoing,
-    this.onLocalIceCandidate,
-    this.onLocalOffer,
-  });
-
-  /// Client Matrix du compte courant : nécessaire à [CallPolicy.buildIceConfig] pour obtenir des
-  /// identifiants TURN dynamiques (`Client.getTurnServer()`), jamais un secret codé en dur.
-  final Client client;
-
-  /// Mode réseau courant (voir `lib/network.dart`) : l'appel est refusé (voir [CallPolicy]) dès
-  /// que ce n'est pas `NetMode.direct`, tant que la vérification par capture réseau décrite dans
-  /// `docs/CALLS_ARCHITECTURE.md` n'a pas été faite sur ce plugin.
-  final NetMode mode;
-
-  final String peerName;
-  final bool isOutgoing;
-
-  /// Appelé à chaque candidat ICE local généré, à transmettre au correspondant par la
-  /// signalisation Matrix (`m.call.candidates`) — non implémenté dans ce fichier, voir la
-  /// LIMITE HONNÊTE ci-dessus. `null` par défaut : dans ce cas, les candidats sont simplement
-  /// perdus et l'appel ne peut pas aboutir, ce qui est honnête tant que rien ne les transmet.
-  final void Function(RTCIceCandidate candidate)? onLocalIceCandidate;
-
-  /// Appelé une fois l'offre (ou la réponse) SDP locale prête, à transmettre de la même façon
-  /// (`m.call.invite`/`m.call.answer`). Même limite que ci-dessus.
-  final void Function(RTCSessionDescription description)? onLocalOffer;
+  const CallSessionScreen({super.key, required this.session});
+  final CallSession session;
 
   @override
   State<CallSessionScreen> createState() => _CallSessionScreenState();
@@ -70,123 +29,82 @@ class CallSessionScreen extends StatefulWidget {
 class _CallSessionScreenState extends State<CallSessionScreen> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  RTCPeerConnection? _peerConnection;
-  MediaStream? _localStream;
+  WrappedMediaStream? _localFeed;
   bool _isMuted = false;
+  bool _answered = false;
 
-  /// `null` tant que la vérification n'est pas terminée ; ensuite vrai/faux selon
-  /// [CallPolicy.isAllowed]. Distinct de "false" pour ne pas afficher une seconde d'écran d'appel
-  /// vide avant le message de refus.
-  bool? _allowed;
-  String? _setupError;
+  StreamSubscription<WrappedMediaStream>? _addSub;
+  StreamSubscription<WrappedMediaStream>? _removeSub;
 
   @override
   void initState() {
     super.initState();
-    _start();
+    _init();
   }
 
-  Future<void> _start() async {
-    if (!CallPolicy.isAllowed(widget.mode)) {
-      setState(() => _allowed = false);
-      return;
-    }
-    try {
-      await _localRenderer.initialize();
-      await _remoteRenderer.initialize();
+  Future<void> _init() async {
+    await _localRenderer.initialize();
+    await _remoteRenderer.initialize();
 
-      final iceConfig = await CallPolicy.buildIceConfig(client: widget.client, mode: widget.mode);
-      if (iceConfig == null) {
-        // Fail-closed : pas de serveur TURN exploitable (voir CallPolicy.buildIceConfig). On ne
-        // tente pas l'appel avec une configuration ICE incomplète ou sans TURN.
-        setState(() {
-          _allowed = false;
-          _setupError = 'Serveur TURN indisponible — appel impossible dans ce mode réseau.';
-        });
-        return;
+    // `CachedStreamController` rejoue aux nouveaux abonnés les flux déjà présents au moment de
+    // l'abonnement (voir la doc de matrix-dart-sdk) : on ne manque donc pas un flux apparu avant
+    // que cet écran n'existe (cas d'un appel déjà en cours de connexion côté sortant).
+    _addSub = widget.session.onStreamAdd.stream.listen(_attach);
+    _removeSub = widget.session.onStreamRemoved.stream.listen(_detach);
+
+    _answered = widget.session.isOutgoing;
+  }
+
+  void _attach(WrappedMediaStream feed) {
+    if (!mounted) return;
+    setState(() {
+      if (feed.isLocal()) {
+        _localFeed = feed;
+        _localRenderer.srcObject = feed.stream;
+      } else {
+        _remoteRenderer.srcObject = feed.stream;
       }
+    });
+  }
 
-      _peerConnection = await createPeerConnection(iceConfig.toJson());
-
-      _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': true,
-      });
-      for (final track in _localStream!.getTracks()) {
-        await _peerConnection!.addTrack(track, _localStream!);
+  void _detach(WrappedMediaStream feed) {
+    if (!mounted) return;
+    setState(() {
+      if (feed.isLocal()) {
+        if (_localFeed == feed) _localFeed = null;
+        _localRenderer.srcObject = null;
+      } else {
+        _remoteRenderer.srcObject = null;
       }
-      _localRenderer.srcObject = _localStream;
-
-      _peerConnection!.onTrack = (RTCTrackEvent event) {
-        if (event.track.kind == 'video' && event.streams.isNotEmpty) {
-          setState(() => _remoteRenderer.srcObject = event.streams[0]);
-        }
-      };
-
-      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-        widget.onLocalIceCandidate?.call(candidate);
-      };
-
-      if (widget.isOutgoing) {
-        final offer = await _peerConnection!.createOffer();
-        await _peerConnection!.setLocalDescription(offer);
-        widget.onLocalOffer?.call(offer);
-      }
-
-      if (mounted) setState(() => _allowed = true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _allowed = false;
-        _setupError = '$e';
-      });
-    }
+    });
   }
 
-  /// À appeler par la signalisation (une fois branchée, voir la LIMITE HONNÊTE en tête de
-  /// fichier) quand l'offre/réponse du correspondant arrive.
-  Future<void> setRemoteDescription(RTCSessionDescription description) async {
-    await _peerConnection?.setRemoteDescription(description);
-    if (!widget.isOutgoing && description.type == 'offer') {
-      final answer = await _peerConnection!.createAnswer();
-      await _peerConnection!.setLocalDescription(answer);
-      widget.onLocalOffer?.call(answer);
-    }
+  Future<void> _accept() async {
+    setState(() => _answered = true);
+    await widget.session.answer();
   }
 
-  /// À appeler par la signalisation quand un candidat ICE du correspondant arrive.
-  Future<void> addRemoteIceCandidate(RTCIceCandidate candidate) async {
-    await _peerConnection?.addCandidate(candidate);
-  }
-
-  void _toggleMute() {
-    if (_localStream == null) return;
-    setState(() => _isMuted = !_isMuted);
-    for (final track in _localStream!.getAudioTracks()) {
-      track.enabled = !_isMuted;
-    }
-  }
-
-  Future<void> _hangUp() async {
-    await _cleanup();
+  Future<void> _decline() async {
+    await widget.session.reject();
     if (mounted) Navigator.of(context).pop();
   }
 
-  Future<void> _cleanup() async {
-    _localRenderer.srcObject = null;
-    _remoteRenderer.srcObject = null;
-    for (final track in _localStream?.getTracks() ?? const <MediaStreamTrack>[]) {
-      await track.stop();
-    }
-    await _localStream?.dispose();
-    await _peerConnection?.close();
-    _peerConnection = null;
-    _localStream = null;
+  void _toggleMute() {
+    final feed = _localFeed;
+    if (feed == null) return;
+    setState(() => _isMuted = !_isMuted);
+    feed.setAudioMuted(_isMuted);
+  }
+
+  Future<void> _hangUp() async {
+    await widget.session.hangup(reason: CallErrorCode.userHangup);
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
   void dispose() {
-    _cleanup();
+    _addSub?.cancel();
+    _removeSub?.cancel();
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     super.dispose();
@@ -194,31 +112,45 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_allowed == false) {
+    if (!_answered) {
+      // Appel entrant pas encore décroché : écran de sonnerie, pas directement l'écran d'appel —
+      // décrocher automatiquement sans confirmation serait une mauvaise surprise pour
+      // l'utilisateur (micro/caméra activés sans qu'il l'ait voulu).
       return Scaffold(
-        appBar: AppBar(title: const Text('Appel')),
+        backgroundColor: const Color(0xFF17171C),
         body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.phone_disabled, size: 48),
-                const SizedBox(height: 16),
-                Text(
-                  _setupError ??
-                      'Les appels sont désactivés en mode Tor/proxy : le flux audio/vidéo ne '
-                          'peut pas être protégé par ce mode. Voir docs/CALLS_ARCHITECTURE.md.',
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.call, color: Colors.white, size: 48),
+              const SizedBox(height: 16),
+              const Text('Appel entrant…', style: TextStyle(color: Colors.white, fontSize: 20)),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Colors.red,
+                    radius: 32,
+                    child: IconButton(
+                      icon: const Icon(Icons.call_end, color: Colors.white, size: 28),
+                      onPressed: _decline,
+                    ),
+                  ),
+                  CircleAvatar(
+                    backgroundColor: Colors.green,
+                    radius: 32,
+                    child: IconButton(
+                      icon: const Icon(Icons.call, color: Colors.white, size: 28),
+                      onPressed: _accept,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       );
-    }
-    if (_allowed != true) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     return Scaffold(
       backgroundColor: const Color(0xFF17171C),
@@ -236,11 +168,6 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
               borderRadius: BorderRadius.circular(12),
               child: RTCVideoView(_localRenderer, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
             ),
-          ),
-          Positioned(
-            top: 48,
-            left: 24,
-            child: Text(widget.peerName, style: const TextStyle(color: Colors.white, fontSize: 18)),
           ),
           Positioned(
             bottom: 48,

@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import '../calls/call_policy.dart';
+import '../calls/services/call_manager.dart';
+import '../network.dart';
 import '../stealth.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
@@ -13,8 +16,9 @@ import 'qr_screens.dart';
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
 class RoomsScreen extends StatelessWidget {
-  const RoomsScreen({super.key, required this.client});
+  const RoomsScreen({super.key, required this.client, required this.callManager});
   final Client client;
+  final CallManager callManager;
 
   @override
   Widget build(BuildContext context) {
@@ -88,8 +92,9 @@ class RoomsScreen extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                onTap: () => Navigator.of(context)
-                    .push(MaterialPageRoute(builder: (_) => ChatScreen(room: room))),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => ChatScreen(room: room, callManager: callManager),
+                )),
               );
             },
           );
@@ -126,14 +131,16 @@ class RoomsScreen extends StatelessWidget {
     if (choice == null || !context.mounted) return;
     switch (choice) {
       case _NewConversationKind.contact:
-        Navigator.of(context)
-            .push(MaterialPageRoute(builder: (_) => AddContactScreen(client: client)));
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => AddContactScreen(client: client, callManager: callManager),
+        ));
       case _NewConversationKind.group:
         final room = await Navigator.of(context)
             .push<Room>(MaterialPageRoute(builder: (_) => NewGroupScreen(client: client)));
         if (room != null && context.mounted) {
-          Navigator.of(context)
-              .push(MaterialPageRoute(builder: (_) => ChatScreen(room: room)));
+          Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => ChatScreen(room: room, callManager: callManager),
+          ));
         }
     }
   }
@@ -144,8 +151,9 @@ enum _NewConversationKind { contact, group }
 /// Ajout d'un contact par identifiant Matrix (collé ou scanné par QR) ; ouvre ou crée la
 /// conversation directe chiffrée (Megolm) avec lui.
 class AddContactScreen extends StatefulWidget {
-  const AddContactScreen({super.key, required this.client});
+  const AddContactScreen({super.key, required this.client, required this.callManager});
   final Client client;
+  final CallManager callManager;
 
   @override
   State<AddContactScreen> createState() => _AddContactScreenState();
@@ -174,7 +182,9 @@ class _AddContactScreenState extends State<AddContactScreen> {
       final room = widget.client.getRoomById(roomId);
       if (room == null) throw Exception('Conversation introuvable après création');
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(room: room)));
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => ChatScreen(room: room, callManager: widget.callManager),
+      ));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -231,8 +241,9 @@ class _AddContactScreenState extends State<AddContactScreen> {
 
 /// Conversation chiffrée (Olm/Megolm via vodozemac, géré en interne par le SDK Matrix).
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.room});
+  const ChatScreen({super.key, required this.room, required this.callManager});
   final Room room;
+  final CallManager callManager;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -252,6 +263,37 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Lance un appel audio. Vérifie la politique réseau ICI, de façon à afficher un message
+  /// explicite (voir docs/CALLS_ARCHITECTURE.md, « Comportement par défaut ») plutôt que de
+  /// laisser l'utilisateur appuyer sur un bouton qui échoue silencieusement — même si, de toute
+  /// façon, `CallManager.startCall` et `MurmureWebRTCDelegate.createPeerConnection` referont
+  /// chacun cette vérification et refuseraient l'appel à leur tour (fail-closed en profondeur,
+  /// pas seulement ici).
+  Future<void> _call() async {
+    final net = await NetConfig.load();
+    if (!CallPolicy.isAllowed(net.mode)) {
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Appel désactivé'),
+          content: const Text(
+            'Les appels audio/vidéo sont désactivés en mode Tor/proxy : le flux audio/vidéo ne '
+            'peut pas être protégé par ce mode. Voir docs/CALLS_ARCHITECTURE.md.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK')),
+          ],
+        ),
+      );
+      return;
+    }
+    await widget.callManager.startCall(widget.room, type: CallType.kVoice);
+    // La navigation vers CallSessionScreen est faite par MurmureWebRTCDelegate.handleNewCall
+    // (voir lib/calls/services/call_manager.dart), pas ici : c'est le même chemin que pour un
+    // appel entrant, donc un seul endroit à maintenir pour l'UI d'appel.
+  }
+
   Future<void> _send() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
@@ -263,7 +305,16 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     final events = _timeline?.events.where((e) => e.type == EventTypes.Message).toList() ?? [];
     return Scaffold(
-      appBar: AppBar(title: Text(widget.room.getLocalizedDisplayname())),
+      appBar: AppBar(
+        title: Text(widget.room.getLocalizedDisplayname()),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.call),
+            tooltip: 'Appeler',
+            onPressed: _call,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(

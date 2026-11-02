@@ -2,12 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import 'account.dart';
+import 'calls/services/call_manager.dart';
+import 'calls/ui/call_session_screen.dart';
 import 'media.dart';
 import 'network.dart';
 import 'ui/lock_screens.dart';
 import 'ui/onboarding_screen.dart';
 import 'ui/rooms_screen.dart';
 import 'ui/theme.dart';
+
+/// Permet à [MurmureWebRTCDelegate] (construit avant tout arbre de widgets, voir
+/// `lib/calls/services/call_manager.dart`) de naviguer vers l'écran d'appel à la réception d'un
+/// appel, sans avoir à transporter un `BuildContext` jusque-là.
+final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,6 +33,7 @@ class MurmureApp extends StatefulWidget {
 
 class _MurmureAppState extends State<MurmureApp> {
   Client? _client;
+  CallManager? _callManager;
   bool _booting = true;
   String? _bootError;
 
@@ -55,9 +63,18 @@ class _MurmureAppState extends State<MurmureApp> {
         httpClient: await net.httpClient(),
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
+
+      // Appels (voir lib/calls/) : construit une seule fois, aux côtés du client Matrix. Le
+      // delegate navigue vers CallSessionScreen via murmureNavigatorKey (pas de BuildContext
+      // disponible ici) dès qu'un appel — sortant ou entrant — est prêt côté WebRTC.
+      final callManager = CallManager(client: client);
+      callManager.delegate.navigatorKey = murmureNavigatorKey;
+      callManager.delegate.buildCallScreen = (session) => CallSessionScreen(session: session);
+
       if (!mounted) return;
       setState(() {
         _client = client;
+        _callManager = callManager;
         _booting = false;
       });
     } catch (e) {
@@ -76,6 +93,7 @@ class _MurmureAppState extends State<MurmureApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: murmureNavigatorKey,
       title: 'Murmure',
       debugShowCheckedModeBanner: false,
       theme: murmureTheme(brightness: Brightness.light),
@@ -93,22 +111,23 @@ class _MurmureAppState extends State<MurmureApp> {
                 })
               : LockGate(
                   onWiped: _panic,
-                  child: _Home(client: _client!),
+                  child: _Home(client: _client!, callManager: _callManager!),
                 ),
     );
   }
 }
 
 class _Home extends StatelessWidget {
-  const _Home({required this.client});
+  const _Home({required this.client, required this.callManager});
   final Client client;
+  final CallManager callManager;
 
   @override
   Widget build(BuildContext context) {
     if (!client.isLogged()) {
       return OnboardingScreen(client: client);
     }
-    return RoomsScreen(client: client);
+    return RoomsScreen(client: client, callManager: callManager);
   }
 }
 
