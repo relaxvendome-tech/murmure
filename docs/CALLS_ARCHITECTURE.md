@@ -173,6 +173,20 @@ Architecture retenue (voir `lib/calls/services/call_manager.dart` et
       signalisation `VoIP`/`CallSession` et l'application de `CallPolicy` n'ont été vérifiées que
       par la compilation, jamais par un appel effectivement passé entre deux téléphones.
 
+## Correctif d'audit (relecture à froid, pas une proposition reçue) : verrou `canHandleNewCall` bloqué
+
+En relisant `MurmureWebRTCDelegate` à froid : `_active` était fixé AVANT l'appel à
+`createPeerConnection`, aussi bien pour un appel entrant (`handleNewCall`) que sortant
+(`CallManager.startCall`). Si `createPeerConnection` refuse l'appel (fail-closed, mode Tor/proxy,
+voir `CallBlockedException`), rien ne garantissait que le SDK appelle ensuite `handleCallEnded`
+ou `handleMissedCall` pour nettoyer — `_active` pouvait donc rester bloqué sur cette session en
+échec indéfiniment, et `canHandleNewCall` rester `false` pour le reste de la session de l'appli :
+**un seul appel refusé aurait alors silencieusement bloqué tous les appels suivants, y compris
+légitimes en mode direct**, jusqu'au redémarrage de l'appli. Corrigé par un verrou de sûreté
+supplémentaire (`MurmureWebRTCDelegate._watchActive`) qui observe directement
+`CallSession.onCallStateChanged` dès que la session devient « active » et libère `_active` sur
+`CallState.kEnded`, indépendamment de ce que fait le reste du SDK.
+
 ## Script d'audit réseau (`scripts/audit/capture_call_leaks.sh`)
 
 Script manuel (à exécuter par vous, sur un vrai appareil — personne ne peut le faire depuis un

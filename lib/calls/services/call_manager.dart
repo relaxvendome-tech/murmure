@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:matrix/matrix.dart';
@@ -54,9 +56,30 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   Widget Function(CallSession session)? buildCallScreen;
 
   CallSession? _active;
+  StreamSubscription<CallState>? _activeStateSub;
 
   @override
   bool get canHandleNewCall => _active == null;
+
+  /// Verrou de sûreté, en plus de [handleCallEnded]/[handleMissedCall] : si
+  /// [createPeerConnection] refuse l'appel (fail-closed, voir [CallBlockedException]) AVANT que
+  /// le SDK n'ait eu l'occasion d'appeler l'un de ces deux callbacks pour nettoyer, [_active]
+  /// resterait sinon bloqué sur cette session en échec — et [canHandleNewCall] resterait `false`
+  /// pour le reste de la session de l'appli, bloquant silencieusement TOUS les appels suivants
+  /// (y compris légitimes, en mode direct) après le premier appel refusé. On observe donc
+  /// directement l'état de la session dès qu'elle devient "active" ici, et on libère [_active]
+  /// dès `CallState.kEnded`, quoi qu'il arrive par ailleurs côté SDK.
+  void _watchActive(CallSession session) {
+    _active = session;
+    _activeStateSub?.cancel();
+    _activeStateSub = session.onCallStateChanged.stream.listen((state) {
+      if (state == CallState.kEnded && _active == session) {
+        _active = null;
+        _activeStateSub?.cancel();
+        _activeStateSub = null;
+      }
+    });
+  }
 
   @override
   bool get isWeb => false;
@@ -97,7 +120,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   @override
   Future<void> handleNewCall(CallSession session) async {
-    _active = session;
+    _watchActive(session);
     final builder = buildCallScreen;
     if (builder == null) return;
     navigatorKey?.currentState?.push(MaterialPageRoute(builder: (_) => builder(session)));
@@ -105,14 +128,24 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   @override
   Future<void> handleCallEnded(CallSession session) async {
-    if (_active == session) _active = null;
+    if (_active == session) {
+      _active = null;
+      _activeStateSub?.cancel();
+      _activeStateSub = null;
+    }
   }
 
   @override
   Future<void> handleMissedCall(CallSession session) async {
-    if (_active == session) _active = null;
-    // Pas de notification d'appel manqué dans cette passe (hors scope, voir
-    // docs/CALLS_ARCHITECTURE.md) : l'utilisateur voit seulement l'historique de la conversation.
+    if (_active == session) {
+      _active = null;
+      _activeStateSub?.cancel();
+      _activeStateSub = null;
+    }
+    // La notification d'appel manqué elle-même (camouflée en mode discret) est déclenchée depuis
+    // CallSessionScreen, qui observe aussi CallState.kEnded sur un appel entrant jamais décroché
+    // (voir lib/calls/ui/call_session_screen.dart et call_opsec_notifier.dart) — ce handler-ci ne
+    // sert qu'à libérer le verrou canHandleNewCall, pas à dupliquer cette notification.
   }
 
   @override
@@ -154,7 +187,7 @@ class CallManager {
     final net = await NetConfig.load();
     if (!CallPolicy.isAllowed(net.mode)) return null;
     final session = await voip.inviteToCall(room, type);
-    delegate._active = session;
+    delegate._watchActive(session);
     return session;
   }
 }
