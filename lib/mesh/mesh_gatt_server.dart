@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -11,8 +10,6 @@ import 'package:flutter/services.dart';
 class MeshGattServerBridge {
   static const _method = MethodChannel('fr.lansight.murmure/mesh_gatt');
   static const _incoming = EventChannel('fr.lansight.murmure/mesh_gatt_incoming');
-
-  static StreamSubscription<dynamic>? _sub;
 
   /// Démarre l'annonce BLE et le serveur GATT natif. Ne lève jamais : sur une plateforme sans ce
   /// canal, ou si le Bluetooth est indisponible/désactivé sur l'appareil, le rôle périphérique est
