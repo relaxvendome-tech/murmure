@@ -42,6 +42,30 @@ services:
     depends_on: [conduit]
     networks: [murmure]
 
+  # Serveur TURN (relais média des appels, voir docs/CALLS_ARCHITECTURE.md). Facultatif : à ne
+  # démarrer que si vous avez lu scripts/server/coturn/README.md, en particulier le conflit avec
+  # Caddy sur le port 443 (coturn écoute 5349 par défaut dans ce dépôt, voir ce README pour
+  # pourquoi et les options si vous voulez malgré tout du 443).
+  #
+  # `network_mode: host` plutôt qu'un réseau Docker : coturn annonce aux appelants l'adresse IP à
+  # laquelle les joindre pour le relais, et le NAT du réseau "murmure" ci-dessus la fausserait
+  # (les candidats ICE pointeraient vers une IP interne au conteneur, injoignable depuis
+  # l'extérieur) — c'est un besoin documenté de coturn, pas une négligence de ce fichier. Ouvrez en
+  # conséquence tls-listening-port (5349) et la plage min-port..max-port du fichier de
+  # configuration dans le pare-feu de la machine elle-même (plus de mapping de ports Docker ici).
+    # Épinglé pour la même raison que l'image Conduit ci-dessus (reproductibilité/audit) — mais
+    # VÉRIFIEZ ce numéro avant de déployer, je ne l'ai pas tiré moi-même dans ce bac à sable :
+    #   docker pull coturn/coturn:4.18.0-alpine
+    #   docker inspect --format '{{index .RepoDigests 0}}' coturn/coturn:4.18.0-alpine
+  coturn:
+    image: coturn/coturn:4.18.0-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
 networks:
   murmure:
 

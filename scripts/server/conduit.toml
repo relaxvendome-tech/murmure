@@ -22,8 +22,31 @@ allow_room_creation = true
 allow_unstable_room_versions = false
 trusted_servers = []
 
+# Relais TURN pour les appels (voir docs/CALLS_ARCHITECTURE.md et scripts/server/coturn/). Conduit
+# distribue ces identifiants au client via GET /_matrix/client/v3/voip/turnServer (appelé par
+# matrix-dart-sdk : Client.getTurnServer()) — le secret ci-dessous ne part JAMAIS vers le client,
+# seuls des identifiants dérivés et temporaires (valables turn_ttl secondes) lui sont envoyés.
+# `turn_secret` DOIT être exactement la même valeur que `static-auth-secret` dans
+# coturn/turnserver.conf (use-auth-secret), sinon coturn rejettera les identifiants émis par Conduit.
+# IMPORTANT : ces clés doivent rester dans la table [global] — c'est pourquoi elles sont placées
+# ICI, avant [global.well_known], et non après : une fois un sous-tableau TOML ouvert (comme
+# [global.well_known] ci-dessous), toute clé = valeur qui suit sans nouvel en-tête de table
+# appartient à CE sous-tableau, pas à [global]. Une version antérieure de ce fichier plaçait déjà
+# `log = "warn"` après [global.well_known] pour cette raison — probablement sans effet (clé
+# inconnue silencieusement ignorée dans la table well_known) plutôt qu'une vraie désactivation des
+# logs ; c'est corrigé ci-dessous en même temps que l'ajout du TURN.
+turn_uris = ["turns:CHANGEME.exemple.fr:5349?transport=tcp"]
+turn_secret = "CHANGEME_meme_secret_que_turn_secret_dans_conduit_toml"
+
+# Durée de vie courte des identifiants délivrés (secondes) : 1h, pas les 24h habituelles par
+# défaut de coturn — cohérent avec le principe « identifiants de courte durée » déjà retenu pour
+# le reste de l'authentification de ce projet (voir ADMIN_KEY.md). Un identifiant qui fuit (log,
+# capture réseau côté client) ne reste exploitable qu'une heure au plus.
+turn_ttl = 3600
+
+# Logs minimaux (voir note ci-dessus : remonté ici pour rester dans la table [global]).
+log = "warn"
+
 [global.well_known]
 # Laisser vide : l'adresse du serveur est configurée directement dans l'appli (NetConfig), jamais
 # déduite automatiquement d'un domaine tiers.
-
-log = "warn"

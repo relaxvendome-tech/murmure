@@ -90,12 +90,41 @@ Au moment d'implémenter, vérifier dans cet ordre, pour chaque plugin Flutter W
 - [ ] Permet-il de router ses propres connexions via un proxy SOCKS5, ou documente-t-il clairement
       qu'il ne le permet pas (dans ce cas, avertissement utilisateur obligatoire, voir point 4) ?
 
+## Décisions prises depuis la première version de ce document
+
+- **Port TURNS : 5349, pas 443.** Caddy occupe déjà le port 443 pour Conduit ; démultiplexer les
+  deux services sur le même port (par SNI) est possible en théorie mais n'a pas été vérifié dans
+  ce dépôt. Voir `scripts/server/coturn/README.md` pour le détail de cet arbitrage et comment le
+  revoir si un déploiement a un besoin impératif du 443.
+- **Identifiants TURN dynamiques confirmés disponibles** : `matrix-dart-sdk`'s
+  `Client.getTurnServer()` existe et retourne un `TurnServerCredentials` (`uris`, `username`,
+  `password`, `ttl`) via `GET /_matrix/client/v3/voip/turnServer` — c'est le mécanisme standard
+  Matrix, pas une supposition. Conduit le sert à partir de `turn_uris`/`turn_secret`/`turn_ttl`
+  dans `conduit.toml` (ajoutés, voir ce fichier) sans jamais exposer `turn_secret` au client.
+- **`lib/calls/call_policy.dart` écrit** : construit la configuration ICE (zéro STUN,
+  `iceTransportPolicy: 'relay'` forcé, identifiants TURN récupérés via `getTurnServer()`, jamais
+  codés en dur) et expose `CallPolicy.isAllowed(mode)`. **Reste volontairement à `false` pour
+  `NetMode.tor`/`NetMode.customProxy`** : cette politique ICE est prête côté configuration, mais
+  aucune vérification par capture réseau (voir checklist ci-dessus) n'a encore été faite sur un
+  plugin WebRTC réel — la politique seule ne suffit pas à activer les appels en toute confiance.
+
 ## Ce qui reste à faire dans ce dépôt
 
-- [ ] Choisir et vérifier le plugin WebRTC (voir checklist ci-dessus)
-- [ ] Déployer un serveur coturn (voir `scripts/server/`, à étendre) avec TLS sur 443 et
-      identifiants de courte durée partagés avec Conduit
-- [ ] Implémenter l'appel (UI, intégration `matrix-dart-sdk` VoIP) avec `iceTransportPolicy:
-      'relay'` forcé dès que `NetConfig.mode != NetMode.direct`
-- [ ] Désactiver visiblement le bouton d'appel en mode Tor/proxy jusqu'à ce que tout ce qui précède
-      soit vérifié en conditions réelles (pas seulement en théorie)
+- [ ] Choisir et vérifier le plugin WebRTC (voir checklist ci-dessus) — `flutter_webrtc` n'est pas
+      une dépendance de ce projet pour l'instant, par choix délibéré (éviter d'ajouter une grosse
+      dépendance native non vérifiée avant que le reste de l'architecture soit validé)
+- [x] Déployer un serveur coturn — config fournie dans `scripts/server/coturn/`, port 5349,
+      identifiants de courte durée partagés avec Conduit via `turn_secret`. Reste à vérifier en
+      conditions réelles (certificat, pare-feu, tag d'image) avant un vrai déploiement, voir le
+      README de ce dossier.
+- [x] Politique d'appel pure écrite (`lib/calls/call_policy.dart`) : zéro STUN,
+      `iceTransportPolicy: 'relay'` forcé, identifiants dynamiques via `getTurnServer()`.
+- [ ] Intégrer un plugin WebRTC réel et l'UI d'appel (bouton, écran d'appel, signalisation
+      `matrix-dart-sdk` VoIP branchée sur `CallPolicy`) — non fait dans cette passe, délibérément,
+      voir `lib/calls/call_policy.dart`
+- [ ] Vérifier par capture réseau (Wireshark/tcpdump) qu'aucun paquet STUN ni IP locale ne fuit
+      réellement avec le plugin choisi, avant de changer `CallPolicy.isAllowed` pour autoriser les
+      appels hors mode direct
+- [ ] Désactiver visiblement le bouton d'appel en mode Tor/proxy dans l'UI (actuellement il n'y a
+      pas encore de bouton d'appel du tout dans ce dépôt) tant que le point précédent n'est pas
+      vérifié
