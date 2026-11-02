@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:matrix/matrix.dart';
+// Type attendu par `WebRTCDelegate.mediaDevices` (matrix-dart-sdk) : celui de la couche
+// d'abstraction `webrtc_interface`, PAS le `MediaDevices` propre à `flutter_webrtc` lui-même
+// (deux classes distinctes pour l'analyseur Dart, même si `flutter_webrtc` implémente et
+// renvoie bien, à l'exécution, une instance compatible avec celle-ci).
+import 'package:webrtc_interface/webrtc_interface.dart' show MediaDevices;
 
 import '../../network.dart';
 import '../call_policy.dart';

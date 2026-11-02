@@ -33,6 +33,11 @@ dependencies:
   # ne protège que le trafic HTTP (voir docs/CALLS_ARCHITECTURE.md). Version non vérifiée par un
   # `flutter pub get` dans ce bac à sable — à confirmer par la CI de ce commit.
   flutter_webrtc: ^1.6.3
+  # Déjà utilisé en transitif par flutter_webrtc (couche d'abstraction commune à ses
+  # implémentations par plateforme) et par matrix-dart-sdk (type de retour de
+  # WebRTCDelegate.mediaDevices) : déclaré en direct pour la même raison que `http` ci-dessus —
+  # lib/calls/services/call_manager.dart importe directement son type MediaDevices.
+  webrtc_interface: ^1.5.1
 
 dev_dependencies:
   flutter_test:
