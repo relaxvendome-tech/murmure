@@ -79,6 +79,35 @@ class Mesh {
   int _rotateIndex = 0;
   bool _running = false;
 
+  /// File d'attente FIFO : sérialise tout ce qui touche à l'état du cliquet (table `ratchet_chain`
+  /// / `ratchet_skipped`) et à la déduplication (`seen`), pour [_handleIncoming] et [queueMessage].
+  ///
+  /// Trouvé en audit interne : [_onScanResults] lance volontairement [_tryExchange] EN PARALLÈLE
+  /// (`unawaited`) pour chaque appareil Murmure à portée — exactement le comportement voulu pour
+  /// atteindre le plus de pairs possible par cycle de scan. Mais le même envoi (même expéditeur,
+  /// même rang de cliquet) relayé par deux chemins et arrivant quasi simultanément via deux de ces
+  /// appels concurrents à [_handleIncoming] (ou un appel réception + un appel écriture GATT
+  /// entrante en même temps) crée une véritable course : la vérification « déjà vu » (`seen`) lit
+  /// puis écrit en deux opérations séparées, et l'avancement du cliquet de réception lit puis
+  /// écrit lui aussi en deux temps — sans sérialisation, deux appels concurrents pour la même
+  /// enveloppe peuvent tous les deux franchir la vérification « pas encore vu » avant que l'un des
+  /// deux n'écrive, consommer deux fois le même rang de cliquet, et perdre un message au passage
+  /// (celui dont le rang se retrouve déjà consommé à son tour). Dans un maillage dense (plusieurs
+  /// téléphones Murmure à portée en même temps, le scénario même visé par cette fonctionnalité en
+  /// manifestation), cette situation n'est pas un cas rare provoqué par un attaquant : c'est une
+  /// conséquence directe et prévisible de la diffusion redondante par plusieurs chemins qui fait
+  /// tout l'intérêt du store-and-forward. Aucune fuite de clé ou de contenu vers un tiers n'en
+  /// découle (l'enveloppe reste authentifiée par AES-GCM), seulement une perte de fiabilité. Fixé
+  /// en sérialisant toutes les opérations qui touchent cet état partagé : le coût (BLE est de
+  /// toute façon le goulot d'étranglement, pas le calcul cryptographique local) est négligeable.
+  Future<void> _mutex = Future.value();
+
+  Future<T> _serialized<T>(Future<T> Function() op) {
+    final result = _mutex.then((_) => op());
+    _mutex = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
   final _eventsController = StreamController<MeshEvent>.broadcast();
   Stream<MeshEvent> get events => _eventsController.stream;
 
@@ -264,7 +293,9 @@ class Mesh {
     }
   }
 
-  Future<void> _handleIncoming(MeshEnvelope env) async {
+  Future<void> _handleIncoming(MeshEnvelope env) => _serialized(() => _handleIncomingLocked(env));
+
+  Future<void> _handleIncomingLocked(MeshEnvelope env) async {
     final db = await _database();
     final already = await db.query('seen', where: 'id = ?', whereArgs: [env.id], limit: 1);
     if (already.isNotEmpty) return;
@@ -302,7 +333,10 @@ class Mesh {
   }
 
   /// Met un message en file pour un contact, à relayer dès qu'un appareil Murmure est croisé.
-  Future<void> queueMessage({required Uint8List recipientPublicKey, required String text}) async {
+  Future<void> queueMessage({required Uint8List recipientPublicKey, required String text}) =>
+      _serialized(() => _queueMessageLocked(recipientPublicKey: recipientPublicKey, text: text));
+
+  Future<void> _queueMessageLocked({required Uint8List recipientPublicKey, required String text}) async {
     final me = await identity();
     final next = await _nextSendKey(recipientPublicKey);
     final env = await meshEncryptWithKey(
