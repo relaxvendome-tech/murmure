@@ -108,23 +108,43 @@ Au moment d'implémenter, vérifier dans cet ordre, pour chaque plugin Flutter W
   aucune vérification par capture réseau (voir checklist ci-dessus) n'a encore été faite sur un
   plugin WebRTC réel — la politique seule ne suffit pas à activer les appels en toute confiance.
 
+## `flutter_webrtc` et l'écran d'appel : ce qui est fait, ce qui ne l'est pas
+
+`lib/calls/ui/call_session_screen.dart` intègre maintenant `flutter_webrtc` : flux local
+(micro/caméra) réellement capté et envoyé (`getUserMedia` + `addTrack`), flux distant affiché
+(`onTrack`), configuration ICE construite par `CallPolicy.buildIceConfig` (zéro STUN, `relay`
+forcé, identifiants TURN dynamiques), et l'appel refusé avec un message explicite dès que
+`CallPolicy.isAllowed(mode)` est faux — conformément au point « Comportement par défaut »
+ci-dessus. Une proposition reçue pendant le développement de cet écran appelait des méthodes
+(`CallPolicy.isAllowed()` sans argument, `CallPolicy.generateSecureRtcConfig()`) qui n'existaient
+pas et n'ajoutait jamais le flux local à la connexion — corrigé.
+
+**Ce qui MANQUE encore, et qui empêche un appel réel entre deux appareils** : la signalisation.
+`createOffer`/`createAnswer`/les candidats ICE locaux sont bien générés, mais rien dans ce dépôt
+ne les transmet au correspondant — il n'y a pas encore d'intégration avec les événements VoIP de
+Matrix (`m.call.invite`, `m.call.candidates`, `m.call.answer`, `m.call.hangup`) ni avec le module
+`Voip` de `matrix-dart-sdk`. L'écran expose `onLocalIceCandidate`/`onLocalOffer` (à appeler vers
+ce transport) et `setRemoteDescription`/`addRemoteIceCandidate` (à alimenter depuis ce même
+transport) précisément pour que cette intégration vienne s'y brancher sans retoucher le reste du
+fichier — mais tant qu'elle n'existe pas, un appel ne peut pas aboutir, même en mode direct.
+
 ## Ce qui reste à faire dans ce dépôt
 
-- [ ] Choisir et vérifier le plugin WebRTC (voir checklist ci-dessus) — `flutter_webrtc` n'est pas
-      une dépendance de ce projet pour l'instant, par choix délibéré (éviter d'ajouter une grosse
-      dépendance native non vérifiée avant que le reste de l'architecture soit validé)
 - [x] Déployer un serveur coturn — config fournie dans `scripts/server/coturn/`, port 5349,
       identifiants de courte durée partagés avec Conduit via `turn_secret`. Reste à vérifier en
       conditions réelles (certificat, pare-feu, tag d'image) avant un vrai déploiement, voir le
       README de ce dossier.
 - [x] Politique d'appel pure écrite (`lib/calls/call_policy.dart`) : zéro STUN,
       `iceTransportPolicy: 'relay'` forcé, identifiants dynamiques via `getTurnServer()`.
-- [ ] Intégrer un plugin WebRTC réel et l'UI d'appel (bouton, écran d'appel, signalisation
-      `matrix-dart-sdk` VoIP branchée sur `CallPolicy`) — non fait dans cette passe, délibérément,
-      voir `lib/calls/call_policy.dart`
+- [x] `flutter_webrtc` intégré et écran d'appel (`lib/calls/ui/call_session_screen.dart`) : flux
+      local/distant réels, politique réseau respectée, refus visible et explicite hors mode
+      direct — voir la section ci-dessus pour ce qu'il reste à y brancher.
+- [ ] Brancher la signalisation Matrix VoIP (`m.call.*` / `matrix-dart-sdk` `Voip`) sur
+      `onLocalIceCandidate`/`onLocalOffer`/`setRemoteDescription`/`addRemoteIceCandidate` — sans
+      ça, aucun appel ne peut aboutir entre deux appareils, quel que soit le mode réseau
+- [ ] Ajouter le bouton d'appel dans l'UI des conversations (`rooms_screen.dart`/`ChatScreen`),
+      qui n'existe pas encore — pousse vers `CallSessionScreen` une fois la signalisation branchée
 - [ ] Vérifier par capture réseau (Wireshark/tcpdump) qu'aucun paquet STUN ni IP locale ne fuit
-      réellement avec le plugin choisi, avant de changer `CallPolicy.isAllowed` pour autoriser les
-      appels hors mode direct
-- [ ] Désactiver visiblement le bouton d'appel en mode Tor/proxy dans l'UI (actuellement il n'y a
-      pas encore de bouton d'appel du tout dans ce dépôt) tant que le point précédent n'est pas
-      vérifié
+      réellement avec `flutter_webrtc`, avant de changer `CallPolicy.isAllowed` pour autoriser les
+      appels hors mode direct — non fait, et ne doit pas être présenté comme fait avant de l'être
+      réellement sur un appareil

@@ -19,9 +19,19 @@
         android:maxSdkVersion="30" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
-    <!-- Caméra : lecture de QR codes pour ajouter un contact (jamais d'enregistrement). -->
+    <!-- Caméra : lecture de QR codes pour ajouter un contact (jamais d'enregistrement), ET flux
+         vidéo d'appel (voir lib/calls/). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Appels audio/vidéo (voir lib/calls/ et docs/CALLS_ARCHITECTURE.md). Pas de permission
+         distincte pour les données WebRTC elles-mêmes : contrairement à ce qu'une note reçue
+         pendant le développement suggérait, `android:allowBackup="false"` (déjà réglé ci-dessous,
+         au niveau <application>) couvre déjà TOUTES les données de l'appli, y compris tout cache
+         créé par le plugin d'appel — il n'existe pas de drapeau "allowBackup" séparé par
+         fonctionnalité ou par bibliothèque en Android. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
         android:label="Murmure"

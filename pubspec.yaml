@@ -27,6 +27,12 @@ dependencies:
   # déclaré en direct : on le fixe explicitement puisqu'on en étend l'usage (SOCKS5 réel) et qu'on
   # ne veut pas dépendre silencieusement d'une version choisie par un autre paquet.
   http: ^1.2.0
+  # Appels (voir lib/calls/ et docs/CALLS_ARCHITECTURE.md) : gère ses propres sockets natifs, EN
+  # DEHORS du http.Client de network.dart — c'est précisément pour ça que CallPolicy impose
+  # iceTransportPolicy 'relay' et zéro STUN plutôt que de compter sur le correctif Tor/SOCKS5, qui
+  # ne protège que le trafic HTTP (voir docs/CALLS_ARCHITECTURE.md). Version non vérifiée par un
+  # `flutter pub get` dans ce bac à sable — à confirmer par la CI de ce commit.
+  flutter_webrtc: ^1.6.3
 
 dev_dependencies:
   flutter_test:
