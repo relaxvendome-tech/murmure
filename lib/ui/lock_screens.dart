@@ -309,11 +309,17 @@ class _Key extends StatelessWidget {
 /// Réglages du verrou : activer/désactiver le code, définir un code de contrainte, et basculer
 /// le « mode discret » (apparence calculatrice sur l'icône et l'écran de verrou).
 class LockSettingsScreen extends StatefulWidget {
-  const LockSettingsScreen({super.key, required this.onToggleCalcMode});
+  const LockSettingsScreen({super.key, required this.onToggleCalcMode, this.onDeleteAccount});
 
   /// Appelé après le changement du réglage, avec la nouvelle valeur — pour que l'appelant
   /// bascule l'icône de lancement via le MethodChannel natif (voir MainActivity.kt).
   final Future<void> Function(bool enabled) onToggleCalcMode;
+
+  /// Supprime le compte sur le serveur puis efface tout du téléphone (voir
+  /// [Account.deleteEverything]). Null si aucun compte n'est connecté (ne devrait pas arriver
+  /// depuis RoomsScreen, mais LockSettingsScreen reste utilisable sans compte Matrix, en mode
+  /// Bluetooth seul).
+  final Future<void> Function()? onDeleteAccount;
 
   @override
   State<LockSettingsScreen> createState() => _LockSettingsScreenState();
@@ -398,8 +404,56 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
               },
             ),
           ],
+          if (widget.onDeleteAccount != null) ...[
+            const Divider(height: 32),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text('Zone dangereuse',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleSmall
+                      ?.copyWith(color: Theme.of(context).colorScheme.error)),
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_forever, color: Theme.of(context).colorScheme.error),
+              title: Text('Supprimer mon compte',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              subtitle: const Text(
+                  'Supprime le compte sur le serveur et efface tout de ce téléphone. Irréversible.'),
+              onTap: () => _confirmDeleteAccount(context),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Future<void> _confirmDeleteAccount(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Supprimer définitivement ce compte ?'),
+        content: const Text(
+          'Votre compte sera supprimé du serveur et toutes les données locales (messages, clés, '
+          'contacts) seront effacées de ce téléphone. Cette action est irréversible.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await widget.onDeleteAccount?.call();
+    }
   }
 }

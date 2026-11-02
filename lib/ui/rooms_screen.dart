@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import '../stealth.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
 import 'qr_screens.dart';
@@ -39,7 +42,17 @@ class RoomsScreen extends StatelessWidget {
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Réglages',
             onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-              builder: (_) => LockSettingsScreen(onToggleCalcMode: (_) async {}),
+              builder: (_) => LockSettingsScreen(
+                onToggleCalcMode: Stealth.setStealth,
+                // Comme pour l'effacement d'urgence (Account.panic), on ferme l'appli juste
+                // après : plus simple et plus sûr que de reconstruire l'état en mémoire d'un
+                // client Matrix dont la base locale vient d'être supprimée sous ses pieds.
+                // Au prochain lancement, l'appli redémarre comme neuve (écran d'onboarding).
+                onDeleteAccount: () async {
+                  await Account.deleteEverything(client);
+                  exit(0);
+                },
+              ),
             )),
           ),
         ],
