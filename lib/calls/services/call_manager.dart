@@ -59,8 +59,13 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   @override
   EncryptionKeyProvider? get keyProvider => null;
 
+  // Type de retour délibérément non préfixé par `webrtc.` : `WebRTCDelegate.mediaDevices`
+  // attend le `MediaDevices` ré-exporté par `package:matrix` (celui de `webrtc_interface`), pas
+  // la classe de `flutter_webrtc` elle-même (deux types distincts, même s'ils coïncident à
+  // l'exécution) — une première version de ce fichier utilisait le mauvais type et échouait à
+  // la compilation (voir le run CI qui a précédé ce correctif).
   @override
-  webrtc.MediaDevices get mediaDevices => webrtc.navigator.mediaDevices;
+  MediaDevices get mediaDevices => webrtc.navigator.mediaDevices;
 
   /// Point d'application du fail-closed (voir [CallBlockedException] ci-dessus). Ignore
   /// délibérément la configuration ICE que `CallSession` calcule elle-même en interne — dont on ne
@@ -114,9 +119,6 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   @override
   Future<void> handleGroupCallEnded(GroupCallSession groupCall) async {}
-
-  @override
-  Future<void> registerListeners(CallSession session) async {}
 
   @override
   Future<void> playRingtone() async {
