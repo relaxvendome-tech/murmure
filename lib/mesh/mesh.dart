@@ -8,6 +8,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
 import '../account.dart';
 import 'mesh_crypto.dart';
+import 'mesh_gatt_server.dart';
 
 /// Réseau maillé Bluetooth Low Energy : fonctionnement de Murmure sans aucun serveur, pour les
 /// coupures réseau (brouillage, manifestation). Principe « store-and-forward » : chaque téléphone
@@ -20,19 +21,23 @@ import 'mesh_crypto.dart';
 /// administrateur : rien dans cette classe ne donne à quiconque (y compris l'administrateur de
 /// l'appli) la capacité de déchiffrer un message en transit.
 ///
-/// LIMITE HONNÊTE À CONNAÎTRE AVANT MISE EN PRODUCTION : le paquet `flutter_blue_plus` (comme la
-/// quasi-totalité des bibliothèques BLE Flutter) ne pilote que le rôle "central" — scanner et se
-/// connecter à d'autres appareils. Il ne permet pas de faire fonctionner CE téléphone comme
-/// périphérique BLE annonçant un service GATT (rôle "peripheral"), ce qui est pourtant
-/// indispensable pour qu'un autre téléphone Murmure puisse le découvrir en retour. Pour un
-/// maillage vraiment bidirectionnel (deux téléphones qui se découvrent mutuellement, et pas
-/// seulement le scanner qui trouve des publicités), il faut un serveur GATT côté Android, qui
-/// n'existe pas encore dans ce dépôt (il faudrait implémenter `BluetoothGattServer` en Kotlin,
-/// exposé par un MethodChannel, sur le modèle de l'alias calculatrice déjà en place dans
-/// MainActivity.kt). Tant que ce serveur GATT natif n'est pas écrit, le mode Bluetooth fonctionne
-/// uniquement en scan + connexion sortante : utile pour relayer vers un appareil déjà repéré, mais
-/// incomplet pour un maillage symétrique. Ce fichier est écrit pour que cette pièce manquante
-/// s'intègre proprement une fois prête (voir [MeshServer], volontairement séparé).
+/// Le paquet `flutter_blue_plus` (comme la quasi-totalité des bibliothèques BLE Flutter) ne pilote
+/// que le rôle "central" — scanner et se connecter à d'autres appareils — jamais le rôle
+/// "peripheral" (annoncer un service GATT que d'autres peuvent découvrir et lire). Le rôle
+/// périphérique est donc assuré en natif par [MeshGattServerBridge], qui pilote un vrai
+/// `BluetoothGattServer` Kotlin (voir android/.../MeshGattServer.kt, sur le modèle du canal
+/// calculatrice de MainActivity.kt). Les deux rôles tournent simultanément dans [start] : ce
+/// téléphone scanne ET s'annonce, donc deux appareils Murmure finissent par se découvrir
+/// mutuellement, pas seulement celui qui scanne en premier.
+///
+/// LIMITE HONNÊTE RESTANTE : le serveur GATT natif ne répond, à chaque lecture, qu'avec UNE seule
+/// enveloppe à la fois (celle que [_rotateReadValue] lui a donnée en dernier) — pas de pagination
+/// sur une connexion GATT unique. [_rotateReadValue] fait tourner cette valeur dans la file
+/// d'attente à intervalle régulier, donc un appareil qui reste à portée assez longtemps finit par
+/// tout récupérer, mais une rencontre très brève peut ne récupérer qu'une partie de ce qui
+/// l'attend. Un vrai protocole de pagination par caractéristique serait l'étape suivante si le
+/// débit observé en conditions réelles (manifestation, beaucoup d'appareils, peu de temps de
+/// contact) s'avère insuffisant.
 class Mesh {
   Mesh._();
   static Mesh? _instance;
@@ -46,7 +51,10 @@ class Mesh {
   sqlcipher.Database? _db;
   MeshIdentity? _identity;
   StreamSubscription<List<ScanResult>>? _scanSub;
+  StreamSubscription<Uint8List>? _gattSub;
   Timer? _relayTimer;
+  Timer? _rotateTimer;
+  int _rotateIndex = 0;
   bool _running = false;
 
   final _eventsController = StreamController<MeshEvent>.broadcast();
@@ -108,6 +116,15 @@ class Mesh {
     );
     _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
     _relayTimer = Timer.periodic(const Duration(seconds: 20), (_) => _purgeExpired());
+
+    // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
+    // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
+    // est indisponible — le mode reste alors limité au rôle central, comme avant cette extension.
+    await MeshGattServerBridge.start();
+    _gattSub = MeshGattServerBridge.incoming().listen(_onGattWrite);
+    _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
+    unawaited(_rotateReadValue());
+
     _eventsController.add(const MeshEvent.started());
   }
 
@@ -117,10 +134,37 @@ class Mesh {
     _scanSub = null;
     _relayTimer?.cancel();
     _relayTimer = null;
+    await _gattSub?.cancel();
+    _gattSub = null;
+    _rotateTimer?.cancel();
+    _rotateTimer = null;
+    await MeshGattServerBridge.stop();
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
     _eventsController.add(const MeshEvent.stopped());
+  }
+
+  /// Un autre téléphone vient d'écrire une enveloppe sur notre caractéristique (rôle
+  /// périphérique) : on la traite exactement comme une enveloppe récupérée en scannant (rôle
+  /// central) — même déduplication, même logique de déchiffrement ou de relais.
+  Future<void> _onGattWrite(Uint8List bytes) async {
+    final env = MeshEnvelope.deserialize(bytes);
+    if (env != null) await _handleIncoming(env);
+  }
+
+  /// Fait tourner la valeur que le serveur GATT natif renvoie à la prochaine lecture, parmi notre
+  /// file d'attente (voir la limite documentée en tête de fichier).
+  Future<void> _rotateReadValue() async {
+    final queue = await _allOutbox();
+    if (queue.isEmpty) {
+      await MeshGattServerBridge.setReadValue(Uint8List(0));
+      return;
+    }
+    _rotateIndex = _rotateIndex % queue.length;
+    final env = queue[_rotateIndex];
+    _rotateIndex++;
+    await MeshGattServerBridge.setReadValue(env.serialize());
   }
 
   Future<void> _onScanResults(List<ScanResult> results) async {

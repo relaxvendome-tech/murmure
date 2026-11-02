@@ -26,6 +26,11 @@ class MainActivity : FlutterFragmentActivity() {
     private val aliasDefault get() = ComponentName(this, "$packageName.DefaultAlias")
     private val aliasCalculator get() = ComponentName(this, "$packageName.CalculatorAlias")
 
+    // Serveur GATT du maillage Bluetooth hors-ligne (voir MeshGattServer.kt / lib/mesh/mesh.dart).
+    // S'enregistre lui-même ses propres canaux (fr.lansight.murmure/mesh_gatt + _incoming) dans son
+    // constructeur ; pas de couplage supplémentaire nécessaire ici.
+    private var meshGattServer: MeshGattServer? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         super.onCreate(savedInstanceState)
@@ -33,6 +38,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        meshGattServer = MeshGattServer(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "setStealth" -> {
