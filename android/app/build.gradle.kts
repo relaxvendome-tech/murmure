@@ -3,9 +3,8 @@ import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
-    // Le plugin Kotlin est appliqué par le Flutter Gradle plugin lui-même (gabarit officiel
-    // `flutter create` de cette version de Flutter) : pas de id("kotlin-android") séparé ici,
-    // sous peine d'un conflit de configuration avec AGP 9+.
+    id("kotlin-android")
+    // Le plugin Flutter Gradle doit être appliqué après les plugins Android et Kotlin.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -23,15 +22,15 @@ if (hasReleaseSigning) {
 
 android {
     namespace = "fr.lansight.murmure"
-    // 36 : plusieurs plugins (camera_android_camerax, flutter_blue_plus_android, flutter_zxing,
-    // image_picker_android…) l'exigent désormais (avertissement du run CI précédent).
-    compileSdk = 36
-    // Version la plus élevée demandée par les plugins natifs lors du run CI précédent.
-    ndkVersion = "28.2.13676358"
+    compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
@@ -41,7 +40,7 @@ android {
         // repli logiciel du Keystore) dès l'API 26 pour ne pas exclure les téléphones plus anciens
         // — importants dans le contexte d'usage visé (manifestations, matériel pas toujours récent).
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
@@ -69,15 +68,6 @@ android {
 
     buildFeatures {
         buildConfig = true
-    }
-}
-
-// DSL Kotlin "nouvelle génération" (AGP 9+) : le bloc jvmTarget se met désormais ici, en
-// dehors de `android { }`, et plus via `kotlinOptions` (supprimé depuis AGP 9, voir le
-// gabarit officiel `flutter create` de cette version de Flutter).
-kotlin {
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 

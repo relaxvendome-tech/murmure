@@ -18,13 +18,11 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    // Versions reprises telles quelles du gabarit `flutter create` officiel de la version de
-    // Flutter utilisée en CI (lib/src/android/gradle_utils.dart : templateAndroidGradlePluginVersion
-    // / templateKotlinGradlePluginVersion / templateDefaultGradleVersion), plutôt que devinées —
-    // les tentatives précédentes (AGP 8.5.2 puis 8.9.1) étaient toutes en dessous du minimum que
-    // cette version de Flutter exige.
-    id("com.android.application") version "9.1.0" apply false
-    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    // Versions reprises telles quelles du gabarit `flutter create` officiel de Flutter 3.29.0
+    // (lib/src/android/gradle_utils.dart), la version épinglée dans le workflow CI — voir le
+    // commentaire sur flutter-version dans .github/workflows/build.yml pour pourquoi.
+    id("com.android.application") version "8.7.0" apply false
+    id("org.jetbrains.kotlin.android") version "1.8.22" apply false
 }
 
 include(":app")
