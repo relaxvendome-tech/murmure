@@ -1,0 +1,34 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.pub-cache/
+.pub/
+*.lock
+
+# Android
+android/local.properties
+android/key.properties
+*.jks
+*.keystore
+android/app/upload-keystore.jks
+android/.gradle/
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/gradle/
+
+# Ne JAMAIS commiter de secrets : clés de signature, graines de clé maîtresse, certificats privés.
+*.pem
+*.p12
+!android/key.properties.example
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store

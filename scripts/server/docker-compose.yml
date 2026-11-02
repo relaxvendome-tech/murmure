@@ -1,0 +1,42 @@
+version: "3.8"
+
+# Serveur Murmure : Conduit (implémentation légère du protocole Matrix, en Rust) derrière Caddy
+# (HTTPS automatique via Let's Encrypt). Aucune donnée de message n'est lisible par le serveur :
+# Conduit stocke des événements déjà chiffrés de bout en bout (Olm/Megolm) par les téléphones.
+# Ce que le serveur héberge reste : métadonnées de routage (qui parle à qui, quand — inévitable
+# avec Matrix fédéré), et la liste des comptes. Les réglages ci-dessous minimisent ce qui est
+# gardé au-delà du strict nécessaire au fonctionnement.
+
+services:
+  conduit:
+    image: matrixconduit/matrix-conduit:latest
+    restart: unless-stopped
+    volumes:
+      - conduit-data:/var/lib/matrix-conduit
+      - ./conduit.toml:/etc/matrix-conduit/conduit.toml:ro
+    environment:
+      CONDUIT_CONFIG: /etc/matrix-conduit/conduit.toml
+    expose:
+      - "6167"
+    networks: [murmure]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [conduit]
+    networks: [murmure]
+
+networks:
+  murmure:
+
+volumes:
+  conduit-data:
+  caddy-data:
+  caddy-config:

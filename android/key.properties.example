@@ -1,0 +1,14 @@
+# Copiez ce fichier en "key.properties" (sans ".example") dans ce même dossier android/, et
+# remplissez-le avec les informations de VOTRE upload-keystore généré localement par :
+#
+#   keytool -genkeypair -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 \
+#       -validity 10000 -alias upload
+#
+# "key.properties" et tout fichier ".jks"/".keystore" sont exclus de git (voir .gitignore) :
+# ils ne doivent JAMAIS être commités ni partagés avec qui que ce soit, pas même dans une
+# conversation avec un assistant IA. Pour les builds automatisés (GitHub Actions), ces mêmes
+# valeurs sont stockées en secrets chiffrés du dépôt, jamais en clair dans le code.
+storePassword=CHANGE_ME
+keyPassword=CHANGE_ME
+keyAlias=upload
+storeFile=../upload-keystore.jks

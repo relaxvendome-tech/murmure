@@ -1,0 +1,28 @@
+{$MURMURE_DOMAIN} {
+	reverse_proxy conduit:6167
+
+	# En-têtes de sécurité : pas de mise en cache des réponses chiffrées, pas d'intégration dans
+	# une iframe tierce.
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# Journaux minimaux : adresse IP masquée, pas d'enregistrement du corps des requêtes
+	# (qui contiendrait des événements Matrix chiffrés — aucune raison de les journaliser).
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				request>headers delete
+			}
+		}
+	}
+}

@@ -1,0 +1,68 @@
+name: Build Murmure (AAB + APK)
+
+# Se déclenche sur chaque push vers main, et manuellement. Les secrets de signature ne transitent
+# jamais par du texte en clair dans les logs : ils sont écrits dans des fichiers temporaires que
+# GitHub masque automatiquement, et supprimés en fin de job.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Installer les dépendances
+        run: flutter pub get
+
+      - name: Analyser (lint)
+        run: flutter analyze --no-fatal-infos
+
+      - name: Reconstituer le keystore de signature
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+          UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+        run: |
+          if [ -z "$UPLOAD_KEYSTORE_BASE64" ]; then
+            echo "Pas de secret de signature configuré : build non signé (debug). Voir README."
+            exit 0
+          fi
+          echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=$UPLOAD_STORE_PASSWORD
+          keyPassword=$UPLOAD_KEY_PASSWORD
+          keyAlias=$UPLOAD_KEY_ALIAS
+          storeFile=../upload-keystore.jks
+          EOF
+
+      - name: Construire l'AAB (Play Store)
+        run: flutter build appbundle --release
+
+      - name: Construire l'APK (installation directe)
+        run: flutter build apk --release --split-per-abi
+
+      - name: Nettoyer les secrets du disque
+        if: always()
+        run: rm -f android/key.properties android/upload-keystore.jks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: murmure-release
+          path: |
+            build/app/outputs/bundle/release/*.aab
+            build/app/outputs/flutter-apk/*.apk
+          retention-days: 30

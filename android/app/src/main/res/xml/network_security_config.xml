@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS uniquement, certificats du système seulement : pas de clear-text, pas d'autorité
+     ajoutée par l'utilisateur acceptée (empêche une interception par un certificat installé de
+     force sur l'appareil, scénario plausible pour un téléphone saisi/examiné). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

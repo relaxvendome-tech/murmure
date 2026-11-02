@@ -1,0 +1,29 @@
+[global]
+server_name = "CHANGEME.exemple.fr"  # à remplacer par le vrai domaine avant déploiement
+database_backend = "rocksdb"
+database_path = "/var/lib/matrix-conduit"
+port = 6167
+max_request_size = 50_000_000  # doit correspondre à kMaxMediaBytes dans lib/config.dart
+allow_registration = true
+
+# Inscription protégée par jeton : empêche la création de comptes en masse par un tiers tout en
+# restant ouverte (pas de validation manuelle par l'administrateur, pour ne jamais faire dépendre
+# l'accès de quelqu'un d'une décision humaine au mauvais moment). Le jeton est public (il part
+# dans la requête HTTP) et se change sans recompiler l'appli : voir lib/network.dart (NetConfig).
+registration_token = "CHANGEME_jeton_long_et_aleatoire"
+
+# Vie privée : pas de fédération ouverte par défaut (le serveur ne parle qu'à lui-même), pas de
+# présence (qui est en ligne), logs minimaux, pas de recherche d'annuaire public.
+allow_federation = false
+allow_check_for_updates = false
+enable_lightning_bolt = false
+allow_encryption = true
+allow_room_creation = true
+allow_unstable_room_versions = false
+trusted_servers = []
+
+[global.well_known]
+# Laisser vide : l'adresse du serveur est configurée directement dans l'appli (NetConfig), jamais
+# déduite automatiquement d'un domaine tiers.
+
+log = "warn"

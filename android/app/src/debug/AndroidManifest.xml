@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Autorisé seulement en build debug : utile pour déboguer le trafic Matrix localement. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:usesCleartextTraffic="true" tools:ignore="GoogleAppIndexingWarning"
+        xmlns:tools="http://schemas.android.com/tools" />
+</manifest>
