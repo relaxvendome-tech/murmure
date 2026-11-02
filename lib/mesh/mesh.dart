@@ -8,6 +8,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
 import '../account.dart';
 import 'mesh_crypto.dart';
+import 'mesh_foreground_service.dart';
 import 'mesh_gatt_server.dart';
 
 /// Réseau maillé Bluetooth Low Energy : fonctionnement de Murmure sans aucun serveur, pour les
@@ -199,11 +200,20 @@ class Mesh {
   /// Démarre le scan BLE et la boucle de relais périodique. À appeler quand l'utilisateur active
   /// le mode Bluetooth (voir ui/mesh_screen.dart), jamais automatiquement en arrière-plan sans son
   /// accord (consommation de batterie, et il doit savoir que son téléphone émet/écoute du BLE).
+  ///
+  /// Trouvé en audit interne : démarre aussi le service de premier plan Android (voir
+  /// mesh_foreground_service.dart / MeshForegroundService.kt), sans quoi rien n'empêchait Android
+  /// de suspendre ce scan dès l'appli mise en arrière-plan ou l'écran verrouillé — alors que c'est
+  /// justement l'usage visé (téléphone en poche en manifestation) qui l'exige. Best-effort comme
+  /// le reste du pont natif : son échec (plateforme sans ce canal, ou refus du système) ne bloque
+  /// jamais le scan BLE lui-même, qui continue de fonctionner au premier plan comme avant.
   Future<void> start() async {
     if (_running) return;
     _running = true;
     await _database();
     await identity();
+    final calcMode = await Account.read('calc_mode') == '1';
+    unawaited(MeshForegroundService.start(calcMode: calcMode));
     await FlutterBluePlus.startScan(
       withServices: [serviceUuid],
       continuousUpdates: true,
@@ -234,6 +244,7 @@ class Mesh {
     _rotateTimer?.cancel();
     _rotateTimer = null;
     await MeshGattServerBridge.stop();
+    await MeshForegroundService.stop();
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {}

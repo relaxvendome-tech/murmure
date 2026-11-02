@@ -38,6 +38,17 @@
          barre d'état — avant cette version, aucune permission explicite n'est demandée côté OS. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Service de premier plan du mode Bluetooth maillé (voir MeshForegroundService.kt et
+         lib/mesh/mesh_foreground_service.dart). Trouvé en audit interne : sans ce service, le mode
+         Bluetooth ne survivait à rien — ni l'appli mise en arrière-plan, ni l'écran verrouillé —
+         puisque rien ne protégeait le processus d'être tué par Android, alors que c'est l'usage
+         même visé (manifestation, téléphone en poche) qui exige que le relais continue sans
+         l'appli à l'écran. `connectedDevice` est le type introduit en Android 14 (API 34) pour une
+         interaction Bluetooth continue (voir la doc Android : prérequis satisfait ici par
+         BLUETOOTH_SCAN/CONNECT/ADVERTISE, déjà demandés en exécution avant le démarrage du mode). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
     <application
         android:label="Murmure"
         android:name="${applicationName}"
@@ -95,6 +106,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
+
+        <!-- Voir MeshForegroundService.kt : fait survivre le mode Bluetooth maillé à la mise en
+             arrière-plan de l'appli (usage visé : téléphone en poche pendant une manifestation).
+             Jamais exportée : démarrée uniquement par MainActivity, dans le même processus. -->
+        <service
+            android:name=".MeshForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
     </application>
 </manifest>
