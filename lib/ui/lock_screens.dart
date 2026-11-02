@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../account.dart';
+import '../calls/services/call_opsec_notifier.dart';
 import '../lock.dart';
 import 'calculator_lock_screen.dart';
 
@@ -64,19 +65,28 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
     await widget.onWiped();
   }
 
+  /// Déverrouillage réussi : fait disparaître la notification d'appel manqué (camouflée ou non,
+  /// voir `calls/services/call_opsec_notifier.dart`) AVANT d'afficher l'intérieur de l'appli —
+  /// directive explicite de l'utilisateur, pour qu'elle ne reste pas visible dans la barre d'état
+  /// une fois la calculatrice « ouverte ».
+  void _onUnlockSuccess() {
+    unawaited(CallOpsecNotifier.clear());
+    setState(() => _unlocked = true);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_unlocked == null) return const _Splash();
     if (_unlocked == true) return widget.child;
     if (_calcMode) {
       return CalculatorLockScreen(
-        onUnlocked: () => setState(() => _unlocked = true),
+        onUnlocked: _onUnlockSuccess,
         onWipe: _wipe,
       );
     }
     return PinScreen(
       mode: PinScreenMode.unlock,
-      onSuccess: () => setState(() => _unlocked = true),
+      onSuccess: _onUnlockSuccess,
       onWipe: _wipe,
     );
   }

@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:matrix/matrix.dart';
 
+import '../services/call_opsec_notifier.dart';
+import '../services/call_opsec_store.dart';
+
 /// Écran d'appel : UI fine au-dessus d'une [CallSession] (`matrix-dart-sdk`), qui possède
 /// elle-même la connexion WebRTC et la signalisation Matrix (`m.call.*`, avec `party_id` et
 /// gestion du « glare » déjà correctement gérées par le SDK).
@@ -35,6 +38,8 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
 
   StreamSubscription<WrappedMediaStream>? _addSub;
   StreamSubscription<WrappedMediaStream>? _removeSub;
+  StreamSubscription<CallState>? _stateSub;
+  bool _missedRecorded = false;
 
   @override
   void initState() {
@@ -51,6 +56,18 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     // que cet écran n'existe (cas d'un appel déjà en cours de connexion côté sortant).
     _addSub = widget.session.onStreamAdd.stream.listen(_attach);
     _removeSub = widget.session.onStreamRemoved.stream.listen(_detach);
+
+    // Détection d'un appel manqué : un appel ENTRANT qui atteint `kEnded` sans jamais avoir été
+    // décroché (voir [_accept]). Remplace une proposition reçue dans cette conversation qui
+    // reconstruisait cette détection à la main par-dessus un événement `m.call.hangup` brut et
+    // une API qui n'existe pas dans ce SDK (`voip.currentSession`) — l'état de CallSession
+    // lui-même est la source de vérité correcte, pas un événement réinterprété de l'extérieur.
+    _stateSub = widget.session.onCallStateChanged.stream.listen((state) {
+      if (state == CallState.kEnded && !_answered && !widget.session.isOutgoing && !_missedRecorded) {
+        _missedRecorded = true;
+        unawaited(_recordMissedCall());
+      }
+    });
 
     _answered = widget.session.isOutgoing;
   }
@@ -79,6 +96,19 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     });
   }
 
+  /// Écrit l'appel manqué dans l'historique chiffré (voir [CallOpsecStore], directive explicite
+  /// de l'utilisateur : exclusivement dans la base SQLCipher, jamais un journal en clair) et
+  /// déclenche la notification camouflée — sans bloquer sur quoi que ce soit côté UI, l'appel est
+  /// de toute façon en train de se terminer.
+  Future<void> _recordMissedCall() async {
+    await CallOpsecStore.insert(MissedCall(
+      roomId: widget.session.room.id,
+      remoteUserId: widget.session.remoteUserId,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await CallOpsecNotifier.notifyMissedCall();
+  }
+
   Future<void> _accept() async {
     setState(() => _answered = true);
     await widget.session.answer();
@@ -105,6 +135,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   void dispose() {
     _addSub?.cancel();
     _removeSub?.cancel();
+    _stateSub?.cancel();
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     super.dispose();

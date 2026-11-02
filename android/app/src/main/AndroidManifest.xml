@@ -33,6 +33,11 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- Notification d'appel manqué (voir lib/calls/services/call_opsec_notifier.dart), requise
+         à partir d'Android 13 (API 33) pour qu'une appli puisse afficher quoi que ce soit dans la
+         barre d'état — avant cette version, aucune permission explicite n'est demandée côté OS. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="Murmure"
         android:name="${applicationName}"

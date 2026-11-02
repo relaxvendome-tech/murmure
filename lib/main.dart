@@ -3,6 +3,7 @@ import 'package:matrix/matrix.dart';
 
 import 'account.dart';
 import 'calls/services/call_manager.dart';
+import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
 import 'media.dart';
 import 'network.dart';
@@ -19,6 +20,7 @@ final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>(
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
+  await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
   runApp(const MurmureApp());
 }
 

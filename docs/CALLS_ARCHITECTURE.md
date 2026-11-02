@@ -188,13 +188,41 @@ une conclusion « aucune fuite » qui ne prouve rien. Le script documente trois 
 voient réellement ce trafic (USB tethering, AP que vous contrôlez vous-même, capture sur
 l'appareil via une app comme PCAPdroid) et laisse le choix à qui l'exécute.
 
-## Point ouvert, non implémenté : notification d'appel manqué
+## Notification d'appel manqué (tranché : Option B, camouflée en mode discret)
 
-La proposition reçue suggérait une notification visuelle à l'arrivée d'un appel manqué. Avant de
-l'implémenter, une tension avec le reste du modèle de menace de Murmure doit être tranchée : une
-notification système Android (« Appel manqué de X ») s'afficherait sur l'écran verrouillé même en
-mode calculatrice déguisée, ce qui révélerait l'usage de l'appli à quiconque voit l'écran — une
-fuite d'OPSEC bien plus concrète que ce que l'audit réseau ci-dessus cherche à éviter. Pas
-implémenté dans cette passe : à trancher explicitement (notification système malgré le risque,
-indicateur uniquement visible à l'intérieur de l'appli une fois déverrouillée, ou rien) plutôt que
-de choisir silencieusement l'une des options.
+Décision explicite de l'utilisateur : notification visible, mais camouflée en notification de
+calculatrice quand le mode discret est actif (voir `lib/stealth.dart`/`ui/lock_screens.dart`).
+Implémenté dans `lib/calls/services/call_opsec_notifier.dart` et
+`lib/calls/services/call_opsec_store.dart`, détecté dans `CallSessionScreen`
+(`CallSession.onCallStateChanged` → `CallState.kEnded` sans avoir décroché un appel entrant).
+
+Deux proposition reçues dans cette conversation pour cette fonctionnalité avaient des défauts
+réels, corrigés avant intégration :
+
+- La détection par `matrixClient.onRoomEvent` + `voip.currentSession` ne correspond à aucune API
+  réelle de `matrix-dart-sdk` à la version utilisée ici, et réimplémentait par-dessus un état déjà
+  disponible sur `CallSession` elle-même (`onCallStateChanged`) — utilisé à la place.
+- Le camouflage « Calculatrice » était proposé de façon inconditionnelle, y compris quand
+  l'utilisateur se sert de Murmure ouvertement (mode discret désactivé) — ce qui serait lui-même
+  suspect : une appli de messagerie affichant une notification de « maintenance de fonctions
+  trigonométriques » attire l'attention au lieu de la détourner. Le camouflage n'est donc
+  déclenché que si `calc_mode` est effectivement actif à l'instant de la notification ; sinon,
+  message honnête (« Murmure — Appel manqué »), sur un canal de notification séparé et nommé en
+  conséquence.
+- « Code PIN à 8 chiffres » dans la proposition reçue est inexact : `AppLock` (voir `lib/lock.dart`)
+  accepte de 4 à 8 chiffres (`minLength`/`maxLength`), pas un code fixe de 8.
+
+Historique stocké exclusivement dans une base SQLCipher dédiée (`murmure_calls.db`, clé aléatoire
+jamais dérivée du PIN — même garantie que les autres bases locales), jamais dans un journal
+système ou un fichier en clair, conformément à la directive explicite reçue. Notification effacée
+dès le déverrouillage réussi (les deux chemins, PIN classique et calculatrice, voir
+`ui/lock_screens.dart`), avant l'affichage de l'intérieur de l'appli.
+
+LIMITE HONNÊTE : l'icône utilisée pour la notification est celle de l'appli (`@mipmap/
+ic_launcher`), pas une icône monochrome dédiée conçue pour le camouflage — personne dans ce bac à
+sable ne peut produire un asset graphique vérifié. Le rendu réel dans la barre d'état Android n'a
+pas été vérifié visuellement sur un appareil, et ne peut pas l'être depuis ici — à contrôler
+vous-même avant de compter sur ce détail pour l'OPSEC. L'écran d'affichage de l'historique déchiffré
+dans l'interface interne (demandé en prochaine étape dans la proposition reçue) n'est pas non plus
+implémenté dans cette passe — `CallOpsecStore.list()` existe et est prêt à être consommé par un
+futur écran, mais aucune UI ne l'utilise encore.
