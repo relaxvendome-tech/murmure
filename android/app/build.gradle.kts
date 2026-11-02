@@ -23,8 +23,11 @@ if (hasReleaseSigning) {
 
 android {
     namespace = "fr.lansight.murmure"
-    compileSdk = 35
-    ndkVersion = "26.3.11579264"
+    // 36 : plusieurs plugins (camera_android_camerax, flutter_blue_plus_android, flutter_zxing,
+    // image_picker_android…) l'exigent désormais (avertissement du run CI précédent).
+    compileSdk = 36
+    // Version la plus élevée demandée par les plugins natifs lors du run CI précédent.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -38,7 +41,7 @@ android {
         // repli logiciel du Keystore) dès l'API 26 pour ne pas exclure les téléphones plus anciens
         // — importants dans le contexte d'usage visé (manifestations, matériel pas toujours récent).
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
