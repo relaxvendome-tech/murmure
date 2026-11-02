@@ -118,7 +118,7 @@ class Mesh {
     _db = await sqlcipher.openDatabase(
       dbPath,
       password: await Account.dbKey(),
-      version: 2,
+      version: 3,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE outbox (
@@ -150,6 +150,21 @@ class Mesh {
         // nouvelles. Aucune donnée ancienne à migrer : les messages déjà passés restaient
         // chiffrés avec l'ancien schéma statique et ne dépendent pas de ces tables.
         if (oldV < 2) await _createRatchetTables(db);
+        // v2 -> v3 : trouvé en audit interne — les clés de rangs sautés (`ratchet_skipped`,
+        // conservées pour tolérer les messages arrivant dans le désordre) n'avaient aucune
+        // expiration par ÂGE, seulement une limite de COMPTE (_maxSkippedPerPeer) par contact.
+        // Concrètement : la clé d'un message jamais livré restait indéfiniment en base tant que
+        // ce même contact n'était pas recroisé assez de fois pour l'évincer par ancienneté — un
+        // écart réel avec la garantie de confidentialité persistante que la documentation de ce
+        // fichier affirme sans nuance pour « tous les messages déjà passés ». Ajoute une colonne
+        // d'horodatage pour purger par âge ces clés (voir _purgeExpired), alignée sur la même
+        // fenêtre que les enveloppes elles-mêmes (MeshEnvelope.maxAgeHours) : une clé gardée plus
+        // longtemps que la durée de vie maximale d'un message n'a plus aucune utilité, le message
+        // qu'elle pourrait déchiffrer étant de toute façon considéré expiré et abandonné ailleurs.
+        if (oldV < 3) {
+          await db.execute(
+              'ALTER TABLE ratchet_skipped ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
+        }
       },
     );
     return _db!;
@@ -170,6 +185,7 @@ class Mesh {
         peer BLOB NOT NULL,
         counter INTEGER NOT NULL,
         message_key BLOB NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (peer, counter)
       )
     ''');
@@ -452,7 +468,12 @@ class Mesh {
       } else {
         await db.insert(
           'ratchet_skipped',
-          {'peer': peerPublicKey, 'counter': next + i, 'message_key': step.messageKey},
+          {
+            'peer': peerPublicKey,
+            'counter': next + i,
+            'message_key': step.messageKey,
+            'created_at': DateTime.now().millisecondsSinceEpoch,
+          },
           conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace,
         );
       }
@@ -503,6 +524,12 @@ class Mesh {
         .millisecondsSinceEpoch;
     await db.delete('outbox', where: 'created_at < ?', whereArgs: [cutoff]);
     await db.delete('seen', where: 'seen_at < ?', whereArgs: [cutoff]);
+    // Les rangées migrées depuis le schéma v2 (avant l'ajout de cette colonne) ont `created_at`
+    // à 0 par défaut, donc toujours antérieures à `cutoff` : purgées dès le premier passage après
+    // la mise à jour, faute de pouvoir connaître leur âge réel — cohérent avec l'intention (mieux
+    // vaut perdre une clé de rang sauté déjà peu susceptible d'être un jour réclamée que la garder
+    // indéfiniment, voir la note de migration v2 -> v3 plus haut).
+    await db.delete('ratchet_skipped', where: 'created_at < ?', whereArgs: [cutoff]);
   }
 
   bool _bytesEqual(List<int> a, List<int> b) {

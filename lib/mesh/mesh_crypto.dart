@@ -33,6 +33,17 @@ import 'package:cryptography/cryptography.dart';
 /// usurper cette identité dans de nouveaux échanges. Un vrai cliquet double (à la Signal) avec
 /// réajustement DH résoudrait aussi ce point, mais demande une session interactive que le
 /// Bluetooth opportuniste de Murmure n'offre pas.
+///
+/// NUANCE trouvée en audit interne sur l'affirmation « jamais à ceux déjà passés » ci-dessus :
+/// elle est vraie pour tout rang de cliquet déjà franchi par la chaîne de réception ET effacé à
+/// ce passage. Elle ne l'est PAS, par construction, pour les rangs SAUTÉS en attente de livraison
+/// tardive (voir `ratchet_skipped` dans mesh.dart) : ces clés sont délibérément conservées — c'est
+/// leur rôle, tolérer les messages qui arrivent dans le désordre — donc toujours récupérables si
+/// l'appareil est saisi avant que le message correspondant n'arrive ou n'expire. Bornée dans le
+/// temps (purge par âge alignée sur [MeshEnvelope.maxAgeHours], voir `_purgeExpired` dans
+/// mesh.dart) et en nombre (`_maxSkippedPerPeer`), mais pas nulle : un compromis assumé entre
+/// « tolérer le désordre du Bluetooth opportuniste » et « confidentialité persistante absolue »,
+/// pas un oubli à corriger silencieusement.
 
 String meshB64(List<int> bytes) => base64Url.encode(bytes).replaceAll('=', '');
 
