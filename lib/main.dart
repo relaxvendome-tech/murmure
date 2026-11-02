@@ -58,6 +58,22 @@ class _MurmureAppState extends State<MurmureApp> {
       // une fuite silencieuse et invisible. Voir aussi onboarding_screen.dart, qui met à jour
       // `client.httpClient` en direct si le mode change après ce démarrage.
       final net = await NetConfig.load();
+      // AUDIT OUVERT (pas tranché dans cette passe, à vérifier plutôt qu'à deviner) : la
+      // documentation publiée de matrix-dart-sdk confirme que son logger interne (`Logs()`)
+      // imprime sur la console sur toutes les plateformes « avant » tout callback `onLog » — mais
+      // ne précise, à aucune version consultée (y compris celle réellement épinglée ici), SI le
+      // contenu d'une requête/réponse HTTP (dont l'en-tête Authorization, qui porte le jeton
+      // d'accès) peut apparaître dans un message journalisé au niveau `warning` lors d'une erreur
+      // réseau — un défaut connu dans d'autres SDK Matrix (voir GHSA-fc4h-xcf3-qj5f pour le SDK
+      // Rust, un projet distinct, mais la même classe de défaut). `Level.warning` (déjà le niveau
+      // le plus restrictif raisonnable ici, au lieu du défaut plus verbeux du paquet) limite
+      // l'exposition sans la supprimer : AUCUNE option documentée ne permet de désactiver
+      // entièrement la sortie console de ce logger depuis l'appelant. Un `print()` en version
+      // publiée reste lisible par `adb logcat` par quiconque a un accès physique ET le débogage
+      // USB autorisé sur l'appareil — un sous-ensemble du modèle de menace visé (saisie), pas son
+      // intégralité. Non vérifié : capture logcat réelle sur un appareil physique pendant une
+      // erreur d'authentification provoquée, pour confirmer ou infirmer la présence du jeton dans
+      // la sortie — à faire avant de compter sur ce point pour l'OPSEC.
       final client = Client(
         'Murmure',
         databaseBuilder: (_) async => MatrixSdkDatabase('murmure', database: db),
