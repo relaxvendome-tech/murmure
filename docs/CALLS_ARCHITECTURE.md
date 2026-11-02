@@ -172,3 +172,29 @@ Architecture retenue (voir `lib/calls/services/call_manager.dart` et
 - [ ] Test réel sur deux appareils (CI ne construit que l'APK/AAB, elle ne lance pas d'appel) : la
       signalisation `VoIP`/`CallSession` et l'application de `CallPolicy` n'ont été vérifiées que
       par la compilation, jamais par un appel effectivement passé entre deux téléphones.
+
+## Script d'audit réseau (`scripts/audit/capture_call_leaks.sh`)
+
+Script manuel (à exécuter par vous, sur un vrai appareil — personne ne peut le faire depuis un
+bac à sable de développement) pour la vérification par capture réseau exigée ci-dessus. Corrige
+trois défauts d'une proposition reçue dans cette conversation : `kill -9` sur `tcpdump` (tronque
+le fichier `.pcap` au lieu de le fermer proprement), un filtre d'analyse qui ne cible pas
+spécifiquement l'appareil testé (bruit de fond qui noierait une vraie fuite), et surtout l'absence
+du point le plus important : **sur un Wi-Fi WPA2/WPA3 d'infrastructure ordinaire, un ordinateur
+simplement « relié au même réseau » ne peut en général PAS intercepter le trafic d'un AUTRE
+appareil** (chaque association utilise une clé par paire). Suivre la proposition reçue à la
+lettre risquait de produire une capture qui ne contient jamais le trafic du téléphone, et donc
+une conclusion « aucune fuite » qui ne prouve rien. Le script documente trois méthodes qui
+voient réellement ce trafic (USB tethering, AP que vous contrôlez vous-même, capture sur
+l'appareil via une app comme PCAPdroid) et laisse le choix à qui l'exécute.
+
+## Point ouvert, non implémenté : notification d'appel manqué
+
+La proposition reçue suggérait une notification visuelle à l'arrivée d'un appel manqué. Avant de
+l'implémenter, une tension avec le reste du modèle de menace de Murmure doit être tranchée : une
+notification système Android (« Appel manqué de X ») s'afficherait sur l'écran verrouillé même en
+mode calculatrice déguisée, ce qui révélerait l'usage de l'appli à quiconque voit l'écran — une
+fuite d'OPSEC bien plus concrète que ce que l'audit réseau ci-dessus cherche à éviter. Pas
+implémenté dans cette passe : à trancher explicitement (notification système malgré le risque,
+indicateur uniquement visible à l'intérieur de l'appli une fois déverrouillée, ou rien) plutôt que
+de choisir silencieusement l'une des options.
