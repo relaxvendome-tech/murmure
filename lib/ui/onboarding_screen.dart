@@ -121,7 +121,7 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<NetMode>(
-              initialValue: _mode,
+              value: _mode,
               decoration: const InputDecoration(labelText: 'Mode de connexion'),
               items: const [
                 DropdownMenuItem(value: NetMode.direct, child: Text('Direct')),
