@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../account.dart';
 import '../calls/services/call_opsec_notifier.dart';
+import '../config.dart';
 import '../lock.dart';
 import 'calculator_lock_screen.dart';
 
@@ -49,13 +50,18 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
     });
   }
 
+  /// Trouvé en audit interne : comparait auparavant à un `Duration(seconds: 30)` codé en dur ici
+  /// même, au lieu de [kRelockAfter] — alors que le commentaire de tête de [LockGate] prétendait
+  /// déjà utiliser cette constante. Les deux valaient 30 s, donc le comportement observé était
+  /// correct par coïncidence ; changer `kRelockAfter` dans `config.dart` n'aurait silencieusement
+  /// rien changé ici. Utilise maintenant [kRelockAfter] directement, source unique de vérité.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
       _backgroundedAt = DateTime.now();
     } else if (state == AppLifecycleState.resumed) {
       final since = _backgroundedAt;
-      if (since != null && DateTime.now().difference(since) > const Duration(seconds: 30)) {
+      if (since != null && DateTime.now().difference(since) > kRelockAfter) {
         setState(() => _unlocked = false);
       }
     }
@@ -379,6 +385,20 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                 await _load();
                 if (ok != null) {}
               } else {
+                // Trouvé en audit interne : désactiver le PIN sans aussi désactiver le mode
+                // discret laissait une incohérence dangereuse — l'icône de lancement restait
+                // « Calculatrice » (voir MainActivity.kt, bascule d'alias) alors que l'appli,
+                // elle, s'ouvrait désormais directement sur Murmure sans aucun verrou
+                // (LockGate._init() lit AppLock.enabled(), qui redevient false ici). Quelqu'un
+                // qui compte sur l'icône calculatrice pour dissimuler l'appli se retrouverait
+                // donc à exposer la messagerie en clair au premier appui, sans le savoir. On
+                // revient donc explicitement à l'icône par défaut ET on efface calc_mode AVANT
+                // de supprimer le code, dans cet ordre : si la désactivation de l'alias natif
+                // échoue, le PIN reste actif et protège encore l'accès.
+                if (_calcMode) {
+                  await widget.onToggleCalcMode(false);
+                  await Account.write('calc_mode', '0');
+                }
                 await AppLock.disable();
                 await _load();
               }
