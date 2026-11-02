@@ -22,12 +22,19 @@ if (hasReleaseSigning) {
 
 android {
     namespace = "fr.lansight.murmure"
-    compileSdk = 35
+    // 36 (pas 35) : exigé par le plugin flutter_webrtc (ajouté pour les appels), qui compile
+    // contre le SDK 36 — Gradle refuse sinon la tâche checkReleaseAarMetadata (run CI qui a suivi
+    // l'ajout du plugin). Rétro-compatible : ne change ni minSdk ni targetSdk ci-dessous.
+    compileSdk = 36
     ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // Exigé par flutter_local_notifications (ajouté pour la notification d'appel manqué) :
+        // sans ceci, checkReleaseAarMetadata échoue en CI avec « requires core library
+        // desugaring to be enabled ». Voir la dépendance coreLibraryDesugaring ci-dessous.
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_17.toString()
@@ -73,4 +80,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Requis par isCoreLibraryDesugaringEnabled ci-dessus (flutter_local_notifications).
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 }
