@@ -94,7 +94,7 @@ class AppLock {
     final h = await _hash(pin, await _salt());
     final duressHash = await Account.read('duress_hash');
     final pinHash = await Account.read('pin_hash');
-    if (duressHash != null && _same(h, duressHash)) return PinResult.duress;
+    if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;
     if (pinHash != null && _same(h, pinHash)) return PinResult.ok;
     return PinResult.wrong;
   }
@@ -107,7 +107,7 @@ class AppLock {
     final pinHash = await Account.read('pin_hash');
     final duressHash = await Account.read('duress_hash');
     // Le code de contrainte est testé en premier et de la même façon : même durée de calcul.
-    if (duressHash != null && _same(h, duressHash)) return PinResult.duress;
+    if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;
     if (pinHash != null && _same(h, pinHash)) {
       await Account.write('pin_fails', '0');
       return PinResult.ok;
@@ -116,4 +116,15 @@ class AppLock {
     await Account.write('pin_fails', '$fails');
     return fails >= maxFailures ? PinResult.exhausted : PinResult.wrong;
   }
+
+  /// Garde-fou défensif (en plus de la vérification faite à la création, voir [PinScreen] /
+  /// `ui/lock_screens.dart`) : si jamais les empreintes du code normal et du code de contrainte
+  /// se retrouvaient identiques — un état qu'un bug antérieur de l'écran de réglage permettait de
+  /// créer, corrigé séparément, mais qui pourrait en théorie se reproduire par une autre voie —
+  /// on ignore purement et simplement le code de contrainte plutôt que de risquer qu'un
+  /// déverrouillage normal, parfaitement légitime, soit pris pour un déclenchement de contrainte
+  /// et efface tout sans avertissement. Mieux vaut un code de contrainte silencieusement inerte
+  /// qu'un effacement accidentel et irréversible des données de quelqu'un.
+  static bool _duressActive(String? duressHash, String? pinHash) =>
+      duressHash != null && duressHash != pinHash;
 }
