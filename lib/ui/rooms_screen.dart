@@ -4,6 +4,7 @@ import 'package:matrix/matrix.dart';
 import '../account.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
+import 'qr_screens.dart';
 
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
@@ -17,6 +18,17 @@ class RoomsScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Murmure'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code),
+            tooltip: 'Mon code',
+            onPressed: () {
+              final id = client.userID;
+              if (id == null) return;
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => MyQrScreen(shareableId: shareableId(id)),
+              ));
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.bluetooth),
             tooltip: 'Mode hors-ligne',
@@ -129,12 +141,26 @@ class _AddContactScreenState extends State<AddContactScreen> {
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            const Text('Collez l\'identifiant Murmure de votre contact, ou demandez-lui de vous '
-                'montrer son code dans ses réglages de profil pour le scanner.'),
+            const Text('Collez l\'identifiant Murmure de votre contact, ou scannez le code qu\'il '
+                'vous montre depuis l\'icône code en haut de l\'écran.'),
             const SizedBox(height: 16),
             TextField(
               controller: _idCtrl,
-              decoration: const InputDecoration(labelText: 'Identifiant', hintText: '@abc123:serveur'),
+              decoration: InputDecoration(
+                labelText: 'Identifiant',
+                hintText: '@abc123:serveur',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  tooltip: 'Scanner un code',
+                  onPressed: () async {
+                    final scanned = await Navigator.of(context)
+                        .push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen()));
+                    if (scanned != null && mounted) {
+                      setState(() => _idCtrl.text = scanned);
+                    }
+                  },
+                ),
+              ),
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
