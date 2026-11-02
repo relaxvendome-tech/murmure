@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
+import 'calls/services/call_opsec_store.dart';
 import 'config.dart';
 import 'media.dart';
 import 'mesh/mesh.dart';
@@ -130,6 +131,13 @@ class Account {
       await client?.dispose(closeDatabase: true);
     } catch (_) {}
     await Mesh.reset();
+    // Trouvé en audit interne (pas une proposition externe) : cette base a été ajoutée dans une
+    // passe postérieure à l'écriture de la boucle ci-dessous, qui ne connaissait donc que les deux
+    // bases historiques — `murmure_calls.db` (salons, identifiants Matrix des correspondants et
+    // horodatages des appels manqués) survivait sinon à la fois à `panic()` et à
+    // `deleteEverything()`, contredisant la garantie documentée juste au-dessus. Voir
+    // `CallOpsecStore.wipe()` pour le détail.
+    await CallOpsecStore.wipe();
     final dir = await getApplicationSupportDirectory();
     for (final name in [_dbName, kMeshDbName]) {
       final path = p.join(dir.path, name);

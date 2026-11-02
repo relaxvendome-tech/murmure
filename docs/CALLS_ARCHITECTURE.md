@@ -243,3 +243,38 @@ quand la salle existe encore localement, sinon l'identifiant Matrix brut ; purge
 accessible depuis l'icône dédiée dans `RoomsScreen`. Une proposition reçue dans cette conversation
 pour cet écran visait une classe `SecureStorage` et des champs (`sender_id`) qui n'existent pas
 dans ce dépôt — l'écran utilise directement `CallOpsecStore`/`MissedCall`, déjà en place.
+
+### Audit interne : `murmure_calls.db` absente de l'essuyage de panique
+
+Trouvé en relisant `lib/account.dart` (pas une proposition externe) pendant un audit de la
+complétude de `Account.wipeLocal()` : cette méthode (appelée par `panic()` ET
+`deleteEverything()`) ne connaissait que `murmure_matrix.db` et `murmure_mesh.db` — les deux bases
+qui existaient au moment où elle a été écrite. `murmure_calls.db` (`CallOpsecStore`, cf. ci-dessus),
+créée dans une passe ultérieure, n'y a jamais été ajoutée.
+
+Consequence concrète : après un essuyage de panique (code de contrainte, ou dépassement du nombre
+d'essais de PIN) ou une suppression de compte volontaire, le fichier `murmure_calls.db` — qui
+contient les identifiants de salon, les identifiants Matrix bruts des correspondants et les
+horodatages des appels manqués — restait physiquement présent sur le disque. `_storage.deleteAll()`
+détruit bien la clé SQLCipher partagée en tout premier, donc le contenu du fichier devient
+illisible sans elle ; mais le fichier chiffré lui-même (et d'éventuels fragments `-wal`/`-shm`/
+`-journal`) survivait, alors que les deux bases sœurs étaient activement supprimées. Deux problèmes
+distincts : (1) cela contredit la garantie documentée plus haut dans ce fichier (« Clés, messages et
+médias disparaissent du téléphone ») — c'est un défaut de parcours, un residu après compromission
+physique n'est jamais acceptable même chiffré ; (2) l'asymétrie elle-même (un fichier chiffré
+survivant au milieu de bases sœurs disparues) est une anomalie repérable lors d'un examen
+forensique du téléphone, qui peut à elle seule signaler l'existence passée d'un historique d'appels
+même sans jamais pouvoir le déchiffrer.
+
+Corrigé par `CallOpsecStore.wipe()` (nouvelle méthode, même schéma de suppression que la boucle
+existante : `sqlcipher.deleteDatabase()` puis repli sur la suppression des fragments), appelée
+depuis `Account.wipeLocal()` aux côtés de `Mesh.reset()`. `CallOpsecStore` n'a jamais de handle de
+base ouvert en permanence (chaque méthode ouvre puis referme sa propre connexion), donc `wipe()`
+n'a rien à fermer avant de supprimer le fichier — contrairement à `Mesh.reset()`.
+
+LIMITE HONNÊTE : cette correction n'a pas été vérifiée par un essuyage réel suivi d'une inspection
+du système de fichiers sur un appareil physique (pas d'appareil disponible dans ce bac à sable) —
+seule la lecture du code garantit que le chemin de suppression est maintenant correct. Cette
+découverte ne clôt pas non plus la question de savoir si d'autres fichiers créés au fil des passes
+successives échappent de la même façon à `wipeLocal()` (caches, fichiers temporaires de médias
+hors `purgeMediaCache()`, etc.) — à vérifier dans une prochaine passe d'audit.

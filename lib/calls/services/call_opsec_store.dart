@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
@@ -71,6 +73,36 @@ class CallOpsecStore {
       await db.delete('missed_calls');
     } finally {
       await db.close();
+    }
+  }
+
+  /// Détruit le fichier de cette base (et ses fragments `-wal`/`-shm`/`-journal` éventuels) sur le
+  /// disque — appelé par `Account.wipeLocal()` (donc par `panic()` et `deleteEverything()`).
+  ///
+  /// Corrige une lacune trouvée en audit interne (pas une proposition externe) : cette base a été
+  /// créée dans une passe ultérieure à l'écriture de `Account.wipeLocal()`, qui ne connaissait donc
+  /// que `murmure_matrix.db` et `murmure_mesh.db` — la boucle de suppression de `wipeLocal()` ne
+  /// mentionnait jamais `murmure_calls.db`. Conséquence concrète : après un essuyage de panique ou
+  /// une suppression de compte, le fichier chiffré de cet historique (salons concernés,
+  /// identifiants Matrix des correspondants, horodatages des appels manqués) restait physiquement
+  /// sur le disque — illisible une fois `db_key` détruit par `_storage.deleteAll()` (clé partagée
+  /// avec les autres bases SQLCipher), mais présent, ce qui contredit la garantie documentée
+  /// (« Clés, messages et médias disparaissent du téléphone ») et constitue en soi une anomalie
+  /// repérable lors d'un examen forensique du téléphone (fichier chiffré survivant alors que ses
+  /// deux bases sœurs ont bien disparu). N'ouvre aucune connexion ici : chaque méthode ci-dessus
+  /// ouvre puis referme la sienne, donc il n'y a jamais de handle à fermer au moment de l'essuyage
+  /// (contrairement à `Mesh.reset()`, qui doit fermer un handle tenu en mémoire).
+  static Future<void> wipe() async {
+    final dir = await getApplicationSupportDirectory();
+    final path = p.join(dir.path, _dbName);
+    try {
+      await sqlcipher.deleteDatabase(path);
+    } catch (_) {
+      for (final suffix in ['', '-wal', '-shm', '-journal']) {
+        try {
+          await File('$path$suffix').delete();
+        } catch (_) {}
+      }
     }
   }
 }
