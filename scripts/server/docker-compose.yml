@@ -9,7 +9,16 @@ version: "3.8"
 
 services:
   conduit:
-    image: matrixconduit/matrix-conduit:latest
+    # Épinglé sur une version précise (v0.10.13, stable au moment de cette revue) plutôt que
+    # `:latest` : un tag flottant peut changer de contenu à votre insu entre deux `docker compose
+    # pull` — ni reproductible, ni auditable, et une image modifiée en amont (compromission du
+    # registre, erreur de publication) serait tirée automatiquement sans que vous ne le sachiez.
+    # Pour vérifier vous-même avant de déployer :
+    #   docker pull matrixconduit/matrix-conduit:v0.10.13
+    #   docker inspect --format '{{index .RepoDigests 0}}' matrixconduit/matrix-conduit:v0.10.13
+    # Montez en version délibérément (en relisant le changelog du projet), jamais par un `pull`
+    # automatique sur `latest`.
+    image: matrixconduit/matrix-conduit:v0.10.13
     restart: unless-stopped
     volumes:
       - conduit-data:/var/lib/matrix-conduit

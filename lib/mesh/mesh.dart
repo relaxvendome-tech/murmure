@@ -67,7 +67,7 @@ class Mesh {
     _db = await sqlcipher.openDatabase(
       dbPath,
       password: await Account.dbKey(),
-      version: 1,
+      version: 2,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE outbox (
@@ -91,9 +91,37 @@ class Mesh {
             received_at INTEGER NOT NULL
           )
         ''');
+        await _createRatchetTables(db);
+      },
+      onUpgrade: (db, oldV, newV) async {
+        // v1 -> v2 : ajout du cliquet symétrique (confidentialité persistante, voir
+        // mesh_crypto.dart). Les anciennes tables ne changent pas ; on ajoute seulement les deux
+        // nouvelles. Aucune donnée ancienne à migrer : les messages déjà passés restaient
+        // chiffrés avec l'ancien schéma statique et ne dépendent pas de ces tables.
+        if (oldV < 2) await _createRatchetTables(db);
       },
     );
     return _db!;
+  }
+
+  Future<void> _createRatchetTables(sqlcipher.Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ratchet_chain (
+        peer BLOB NOT NULL,
+        direction TEXT NOT NULL,
+        chain_key BLOB NOT NULL,
+        counter INTEGER NOT NULL,
+        PRIMARY KEY (peer, direction)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ratchet_skipped (
+        peer BLOB NOT NULL,
+        counter INTEGER NOT NULL,
+        message_key BLOB NOT NULL,
+        PRIMARY KEY (peer, counter)
+      )
+    ''');
   }
 
   Future<MeshIdentity> identity() async {
@@ -222,7 +250,8 @@ class Mesh {
 
     final me = await identity();
     if (_bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes))) {
-      final plain = await meshDecrypt(identity: me, envelope: env);
+      final msgKey = await _recvKeyFor(env.senderPublicKey, env.chainCounter);
+      final plain = msgKey == null ? null : await meshDecryptWithKey(messageKey: msgKey, envelope: env);
       if (plain != null) {
         await db.insert('inbox', {
           'id': env.id,
@@ -253,7 +282,14 @@ class Mesh {
   /// Met un message en file pour un contact, à relayer dès qu'un appareil Murmure est croisé.
   Future<void> queueMessage({required Uint8List recipientPublicKey, required String text}) async {
     final me = await identity();
-    final env = await meshEncrypt(identity: me, recipientPublicKey: recipientPublicKey, plaintext: text);
+    final next = await _nextSendKey(recipientPublicKey);
+    final env = await meshEncryptWithKey(
+      messageKey: next.messageKey,
+      chainCounter: next.counter,
+      senderPublicKey: me.publicKeyBytes,
+      recipientHint: await meshRecipientHint(recipientPublicKey),
+      plaintext: text,
+    );
     final db = await _database();
     await db.insert('outbox', {
       'id': env.id,
@@ -261,6 +297,132 @@ class Mesh {
       'payload': env.serialize(),
       'created_at': env.createdAt.millisecondsSinceEpoch,
     });
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Cliquet symétrique (forward secrecy) — voir mesh_crypto.dart pour le pourquoi et le comment.
+  // Cette section gère l'ÉTAT persistant (en base, chiffrée) ; mesh_crypto.dart ne fait que les
+  // calculs sans jamais toucher au disque.
+  // -----------------------------------------------------------------------------------------------
+
+  /// Borne le nombre de crans qu'un message reçu peut forcer à avancer d'un coup : au-delà, on
+  /// abandonne plutôt que de faire calculer un nombre de HMAC arbitrairement grand à partir d'un
+  /// compteur falsifié (un relais malveillant ne peut pas altérer le contenu — authentifié par le
+  /// GCM — mais pourrait forger ce compteur en clair pour un déni de service local).
+  static const _maxRatchetSkipAhead = 200;
+
+  /// Nombre de clés de rangs sautés conservées par contact, pour tolérer les messages qui
+  /// arrivent dans le désordre (relais par plusieurs chemins Bluetooth) sans garder une réserve
+  /// illimitée.
+  static const _maxSkippedPerPeer = 50;
+
+  /// Amorce les deux chaînes (envoi/réception) avec [peerPublicKey] depuis le secret ECDH, SI ce
+  /// n'est pas déjà fait — idempotent, ignore silencieusement si l'état existe déjà.
+  Future<void> _ensureRatchetSeeded(Uint8List peerPublicKey) async {
+    final db = await _database();
+    final existing = await db.query('ratchet_chain',
+        where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'send'], limit: 1);
+    if (existing.isNotEmpty) return;
+    final me = await identity();
+    final shared = await me.sharedSecretWith(peerPublicKey);
+    final (chainA, chainB) = await meshRatchetRoots(shared);
+    final iSendOnA = meshSendsOnChainA(me.publicKeyBytes, peerPublicKey);
+    final sendChain = iSendOnA ? chainA : chainB;
+    final recvChain = iSendOnA ? chainB : chainA;
+    await db.insert(
+      'ratchet_chain',
+      {'peer': peerPublicKey, 'direction': 'send', 'chain_key': sendChain, 'counter': 0},
+      conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+    );
+    await db.insert(
+      'ratchet_chain',
+      {'peer': peerPublicKey, 'direction': 'recv', 'chain_key': recvChain, 'counter': 0},
+      conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+    );
+  }
+
+  /// Avance la chaîne d'ENVOI vers [peerPublicKey] d'un cran et retourne la clé du message à
+  /// chiffrer maintenant, avec son rang. L'ancienne clé de chaîne est écrasée en base : elle ne
+  /// peut plus jamais être recalculée (confidentialité persistante).
+  Future<({Uint8List messageKey, int counter})> _nextSendKey(Uint8List peerPublicKey) async {
+    await _ensureRatchetSeeded(peerPublicKey);
+    final db = await _database();
+    final rows = await db.query('ratchet_chain',
+        where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'send'], limit: 1);
+    final row = rows.first;
+    final chainKey = Uint8List.fromList(row['chain_key'] as List<int>);
+    final counter = row['counter'] as int;
+    final step = await meshRatchetStep(chainKey);
+    await db.update(
+      'ratchet_chain',
+      {'chain_key': step.nextChainKey, 'counter': counter + 1},
+      where: 'peer = ? AND direction = ?',
+      whereArgs: [peerPublicKey, 'send'],
+    );
+    return (messageKey: step.messageKey, counter: counter);
+  }
+
+  /// Retrouve la clé de message pour déchiffrer un message de rang [counter] de [peerPublicKey] :
+  /// soit déjà en réserve (message arrivé après un autre plus récent), soit en avançant la chaîne
+  /// de réception jusqu'à ce rang (en mettant en réserve les rangs sautés au passage). Retourne
+  /// null si la clé n'est plus disponible : rang déjà consommé et oublié (comportement attendu —
+  /// confidentialité persistante, pas une panne), ou saut trop grand pour être raisonnable.
+  Future<Uint8List?> _recvKeyFor(Uint8List peerPublicKey, int counter) async {
+    await _ensureRatchetSeeded(peerPublicKey);
+    final db = await _database();
+
+    final skipped = await db.query('ratchet_skipped',
+        where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter], limit: 1);
+    if (skipped.isNotEmpty) {
+      await db.delete('ratchet_skipped', where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter]);
+      return Uint8List.fromList(skipped.first['message_key'] as List<int>);
+    }
+
+    final rows = await db.query('ratchet_chain',
+        where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'recv'], limit: 1);
+    final row = rows.first;
+    var chainKey = Uint8List.fromList(row['chain_key'] as List<int>);
+    final next = row['counter'] as int;
+
+    if (counter < next) return null; // déjà passé, pas en réserve : clé perdue pour de bon.
+    final steps = counter - next;
+    if (steps > _maxRatchetSkipAhead) return null; // saut déraisonnable, on abandonne.
+
+    Uint8List? wanted;
+    for (var i = 0; i <= steps; i++) {
+      final step = await meshRatchetStep(chainKey);
+      if (i == steps) {
+        wanted = step.messageKey;
+      } else {
+        await db.insert(
+          'ratchet_skipped',
+          {'peer': peerPublicKey, 'counter': next + i, 'message_key': step.messageKey},
+          conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace,
+        );
+      }
+      chainKey = step.nextChainKey;
+    }
+    await db.update(
+      'ratchet_chain',
+      {'chain_key': chainKey, 'counter': counter + 1},
+      where: 'peer = ? AND direction = ?',
+      whereArgs: [peerPublicKey, 'recv'],
+    );
+    await _trimSkipped(peerPublicKey);
+    return wanted;
+  }
+
+  /// Ne garde que les [_maxSkippedPerPeer] rangs sautés les plus récents par contact (les plus
+  /// anciens ont le moins de chances d'être un jour réclamés par un message très en retard).
+  Future<void> _trimSkipped(Uint8List peerPublicKey) async {
+    final db = await _database();
+    final rows = await db.query('ratchet_skipped',
+        where: 'peer = ?', whereArgs: [peerPublicKey], orderBy: 'counter DESC');
+    if (rows.length <= _maxSkippedPerPeer) return;
+    for (final r in rows.skip(_maxSkippedPerPeer)) {
+      await db.delete('ratchet_skipped',
+          where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, r['counter']]);
+    }
   }
 
   Future<List<MeshEnvelope>> _allOutbox() async {
