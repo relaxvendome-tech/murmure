@@ -45,6 +45,28 @@ class Mesh {
 
   /// UUID de service Murmure : identifie un appareil qui fait tourner le mode maillé, sans rien
   /// révéler d'autre (pas d'identifiant utilisateur dans l'annonce BLE elle-même).
+  ///
+  /// LIMITE HONNÊTE (reconnue, pas corrigée dans cette passe — point soulevé en audit) : cet UUID
+  /// est FIXE, identique sur tous les appareils et dans le temps. Qui que ce soit équipé d'un
+  /// scanner BLE passif (capteur statique dans la rue, matériel de surveillance) peut détecter
+  /// « un appareil fait tourner Murmure ici » sans jamais s'y connecter ni rien déchiffrer — une
+  /// empreinte de présence, pas une fuite de contenu ni d'identité.
+  ///
+  /// Le faire varier n'est pas une simple modification locale : le rôle « central » (scan) doit
+  /// savoir QUEL UUID chercher pour découvrir le service. Le faire dépendre d'un secret partagé
+  /// entre contacts déjà validés casserait la découverte entre deux appareils Murmure qui ne se
+  /// connaissent pas encore — or c'est précisément ce que le relais « store-and-forward » décrit
+  /// ci-dessus doit permettre : n'importe quel appareil Murmure croisé relaie, pas seulement les
+  /// contacts connus. Un système à grande échelle confronté au même problème (notification
+  /// d'exposition Apple/Google, par ex.) a tranché dans le même sens : l'identifiant de SERVICE
+  /// annoncé reste fixe et public ; seule la charge utile de chaque annonce est, elle, à durée de
+  /// vie courte et imprévisible. Une vraie limitation de cette empreinte-ci suivrait le même
+  /// modèle (garder ce UUID découvrable publiquement, réduire l'exposition autrement — ex. ne
+  /// publier le service que par rafales plutôt qu'en continu) plutôt que de faire tourner l'UUID
+  /// lui-même, qui romprait la découverte entre inconnus sans walkthrough de protocole public déjà
+  /// éprouvé pour ce cas précis. Non implémenté ici : décision d'architecture (tolérer cette
+  /// empreinte de présence vs limiter la portée du mode maillé aux seuls contacts déjà validés)
+  /// qui revient à l'utilisateur, pas à corriger silencieusement.
   static final serviceUuid = Guid('5a4d5552-4d55-5245-0000-000000000001');
   static final inboxCharUuid = Guid('5a4d5552-4d55-5245-0000-000000000002');
 
