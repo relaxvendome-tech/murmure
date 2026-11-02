@@ -6,6 +6,7 @@ import 'package:matrix/matrix.dart';
 import '../account.dart';
 import '../calls/call_policy.dart';
 import '../calls/services/call_manager.dart';
+import '../calls/ui/missed_calls_screen.dart';
 import '../network.dart';
 import '../stealth.dart';
 import 'group_screen.dart';
@@ -42,6 +43,13 @@ class RoomsScreen extends StatelessWidget {
             tooltip: 'Mode hors-ligne',
             onPressed: () => Navigator.of(context)
                 .push(MaterialPageRoute(builder: (_) => const MeshScreen())),
+          ),
+          IconButton(
+            icon: const Icon(Icons.phone_missed_outlined),
+            tooltip: 'Appels manqués',
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => MissedCallsScreen(client: client),
+            )),
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),

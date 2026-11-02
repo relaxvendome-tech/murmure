@@ -222,7 +222,10 @@ LIMITE HONNÊTE : l'icône utilisée pour la notification est celle de l'appli (
 ic_launcher`), pas une icône monochrome dédiée conçue pour le camouflage — personne dans ce bac à
 sable ne peut produire un asset graphique vérifié. Le rendu réel dans la barre d'état Android n'a
 pas été vérifié visuellement sur un appareil, et ne peut pas l'être depuis ici — à contrôler
-vous-même avant de compter sur ce détail pour l'OPSEC. L'écran d'affichage de l'historique déchiffré
-dans l'interface interne (demandé en prochaine étape dans la proposition reçue) n'est pas non plus
-implémenté dans cette passe — `CallOpsecStore.list()` existe et est prêt à être consommé par un
-futur écran, mais aucune UI ne l'utilise encore.
+vous-même avant de compter sur ce détail pour l'OPSEC.
+
+`lib/calls/ui/missed_calls_screen.dart` affiche maintenant cet historique (nom de la conversation
+quand la salle existe encore localement, sinon l'identifiant Matrix brut ; purge manuelle),
+accessible depuis l'icône dédiée dans `RoomsScreen`. Une proposition reçue dans cette conversation
+pour cet écran visait une classe `SecureStorage` et des champs (`sender_id`) qui n'existent pas
+dans ce dépôt — l'écran utilise directement `CallOpsecStore`/`MissedCall`, déjà en place.
