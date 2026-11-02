@@ -115,7 +115,6 @@ class PinScreen extends StatefulWidget {
     this.onSuccess,
     this.onWipe,
     this.pendingPin,
-    this.excludePin,
   });
 
   final PinScreenMode mode;
@@ -124,9 +123,6 @@ class PinScreen extends StatefulWidget {
 
   /// En mode [PinScreenMode.confirm] : le code saisi au premier écran, à comparer.
   final String? pendingPin;
-
-  /// En mode [PinScreenMode.setDuress] : le code normal, que le code de contrainte ne doit pas égaler.
-  final String? excludePin;
 
   @override
   State<PinScreen> createState() => _PinScreenState();
@@ -211,7 +207,21 @@ class _PinScreenState extends State<PinScreen> {
         Navigator.of(context).pop();
         widget.onSuccess?.call();
       case PinScreenMode.setDuress:
-        if (_pin == widget.excludePin) {
+        // Trouvé en audit interne : cette vérification comparait auparavant `_pin` à un champ
+        // `excludePin` censé porter le code normal en clair — jamais réellement transmis par
+        // l'appelant (LockSettingsScreen construisait ce PinScreen sans ce paramètre), et de
+        // toute façon structurellement impossible à y faire transiter proprement : le code normal
+        // n'est JAMAIS gardé en clair une fois défini (seule son empreinte PBKDF2 est persistée,
+        // voir [AppLock]), donc aucun appelant arrivant depuis les réglages ne peut jamais le
+        // connaître. Conséquence réelle : rien n'empêchait de définir un code de contrainte
+        // identique au code normal. Comme [AppLock.check] teste la contrainte EN PREMIER, cela
+        // aurait transformé chaque déverrouillage normal en effacement total — un PIN qui
+        // fonctionnait au moment du réglage se serait mis à tout détruire au prochain usage normal,
+        // sans aucun signal d'alerte pour l'utilisateur. Corrigé en comparant directement à
+        // l'empreinte déjà en stockage via [AppLock.classify], qui n'a besoin que du PIN candidat
+        // tout juste saisi — jamais de code en clair à faire transiter.
+        if (await AppLock.classify(_pin) == PinResult.ok) {
+          if (!mounted) return;
           setState(() {
             _busy = false;
             _pin = '';
