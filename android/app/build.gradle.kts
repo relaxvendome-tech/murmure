@@ -3,7 +3,9 @@ import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
-    id("kotlin-android")
+    // Le plugin Kotlin est appliqué par le Flutter Gradle plugin lui-même (gabarit officiel
+    // `flutter create` de cette version de Flutter) : pas de id("kotlin-android") séparé ici,
+    // sous peine d'un conflit de configuration avec AGP 9+.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -27,9 +29,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
@@ -67,6 +66,15 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+}
+
+// DSL Kotlin "nouvelle génération" (AGP 9+) : le bloc jvmTarget se met désormais ici, en
+// dehors de `android { }`, et plus via `kotlinOptions` (supprimé depuis AGP 9, voir le
+// gabarit officiel `flutter create` de cette version de Flutter).
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 

@@ -18,11 +18,13 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    // AGP/Kotlin alignés sur le wrapper Gradle 8.14.2 (android/gradle/wrapper/gradle-wrapper.properties) :
-    // Flutter exige Gradle >= 8.14.0 depuis ses versions récentes (voir message d'erreur du premier
-    // run CI), ce qui pousse à son tour une version d'AGP assez récente pour l'accepter.
-    id("com.android.application") version "8.9.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.1.0" apply false
+    // Versions reprises telles quelles du gabarit `flutter create` officiel de la version de
+    // Flutter utilisée en CI (lib/src/android/gradle_utils.dart : templateAndroidGradlePluginVersion
+    // / templateKotlinGradlePluginVersion / templateDefaultGradleVersion), plutôt que devinées —
+    // les tentatives précédentes (AGP 8.5.2 puis 8.9.1) étaient toutes en dessous du minimum que
+    // cette version de Flutter exige.
+    id("com.android.application") version "9.1.0" apply false
+    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
 
 include(":app")
