@@ -5,6 +5,7 @@ import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import '../stealth.dart';
+import 'group_screen.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
 import 'qr_screens.dart';
@@ -95,13 +96,50 @@ class RoomsScreen extends StatelessWidget {
         },
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => Navigator.of(context)
-            .push(MaterialPageRoute(builder: (_) => AddContactScreen(client: client))),
-        child: const Icon(Icons.person_add_alt_1),
+        onPressed: () => _showNewConversationSheet(context),
+        child: const Icon(Icons.add),
       ),
     );
   }
+
+  Future<void> _showNewConversationSheet(BuildContext context) async {
+    final choice = await showModalBottomSheet<_NewConversationKind>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.person_add_alt_1),
+              title: const Text('Ajouter un contact'),
+              onTap: () => Navigator.of(sheetContext).pop(_NewConversationKind.contact),
+            ),
+            ListTile(
+              leading: const Icon(Icons.group_add),
+              title: const Text('Créer un groupe'),
+              onTap: () => Navigator.of(sheetContext).pop(_NewConversationKind.group),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !context.mounted) return;
+    switch (choice) {
+      case _NewConversationKind.contact:
+        Navigator.of(context)
+            .push(MaterialPageRoute(builder: (_) => AddContactScreen(client: client)));
+      case _NewConversationKind.group:
+        final room = await Navigator.of(context)
+            .push<Room>(MaterialPageRoute(builder: (_) => NewGroupScreen(client: client)));
+        if (room != null && context.mounted) {
+          Navigator.of(context)
+              .push(MaterialPageRoute(builder: (_) => ChatScreen(room: room)));
+        }
+    }
+  }
 }
+
+enum _NewConversationKind { contact, group }
 
 /// Ajout d'un contact par identifiant Matrix (collé ou scanné par QR) ; ouvre ou crée la
 /// conversation directe chiffrée (Megolm) avec lui.
