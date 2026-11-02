@@ -21,7 +21,7 @@ if (hasReleaseSigning) {
 
 android {
     namespace = "fr.lansight.murmure"
-    compileSdk = 34
+    compileSdk = 35
     ndkVersion = "26.3.11579264"
 
     compileOptions {
@@ -39,7 +39,7 @@ android {
         // repli logiciel du Keystore) dès l'API 26 pour ne pas exclure les téléphones plus anciens
         // — importants dans le contexte d'usage visé (manifestations, matériel pas toujours récent).
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
