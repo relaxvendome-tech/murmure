@@ -14,8 +14,22 @@ import 'media.dart';
 import 'mesh/mesh.dart';
 import 'network.dart';
 
-/// Compte local : identifiants et secrets gardés dans le Keystore Android (StrongBox quand
-/// disponible, via flutter_secure_storage).
+/// Compte local : identifiants et secrets gardés dans le Keystore Android, via
+/// flutter_secure_storage.
+///
+/// LIMITE HONNÊTE (corrige une inexactitude trouvée en audit interne dans ce commentaire même) :
+/// ce commentaire affirmait auparavant « StrongBox quand disponible », ce que la bibliothèque ne
+/// permet pas de garantir. `AndroidOptions` (vérifié sur la documentation publiée du paquet) n'a
+/// AUCUN paramètre lié à StrongBox — seuls `encryptedSharedPreferences`, `resetOnError`,
+/// `keyCipherAlgorithm`, `storageCipherAlgorithm`, `sharedPreferencesName` et
+/// `preferencesKeyPrefix` existent. Sur Android, forcer l'utilisation de la puce StrongBox (quand
+/// le matériel la propose) demande d'appeler explicitement `setIsStrongBoxBacked(true)` sur le
+/// `KeyGenParameterSpec` natif — flutter_secure_storage n'expose ce choix à l'appelant Dart dans
+/// aucune version de son API publique, donc rien dans ce dépôt ne peut l'activer ni le garantir
+/// depuis ce fichier. La clé reste protégée par l'Android Keystore (TEE, ou StrongBox si et
+/// seulement si le plugin le fait lui-même en interne sans l'exposer — non vérifié ici, et à ne
+/// pas supposer), ce qui est déjà la propriété de sécurité réelle sur laquelle compter ; ne pas
+/// présenter StrongBox comme acquis dans la documentation ou face à l'utilisateur.
 class Account {
   static const _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
