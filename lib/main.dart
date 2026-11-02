@@ -3,7 +3,6 @@ import 'package:matrix/matrix.dart';
 
 import 'account.dart';
 import 'media.dart';
-import 'mesh/mesh.dart';
 import 'ui/lock_screens.dart';
 import 'ui/onboarding_screen.dart';
 import 'ui/rooms_screen.dart';

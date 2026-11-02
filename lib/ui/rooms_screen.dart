@@ -105,11 +105,11 @@ class _AddContactScreenState extends State<AddContactScreen> {
       _error = null;
     });
     try {
-      final existing = widget.client.rooms.where((r) =>
-          !r.isSpace &&
-          r.summary.mIsDirect == true &&
-          r.getParticipants().any((m) => m.id == id));
-      final room = existing.isNotEmpty ? existing.first : await _createDirectChat(id);
+      // startDirectChat retrouve lui-même une conversation existante avec ce contact
+      // (via Client.getDirectChatFromUserId) avant d'en créer une nouvelle.
+      final roomId = await widget.client.startDirectChat(id, enableEncryption: true);
+      final room = widget.client.getRoomById(roomId);
+      if (room == null) throw Exception('Conversation introuvable après création');
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(room: room)));
     } catch (e) {
@@ -119,12 +119,6 @@ class _AddContactScreenState extends State<AddContactScreen> {
         _error = '$e';
       });
     }
-  }
-
-  Future<Room> _createDirectChat(String userId) async {
-    final roomId = await widget.client.startDirectChat(userId, enableEncryption: true);
-    final room = widget.client.getRoomById(roomId);
-    return room ?? (throw Exception('Conversation introuvable après création'));
   }
 
   @override

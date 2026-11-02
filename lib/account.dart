@@ -87,18 +87,17 @@ class Account {
   }
 
   static Future<void> setDisplayName(Client client, String name) =>
-      client.setProfileField(client.userID!, 'displayname', {'displayname': name});
+      client.setDisplayName(client.userID!, name);
 
   /// Supprime le compte sur le serveur, puis efface tout de ce téléphone.
   static Future<void> deleteEverything(Client client) async {
     final password = await _storage.read(key: 'password');
     if (password != null && client.isLogged()) {
       try {
-        await client.deactivateAccount(erase: true);
+        await client.deactivateAccount();
       } on MatrixException catch (e) {
         if (!e.requireAdditionalAuthentication) rethrow;
         await client.deactivateAccount(
-          erase: true,
           auth: AuthenticationData.fromJson({
             'type': 'm.login.password',
             'identifier': {'type': 'm.id.user', 'user': client.userID},
