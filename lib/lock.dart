@@ -54,11 +54,21 @@ class AppLock {
   /// du code hors de l'arbre de widgets (comme ce delegate d'appels, construit avant tout widget,
   /// voir main.dart) de savoir si l'appli est RÉELLEMENT déverrouillée à l'instant présent — pas
   /// seulement si un code existe (`AppLock.enabled()`, qui ne dit rien de l'état de session en
-  /// cours). `true` par défaut tant qu'aucun [LockGate] n'a encore tranché (appli sans code
-  /// configuré, ou démarrage pas encore terminé) : un faux positif ici bloquerait des appels
-  /// légitimes sans aucun bénéfice de sécurité, puisque sans code configuré il n'y a justement
-  /// rien à bypasser.
-  static bool isUnlocked = true;
+  /// cours).
+  ///
+  /// Trouvé en audit interne (contre-vérification croisée IA d'un correctif que je venais
+  /// d'écrire, confirmé en relisant le code réel) : initialiser ce drapeau à `true` par défaut —
+  /// pour ne jamais bloquer d'appel légitime quand aucun code n'est configuré — ouvrait une
+  /// fenêtre d'échec OUVERT (fail-open) bien réelle : [LockGate.initState] lance `_init()` de
+  /// façon asynchrone (lecture Keystore + calcul), et tant que cet `await` n'a pas abouti,
+  /// `isUnlocked` reste à sa valeur de déclaration. Un appel entrant arrivant dans cette fenêtre
+  /// — quelques millisecondes au tout premier lancement de l'appli — aurait donc poussé l'écran
+  /// d'appel par-dessus un verrou dont l'état réel n'était pas encore connu, exactement le
+  /// contournement que ce drapeau existe pour empêcher. `false` par défaut (échec FERMÉ) : le
+  /// pire cas est un appel arrivant littéralement avant que l'appli n'ait fini de démarrer,
+  /// traité comme un appel manqué — jamais un bypass du verrou. [LockGate._init] remet la bonne
+  /// valeur dès qu'elle est connue, quelques instants plus tard.
+  static bool isUnlocked = false;
 
   static Future<bool> enabled() async => (await Account.read('pin_hash')) != null;
   static Future<bool> hasDuress() async => (await Account.read('duress_hash')) != null;
