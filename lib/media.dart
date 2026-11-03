@@ -10,6 +10,16 @@ import 'package:path_provider/path_provider.dart';
 /// écrasé avant suppression (la suppression seule laisse les données sur le disque flash jusqu'à
 /// réécriture par le système — l'écrasement réduit la fenêtre d'exposition, sans garantie absolue
 /// sur SSD avec wear-leveling, ce qu'aucune appli ne peut garantir).
+///
+/// À NE PAS OUBLIER quand l'envoi de médias sera implémenté (constaté en audit interne : aucun
+/// sélecteur de photo/caméra n'existe encore dans ce dépôt — `lib/ui/rooms_screen.dart` n'envoie
+/// que du texte, donc rien à corriger ici pour l'instant, mais ce point structurera cette
+/// fonctionnalité dès sa conception plutôt qu'en correctif après coup) : une photo prise par
+/// l'appareil embarque typiquement des métadonnées EXIF (coordonnées GPS, horodatage précis,
+/// modèle de l'appareil) qui survivraient au chiffrement de bout en bout — le destinataire, ou
+/// quiconque récupère le fichier déchiffré ensuite, les verrait en clair même si le transport est
+/// chiffré. Toute fonctionnalité d'envoi de média devra dépouiller ces métadonnées AVANT
+/// chiffrement/envoi, jamais s'appuyer sur le serveur ou le destinataire pour le faire.
 class MediaCache {
   static Future<Directory> _dir() async {
     final base = await getTemporaryDirectory();

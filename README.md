@@ -11,7 +11,9 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
 
 - adresse du serveur configurable depuis l'appli (plus jamais codée en dur dans le binaire)
 - clé de chiffrement de la base locale (SQLCipher) séparée du code PIN, gardée dans l'Android
-  Keystore (StrongBox quand disponible) — jamais dérivée du PIN
+  Keystore (protection TEE ; `flutter_secure_storage` n'expose aucun paramètre pour garantir
+  StrongBox depuis Dart — voir le commentaire de classe de `lib/account.dart`, corrigé pour ne
+  plus présenter StrongBox comme acquis) — jamais dérivée du PIN
 - code de contrainte ("duress PIN") : efface tout et ferme l'appli immédiatement (`exit(0)`),
   sans redémarrage visible qui trahirait son usage
 - mode discret (icône et écran de verrou "Calculatrice") implémenté sans jamais coder de PIN en
