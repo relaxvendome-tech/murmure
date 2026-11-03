@@ -255,6 +255,47 @@ class MeshEnvelope {
       ttl <= 0 || DateTime.now().difference(createdAt).inHours > maxAgeHours;
 }
 
+/// Trouvé en audit interne : seul le TEXTE du message passait par l'AES-GCM — l'identifiant,
+/// l'expéditeur, le [recipientHint], le rang de cliquet et l'horodatage voyageaient à côté, en
+/// clair et SANS AUCUNE protection d'intégrité (le tag GCM n'authentifie que ce qu'on lui donne à
+/// chiffrer, pas le reste de l'enveloppe). Un relais malveillant ne peut toujours pas lire ni
+/// forger un message (il n'a pas la clé de message), mais pouvait altérer ces champs en clair sans
+/// que personne ne s'en aperçoive. Le cas le plus sérieux : réécrire [MeshEnvelope.chainCounter]
+/// avant de relayer. Le destinataire légitime calcule alors la clé de déchiffrement pour CE rang
+/// falsifié (voir `_recvKeyFor` dans mesh.dart) — l'authentification GCM échoue bien et le message
+/// ne se déchiffre pas (pas de fuite de contenu), mais `_recvKeyFor` a quand même, au passage, fait
+/// avancer et mis au rebut l'état du cliquet de réception jusqu'à ce rang falsifié. Un relais sur
+/// le chemin d'un contact donné pouvait ainsi, sans jamais casser le chiffrement, pousser le
+/// cliquet de réception du destinataire bien au-delà des messages réellement envoyés — rendant
+/// irrécupérables (`counter < next`, « clé perdue pour de bon ») les prochains messages légitimes
+/// de cet expéditeur dès qu'ils arriveraient par un chemin intact. Un déni de service ciblé sur la
+/// confidentialité persistante elle-même, pas sur le contenu.
+///
+/// Corrigé en liant ces champs à l'enveloppe via l'« Associated Data » (AAD) du GCM : [id],
+/// [senderPublicKey], [recipientHint], [chainCounter] et [createdAt] sont maintenant authentifiés
+/// (toute altération fait échouer le déchiffrement, comme une altération du texte lui-même) —
+/// SAUF [MeshEnvelope.ttl], volontairement exclu : il DOIT rester modifiable par chaque relais
+/// (décrémenté à chaque saut, voir [MeshEnvelope.relayed]), l'inclure casserait l'authentification
+/// dès le premier relais légitime. Falsifier le ttl reste possible (effet borné : raccourcir ou
+/// prolonger la propagation d'un message déjà vu, jamais lire ni forger son contenu, ni désynchroniser
+/// le cliquet d'un tiers), un compromis assumé plutôt qu'un oubli.
+Uint8List _envelopeAad({
+  required Uint8List id,
+  required Uint8List senderPublicKey,
+  required Uint8List recipientHint,
+  required int chainCounter,
+  required DateTime createdAt,
+}) {
+  final b = BytesBuilder();
+  b.add(id);
+  b.add(senderPublicKey);
+  b.add(recipientHint);
+  b.add(Uint8List(4)..buffer.asByteData().setUint32(0, chainCounter, Endian.big));
+  b.add(Uint8List(4)
+    ..buffer.asByteData().setUint32(0, createdAt.millisecondsSinceEpoch ~/ 1000, Endian.big));
+  return b.toBytes();
+}
+
 /// Chiffre un message en clair avec une clé de message déjà dérivée par le cliquet (voir
 /// [meshRatchetStep]) — cette fonction ne fait plus d'ECDH ni de dérivation elle-même, c'est la
 /// responsabilité de l'appelant (mesh.dart), qui seul sait où en est l'état du cliquet.
@@ -265,15 +306,28 @@ Future<MeshEnvelope> meshEncryptWithKey({
   required Uint8List recipientHint,
   required String plaintext,
 }) async {
+  // Générés ICI, avant le chiffrement, plutôt que dans le constructeur de MeshEnvelope plus bas :
+  // l'AAD doit porter sur les valeurs réellement authentifiées, pas sur des valeurs regénérées
+  // séparément après coup (qui ne correspondraient plus à ce que [id]/[createdAt] finissent par
+  // être sur l'enveloppe envoyée).
+  final id = randomBytes(16);
+  final createdAt = DateTime.now();
   final nonce = randomBytes(12);
   final algo = AesGcm.with256bits();
   final box = await algo.encrypt(
     utf8.encode(plaintext),
     secretKey: SecretKey(messageKey),
     nonce: nonce,
+    aad: _envelopeAad(
+      id: id,
+      senderPublicKey: senderPublicKey,
+      recipientHint: recipientHint,
+      chainCounter: chainCounter,
+      createdAt: createdAt,
+    ),
   );
   return MeshEnvelope(
-    id: randomBytes(16),
+    id: id,
     senderPublicKey: senderPublicKey,
     recipientHint: recipientHint,
     chainCounter: chainCounter,
@@ -281,13 +335,13 @@ Future<MeshEnvelope> meshEncryptWithKey({
     ciphertext: Uint8List.fromList(box.cipherText),
     mac: Uint8List.fromList(box.mac.bytes),
     ttl: MeshEnvelope.maxTtl,
-    createdAt: DateTime.now(),
+    createdAt: createdAt,
   );
 }
 
 /// Déchiffre une enveloppe avec une clé de message déjà retrouvée par le cliquet (voir
-/// mesh.dart:_MeshRatchetStore). Retourne null si l'authentification échoue (altération, ou
-/// mauvaise clé).
+/// mesh.dart:_MeshRatchetStore). Retourne null si l'authentification échoue (altération du texte
+/// OU des champs d'enveloppe couverts par l'AAD — voir [_envelopeAad] — ou mauvaise clé).
 Future<String?> meshDecryptWithKey({
   required Uint8List messageKey,
   required MeshEnvelope envelope,
@@ -297,6 +351,13 @@ Future<String?> meshDecryptWithKey({
     final clear = await algo.decrypt(
       SecretBox(envelope.ciphertext, nonce: envelope.nonce, mac: Mac(envelope.mac)),
       secretKey: SecretKey(messageKey),
+      aad: _envelopeAad(
+        id: envelope.id,
+        senderPublicKey: envelope.senderPublicKey,
+        recipientHint: envelope.recipientHint,
+        chainCounter: envelope.chainCounter,
+        createdAt: envelope.createdAt,
+      ),
     );
     return utf8.decode(clear);
   } catch (_) {
