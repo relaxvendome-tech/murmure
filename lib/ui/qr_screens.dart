@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 
 /// Scanne un QR code (contact Murmure) et renvoie le texte lu via [Navigator.pop].
@@ -65,7 +66,36 @@ class MyQrScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              SelectableText(shareableId, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+              // Trouvé en audit interne (demande de simplicité comparable à Signal/Telegram) :
+              // partager son code sans scan en face à face (par un autre canal déjà de confiance,
+              // par exemple un appel vidéo authentifié) exigeait de sélectionner le texte à la
+              // main lettre par lettre — un `SelectableText` seul n'offre qu'une poignée de
+              // sélection, pas une action de copie directe. Un bouton « Copier » fait ce que fait
+              // déjà Signal/Telegram pour leur propre identifiant, sans rien changer à la donnée
+              // copiée (le même `murmure:@xxx:serveur` que le QR encode, toujours uniquement
+              // l'identifiant Matrix public, jamais un secret).
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: SelectableText(
+                      shareableId,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.copy, size: 18),
+                    tooltip: 'Copier',
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: shareableId));
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context)
+                          .showSnackBar(const SnackBar(content: Text('Code copié')));
+                    },
+                  ),
+                ],
+              ),
             ],
           ),
         ),
