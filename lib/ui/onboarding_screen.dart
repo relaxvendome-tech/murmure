@@ -79,6 +79,20 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
       setState(() => _error = 'Adresse de serveur invalide');
       return;
     }
+    // Trouvé en audit interne : seuls `hasScheme`/`host.isNotEmpty` étaient vérifiés — un
+    // "http://..." passait la validation aussi bien qu'un "https://...". En mode direct ou proxy
+    // SOCKS5 personnalisé, ça aurait fait transiter en clair jeton d'accès, identifiants d'appareil
+    // et métadonnées Matrix (le chiffrement de bout en bout des messages ne protège pas ces
+    // champs-là) face à quiconque observe le réseau — exactement le scénario que ce champ
+    // préremplit par défaut sur "https://" sans l'imposer. Exception pour les adresses .onion : un
+    // service oignon Tor s'authentifie par son adresse elle-même et Tor chiffre déjà le trajet de
+    // bout en bout jusqu'à lui, y compris en mode "direct" (qui route alors vers Tor via le proxy
+    // SOCKS système) — c'est l'usage normal (cf. Tor Browser, qui n'exige pas non plus HTTPS pour
+    // les .onion).
+    if (uri.scheme != 'https' && !uri.host.endsWith('.onion')) {
+      setState(() => _error = 'Seules les adresses https:// (ou .onion) sont acceptées');
+      return;
+    }
     if (_mode == NetMode.customProxy && _proxyHostCtrl.text.trim().isEmpty) {
       setState(() => _error = 'Adresse du proxy SOCKS5 requise');
       return;
