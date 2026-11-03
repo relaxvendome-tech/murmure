@@ -72,10 +72,16 @@ class MeshForegroundService : Service() {
 
     private fun buildNotification(calcMode: Boolean): Notification {
         val manager = getSystemService(NotificationManager::class.java)
-        val (channelId, title, text) = if (calcMode) {
-            Triple(CHANNEL_CALC, "Calculatrice", "Synchronisation des fonctions en arrière-plan")
+        // Trouvé en audit interne : titre et texte étaient bien adaptés au mode discret, mais
+        // `setSmallIcon` restait figé sur `ic_launcher` (le logo Murmure) dans les deux cas. Cette
+        // icône s'affiche en permanence dans la barre d'état ET dans le panneau de notifications
+        // tant que le service tourne — exactement la trahison visuelle permanente que ce fichier
+        // documente plus haut comme la TENSION OPSEC à éviter, maintenant qu'un texte "Calculatrice"
+        // cohabitait avec un logo qui dit le contraire.
+        val (channelId, title, text, icon) = if (calcMode) {
+            Quadruple(CHANNEL_CALC, "Calculatrice", "Synchronisation des fonctions en arrière-plan", R.mipmap.ic_calculator)
         } else {
-            Triple(CHANNEL_HONEST, "Murmure", "Mode hors-ligne actif (relais Bluetooth)")
+            Quadruple(CHANNEL_HONEST, "Murmure", "Mode hors-ligne actif (relais Bluetooth)", R.mipmap.ic_launcher)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channelName = if (calcMode) "Synchronisation arrière-plan" else "Mode hors-ligne"
@@ -85,12 +91,14 @@ class MeshForegroundService : Service() {
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(icon)
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
+
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
