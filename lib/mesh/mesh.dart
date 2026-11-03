@@ -80,6 +80,31 @@ class Mesh {
   int _rotateIndex = 0;
   bool _running = false;
 
+  /// Appareils avec lesquels un échange GATT (connexion → écriture → lecture → déconnexion, voir
+  /// [_tryExchange]) est déjà en cours, et horodatage du dernier échange terminé avec chacun.
+  ///
+  /// Trouvé en audit interne — un défaut réel, pas une optimisation de principe : [_onScanResults]
+  /// est rappelé en continu (`continuousUpdates: true` au scan) avec la liste des appareils
+  /// actuellement visibles, potentiellement plusieurs fois par seconde pour un même appareil à
+  /// portée stable. Avant cette correction, CHAQUE appel déclenchait un nouvel essai d'échange
+  /// (`unawaited(_tryExchange(...))`) pour chaque appareil visible, sans jamais vérifier qu'un
+  /// échange avec ce même appareil n'était pas déjà en cours. `BluetoothDevice.connect()` sérialise
+  /// bien ses opérations par un mutex global interne au paquet (vérifié dans le code source réel de
+  /// `flutter_blue_plus` au tag correspondant à la version pinnée, release 1.36.0), donc rien ne
+  /// pouvait planter — mais ça ne fait qu'empiler les tentatives en attente derrière ce mutex, sans
+  /// jamais les annuler : pour un ou deux téléphones croisés en continu, la radio Bluetooth restait
+  /// occupée en boucle à reconnecter/réécrire/relire/déconnecter le(s) même(s) appareil(s) aussi
+  /// vite que le mutex le permettait, bien au-delà de ce qu'un relais de messages exige — gaspillage
+  /// de batterie et de bande passante radio, qui pouvait aussi retarder l'échange avec un AUTRE
+  /// appareil nouvellement détecté, coincé derrière cette file. On ignore maintenant un appareil
+  /// déjà en cours d'échange, et on applique un délai minimal entre deux échanges réussis avec le
+  /// même appareil (voir [_exchangeCooldown]) — le relais reste aussi réactif que nécessaire (un
+  /// message neuf dans la file sera de toute façon proposé au prochain échange, pas perdu), sans
+  /// solliciter la radio en continu pour rien.
+  final _inFlightExchanges = <DeviceIdentifier>{};
+  final _lastExchangeAt = <DeviceIdentifier, DateTime>{};
+  static const _exchangeCooldown = Duration(seconds: 10);
+
   /// File d'attente FIFO : sérialise tout ce qui touche à l'état du cliquet (table `ratchet_chain`
   /// / `ratchet_skipped`) et à la déduplication (`seen`), pour [_handleIncoming] et [queueMessage].
   ///
@@ -243,6 +268,8 @@ class Mesh {
     _gattSub = null;
     _rotateTimer?.cancel();
     _rotateTimer = null;
+    _inFlightExchanges.clear();
+    _lastExchangeAt.clear();
     await MeshGattServerBridge.stop();
     await MeshForegroundService.stop();
     try {
@@ -275,9 +302,21 @@ class Mesh {
 
   Future<void> _onScanResults(List<ScanResult> results) async {
     for (final r in results) {
+      final id = r.device.remoteId;
+      // Voir le commentaire de [_inFlightExchanges] : on laisse un échange déjà en cours se
+      // terminer, et on respecte un délai minimal depuis le dernier échange réussi avec cet
+      // appareil, plutôt que de ré-essayer à chaque nouvel appel de ce callback.
+      if (_inFlightExchanges.contains(id)) continue;
+      final last = _lastExchangeAt[id];
+      if (last != null && DateTime.now().difference(last) < _exchangeCooldown) continue;
+
       // Un appareil Murmure à portée : on tente de lui livrer tout ce qu'on transporte pour lui,
       // et de récupérer ce qu'il transporte pour nous — sans jamais rien déchiffrer en chemin.
-      unawaited(_tryExchange(r.device));
+      _inFlightExchanges.add(id);
+      unawaited(_tryExchange(r.device).whenComplete(() {
+        _inFlightExchanges.remove(id);
+        _lastExchangeAt[id] = DateTime.now();
+      }));
     }
   }
 
