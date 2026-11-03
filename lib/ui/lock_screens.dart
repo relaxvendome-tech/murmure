@@ -8,6 +8,7 @@ import '../calls/services/call_opsec_notifier.dart';
 import '../config.dart';
 import '../lock.dart';
 import 'calculator_lock_screen.dart';
+import 'update_screen.dart';
 
 /// Porte d'entrée de l'appli : affiche l'écran de verrou adapté (classique ou calculatrice selon
 /// le réglage « mode discret ») tant que l'appli n'est pas déverrouillée, puis laisse passer vers
@@ -467,6 +468,15 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
               },
             ),
           ],
+          const Divider(height: 32),
+          ListTile(
+            leading: const Icon(Icons.system_update_outlined),
+            title: const Text('Mises à jour'),
+            subtitle: const Text('Vérifier et installer une nouvelle version de Murmure'),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const UpdateScreen()),
+            ),
+          ),
           if (widget.onDeleteAccount != null) ...[
             const Divider(height: 32),
             Padding(

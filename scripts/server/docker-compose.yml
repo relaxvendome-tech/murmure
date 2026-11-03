@@ -39,6 +39,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+      # Mises à jour de l'appli (voir docs/UPDATES.md et Caddyfile) : facultatif — un dossier
+      # `./updates/` vide ou absent côté hôte ne gêne en rien le fonctionnement du serveur
+      # Matrix lui-même, `/updates/` répondra simplement 404 tant que rien n'y est publié.
+      - ./updates:/srv/updates:ro
     depends_on: [conduit]
     networks: [murmure]
 
