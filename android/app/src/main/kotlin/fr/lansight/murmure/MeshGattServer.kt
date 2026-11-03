@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -48,6 +49,12 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         private const val TAG = "MeshGattServer"
         private val SERVICE_UUID: UUID = UUID.fromString("5a4d5552-4d55-5245-0000-000000000001")
         private val CHAR_UUID: UUID = UUID.fromString("5a4d5552-4d55-5245-0000-000000000002")
+
+        /// Garde-fou : une enveloppe mesh fait au plus 512 octets (voir mesh.dart). Un appareil qui
+        /// enverrait des écritures "préparées" (voir [onCharacteristicWriteRequest]) sans jamais les
+        /// exécuter ne doit pas pouvoir faire grossir le tampon de réassemblage indéfiniment (DoS
+        /// mémoire) ; marge large pour ne jamais rejeter une écriture légitime.
+        private const val MAX_PENDING_WRITE_BYTES = 4096
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -57,6 +64,12 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
 
     @Volatile private var currentReadValue: ByteArray = ByteArray(0)
     private var eventSink: EventChannel.EventSink? = null
+
+    /// Tampon des écritures BLE "préparées" (ATT Prepare Write / Execute Write), par appareil
+    /// (adresse MAC). Voir [onCharacteristicWriteRequest]/[onExecuteWriteRequest] pour pourquoi
+    /// c'est nécessaire : une seule écriture logique côté Dart peut arriver ici fragmentée en
+    /// plusieurs appels de ce callback.
+    private val pendingPreparedWrites = mutableMapOf<String, MutableList<Pair<Int, ByteArray>>>()
 
     private val methodChannel = MethodChannel(messenger, "fr.lansight.murmure/mesh_gatt")
     private val eventChannel = EventChannel(messenger, "fr.lansight.murmure/mesh_gatt_incoming")
@@ -157,6 +170,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         advertiser = null
         gattServer = null
         characteristic = null
+        pendingPreparedWrites.clear()
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -178,6 +192,27 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
         }
 
+        /**
+         * Trouvé en audit interne — défaut sérieux, pas cosmétique : cette méthode ignorait
+         * jusqu'ici totalement `preparedWrite`/`offset` et transmettait chaque appel de ce
+         * callback directement à Dart comme s'il s'agissait toujours d'une enveloppe complète.
+         * Or Android déclenche lui-même, de façon transparente et sans que l'application cliente
+         * (`flutter_blue_plus`, côté central) n'ait rien demandé de spécial, la procédure "Write
+         * Long Characteristic Values" de la spec Bluetooth dès qu'une écriture dépasse le MTU ATT
+         * négocié (`mtu` − 3 octets) : la valeur arrive alors fragmentée en plusieurs écritures
+         * "préparées" (`preparedWrite = true`, un `offset` croissant à chaque appel), suivies d'un
+         * `onExecuteWriteRequest` qui valide (ou annule) l'ensemble. C'est exactement le cas quand
+         * la négociation MTU échoue d'un côté ou de l'autre (voir le commentaire sur
+         * `requestMtu(517)` dans mesh.dart — déjà documenté comme un cas réel, pas hypothétique :
+         * appareil ancien, ou iOS où `requestMtu` n'a pas d'effet garanti) : chaque fragment partait
+         * alors ici vers Dart comme une enveloppe à part entière — un message tronqué et
+         * injustifiable, jamais reconstitué, que mesh_crypto.dart ne pouvait que rejeter comme
+         * corrompu. Le relais échouait donc silencieusement précisément dans le cas que la
+         * négociation MTU est censée couvrir en best-effort.
+         *
+         * Corrigé en accumulant les fragments par appareil jusqu'à [onExecuteWriteRequest], qui
+         * les réassemble dans l'ordre des `offset` avant de transmettre l'enveloppe complète.
+         */
         @SuppressLint("MissingPermission")
         override fun onCharacteristicWriteRequest(
             device: BluetoothDevice,
@@ -188,6 +223,28 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             offset: Int,
             value: ByteArray,
         ) {
+            if (preparedWrite) {
+                val pending = pendingPreparedWrites.getOrPut(device.address) { mutableListOf() }
+                val pendingTotal = pending.sumOf { it.second.size }
+                if (pendingTotal + value.size > MAX_PENDING_WRITE_BYTES) {
+                    // Garde-fou DoS (voir MAX_PENDING_WRITE_BYTES) : on abandonne ce tampon plutôt
+                    // que de le laisser grossir sans borne ; l'enveloppe en cours sera simplement
+                    // perdue, comme n'importe quelle écriture déjà rejetée ailleurs dans mesh.dart.
+                    pendingPreparedWrites.remove(device.address)
+                    if (responseNeeded) {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                    }
+                    return
+                }
+                pending.add(offset to value)
+                if (responseNeeded) {
+                    // Spec ATT : la réponse à une Prepare Write Request échoie l'offset et la
+                    // valeur reçus, pour que le central puisse vérifier l'intégrité avant d'exécuter.
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                }
+                return
+            }
+
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
@@ -198,8 +255,38 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             }
         }
 
+        /**
+         * Valide (ou annule) les écritures "préparées" accumulées pour cet appareil — voir
+         * [onCharacteristicWriteRequest]. `execute = false` correspond à une annulation demandée
+         * par le central (Cancel Write) : on jette simplement le tampon, rien à transmettre.
+         */
+        @SuppressLint("MissingPermission")
+        override fun onExecuteWriteRequest(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+            val chunks = pendingPreparedWrites.remove(device.address)
+            if (execute && chunks != null && chunks.isNotEmpty()) {
+                val total = chunks.sumOf { it.second.size }
+                val assembled = ByteArray(total)
+                for ((chunkOffset, bytes) in chunks) {
+                    val end = chunkOffset + bytes.size
+                    if (chunkOffset < 0 || end > assembled.size) continue // fragment incohérent, ignoré
+                    System.arraycopy(bytes, 0, assembled, chunkOffset, bytes.size)
+                }
+                mainHandler.post {
+                    eventSink?.success(assembled)
+                }
+            }
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+        }
+
+        @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            // Rien à faire : chaque échange est sans état, une lecture ou une écriture à la fois.
+            // Chaque échange ponctuel (lecture/écriture simple) est sans état, mais une écriture
+            // préparée en cours doit être nettoyée si l'appareil se déconnecte avant d'exécuter ou
+            // d'annuler explicitement (sinon fuite mémoire : adresse jamais revue mais tampon
+            // jamais libéré) — trouvé en audit interne en ajoutant le réassemblage ci-dessus.
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                pendingPreparedWrites.remove(device.address)
+            }
         }
     }
 }
