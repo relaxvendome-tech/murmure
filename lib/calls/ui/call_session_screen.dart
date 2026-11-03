@@ -50,6 +50,17 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   Future<void> _init() async {
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
+    // Trouvé en audit interne : cet écran est poussé avec `_answered = false` (déclaration du
+    // champ), donc son tout premier rendu affiche systématiquement l'écran de sonnerie entrante
+    // (boutons décrocher/raccrocher) — y compris pour un appel SORTANT, où c'est à la fois faux et
+    // déroutant pour l'appelant. La ligne `_answered = widget.session.isOutgoing;` qui corrigeait
+    // ça plus bas n'était qu'une AFFECTATION DE CHAMP, jamais enveloppée dans un setState : pour un
+    // appel sortant, rien ne redemandait de reconstruire l'écran après coup. En pratique, un flux
+    // média qui arrive peu après (_attach, qui appelle bien setState) finit souvent par masquer le
+    // problème par effet de bord — mais rien ne le garantit (permission micro lente, négociation
+    // WebRTC qui traîne), et un appelant resterait alors bloqué sur l'écran "Appel entrant…" de son
+    // propre appel sortant tant qu'aucun autre setState ne survient.
+    if (!mounted) return;
 
     // `CachedStreamController` rejoue aux nouveaux abonnés les flux déjà présents au moment de
     // l'abonnement (voir la doc de matrix-dart-sdk) : on ne manque donc pas un flux apparu avant
@@ -69,7 +80,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
       }
     });
 
-    _answered = widget.session.isOutgoing;
+    setState(() => _answered = widget.session.isOutgoing);
   }
 
   void _attach(WrappedMediaStream feed) {
