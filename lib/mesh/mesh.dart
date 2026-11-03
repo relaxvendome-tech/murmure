@@ -395,6 +395,9 @@ class Mesh {
       final msgKey = await _recvKeyFor(env.senderPublicKey, env.chainCounter);
       final plain = msgKey == null ? null : await meshDecryptWithKey(messageKey: msgKey, envelope: env);
       if (plain != null) {
+        // Voir [_consumeSkippedKey] : ne retirer la clé de la réserve des rangs sautés que
+        // maintenant que le déchiffrement est confirmé réussi, jamais avant.
+        await _consumeSkippedKey(env.senderPublicKey, env.chainCounter);
         await db.insert('inbox', {
           'id': env.id,
           'sender': env.senderPublicKey,
@@ -512,6 +515,17 @@ class Mesh {
   /// de réception jusqu'à ce rang (en mettant en réserve les rangs sautés au passage). Retourne
   /// null si la clé n'est plus disponible : rang déjà consommé et oublié (comportement attendu —
   /// confidentialité persistante, pas une panne), ou saut trop grand pour être raisonnable.
+  /// À appeler uniquement après un déchiffrement RÉUSSI avec une clé obtenue via [_recvKeyFor] —
+  /// voir le commentaire dans cette méthode sur la branche « clé déjà en réserve ». Ne retire la
+  /// clé de [ratchet_skipped] qu'ici, jamais avant d'avoir confirmé que le déchiffrement a abouti.
+  /// Sans effet (et sans erreur) si [counter] ne correspond à aucune ligne — c'est le cas normal
+  /// quand la clé provenait de l'avancée directe du cliquet plutôt que de la réserve.
+  Future<void> _consumeSkippedKey(Uint8List peerPublicKey, int counter) async {
+    final db = await _database();
+    await db.delete('ratchet_skipped',
+        where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter]);
+  }
+
   Future<Uint8List?> _recvKeyFor(Uint8List peerPublicKey, int counter) async {
     await _ensureRatchetSeeded(peerPublicKey);
     final db = await _database();
@@ -519,7 +533,16 @@ class Mesh {
     final skipped = await db.query('ratchet_skipped',
         where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter], limit: 1);
     if (skipped.isNotEmpty) {
-      await db.delete('ratchet_skipped', where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter]);
+      // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : cette clé était
+      // supprimée de la réserve ICI, avant même la tentative de déchiffrement par l'appelant. Un
+      // paquet corrompu en transit (collision Bluetooth, retransmission partielle) fait échouer
+      // l'authentification GCM côté [_handleIncomingLocked] — la clé était alors déjà perdue, alors
+      // qu'un exemplaire valide du MÊME message (même rang de cliquet) pouvait très bien arriver
+      // plus tard par un autre chemin du maillage (relais store-and-forward multi-chemins, c'est le
+      // scénario normal, pas un cas limite) : ce second exemplaire valide devenait alors
+      // définitivement indéchiffrable (« clé perdue pour de bon »), pour rien. La clé n'est
+      // maintenant retirée de la réserve qu'après un déchiffrement confirmé réussi, voir
+      // [_consumeSkippedKey] et son appel dans [_handleIncomingLocked].
       return Uint8List.fromList(skipped.first['message_key'] as List<int>);
     }
 
