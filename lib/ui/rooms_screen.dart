@@ -469,11 +469,30 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Trouvé par Grok (revue croisée IA) sous la forme « le texte est effacé avant que l'envoi
+  /// réussisse, donc perdu en cas d'échec » — vérifié ensuite contre le SDK matrix-dart pinné
+  /// (lib/src/room.dart, Room.sendEvent) avant d'agir : ce n'est pas tout à fait ça. Le texte
+  /// n'est PAS perdu — le SDK insère immédiatement un écho local dans la timeline (statut
+  /// `sending`, devenant `error` en cas d'échec), donc la bulle reste visible et récupérable.
+  /// Le vrai problème, confirmé en lisant cet écran : aucun endroit du fichier ne lit jamais ce
+  /// statut (`EventStatus`) — un message qui échoue silencieusement à partir prend l'apparence
+  /// EXACTE d'un message envoyé avec succès, sans aucun indice. Pour l'usage visé par cette appli
+  /// (réseau coupé ou dégradé en manifestation), c'est le scénario le plus probable, pas un cas
+  /// limite. `sendTextEvent` retourne `null` précisément dans ce cas (voir le SDK) ; on l'utilise
+  /// ici pour au moins prévenir explicitement plutôt que de laisser croire que c'est parti.
   Future<void> _send() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
     _textCtrl.clear();
-    await widget.room.sendTextEvent(text);
+    final eventId = await widget.room.sendTextEvent(text);
+    if (eventId == null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              "Message non envoyé (réseau indisponible ou serveur injoignable) — il reste visible ci-dessus, en attente"),
+        ),
+      );
+    }
   }
 
   @override

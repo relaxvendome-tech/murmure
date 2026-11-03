@@ -8,6 +8,15 @@ class QrScanScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Trouvé par Grok (revue croisée IA), vérifié ensuite contre le comportement documenté et
+    // l'exemple officiel de flutter_zxing (`scanDelaySuccess` : « délai entre deux scans quand un
+    // code est détecté » — implique que la lecture continue après succès, juste espacée ; et leur
+    // propre exemple ne fait jamais de Navigator.pop() nu dans onScan, il remplace plutôt le
+    // widget affiché). La caméra reste active et continue de lire pendant l'animation de
+    // transition qui suit un premier Navigator.pop() ; un second appel sur cette même route déjà
+    // en train de se dépiler lève une exception Navigator. `_popped` garantit un seul pop, même si
+    // onScan est déclenché plusieurs fois pour le même code tenu trop longtemps dans le cadre.
+    var popped = false;
     return Scaffold(
       appBar: AppBar(title: const Text('Scanner un code')),
       body: ReaderWidget(
@@ -16,8 +25,10 @@ class QrScanScreen extends StatelessWidget {
         showFlashlight: true,
         showToggleCamera: true,
         onScan: (Code code) {
+          if (popped) return;
           final text = code.text;
           if (text != null && text.isNotEmpty) {
+            popped = true;
             Navigator.of(context).pop(text);
           }
         },
