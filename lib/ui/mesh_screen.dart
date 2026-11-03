@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
+import 'qr_screens.dart';
 import 'theme.dart';
 
 /// Mode Bluetooth maillé : fonctionnement sans réseau ni serveur (coupure, brouillage). Scanne ET
@@ -25,6 +27,7 @@ class _MeshScreenState extends State<MeshScreen> {
   StreamSubscription<MeshEvent>? _sub;
   final _log = <_LogEntry>[];
   String? _myCode;
+  List<({Uint8List peer, String label})> _contacts = [];
 
   /// Minuteur d'auto-effacement du presse-papiers après une copie du code de contact — voir
   /// [_copyMyCode]. Trouvé en audit interne : avant cette correction, `Clipboard.setData` n'était
@@ -86,6 +89,148 @@ class _MeshScreenState extends State<MeshScreen> {
     Mesh.instance.identity().then((id) {
       if (mounted) setState(() => _myCode = meshB64(id.publicKeyBytes));
     });
+    _loadContacts();
+  }
+
+  Future<void> _loadContacts() async {
+    final contacts = await Mesh.instance.contacts();
+    if (mounted) setState(() => _contacts = contacts);
+  }
+
+  /// Décode un code de contact collé ou scanné (même format que « Mon code de contact
+  /// Bluetooth » — base64url sans rembourrage d'une clé publique X25519) et vérifie sa longueur
+  /// (32 octets) avant de l'accepter. Renvoie `null` sans lever d'exception pour un texte
+  /// invalide — un contact ajouté par erreur ne doit jamais faire planter l'écran, seulement
+  /// afficher un message clair.
+  Uint8List? _decodeContactCode(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return null;
+    try {
+      final bytes = meshUnB64(text);
+      return bytes.length == 32 ? bytes : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _addContact() async {
+    final codeCtrl = TextEditingController();
+    final labelCtrl = TextEditingController();
+    String? error;
+    final added = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Ajouter un contact Bluetooth'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Collez ou scannez le code que ce contact vous a montré depuis son propre écran '
+                '« Mode hors-ligne ». Ce code ne contient que sa clé publique Bluetooth, jamais '
+                'de secret.',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: labelCtrl,
+                decoration: const InputDecoration(labelText: 'Nom (pour vous seul)'),
+                textCapitalization: TextCapitalization.words,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: codeCtrl,
+                      decoration: const InputDecoration(labelText: 'Code du contact'),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    tooltip: 'Scanner un code',
+                    onPressed: () async {
+                      final scanned = await Navigator.of(dialogContext).push<String>(
+                          MaterialPageRoute(builder: (_) => const QrScanScreen()));
+                      if (scanned != null) codeCtrl.text = scanned;
+                    },
+                  ),
+                ],
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 8),
+                Text(error!, style: TextStyle(color: Theme.of(dialogContext).colorScheme.error)),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final label = labelCtrl.text.trim();
+                final peer = _decodeContactCode(codeCtrl.text);
+                if (label.isEmpty || peer == null) {
+                  setDialogState(() => error = 'Nom et code valides requis');
+                  return;
+                }
+                await Mesh.instance.addContact(peer, label);
+                Navigator.of(dialogContext).pop(true);
+              },
+              child: const Text('Ajouter'),
+            ),
+          ],
+        ),
+      ),
+    );
+    codeCtrl.dispose();
+    labelCtrl.dispose();
+    if (added == true) await _loadContacts();
+  }
+
+  Future<void> _removeContact(Uint8List peer) async {
+    await Mesh.instance.removeContact(peer);
+    await _loadContacts();
+  }
+
+  /// Compose et met en file un message pour [contact] (voir [Mesh.queueMessage]). Le message part
+  /// réellement dès le prochain appareil Murmure croisé qui le relaie ou le lui remet directement
+  /// — pas forcément tout de suite, c'est le principe même du store-and-forward hors-ligne.
+  Future<void> _composeAndSend(({Uint8List peer, String label}) contact) async {
+    final textCtrl = TextEditingController();
+    final sent = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Message à ${contact.label}'),
+        content: TextField(
+          controller: textCtrl,
+          decoration: const InputDecoration(hintText: 'Votre message'),
+          maxLines: 4,
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Mettre en file'),
+          ),
+        ],
+      ),
+    );
+    final text = textCtrl.text.trim();
+    textCtrl.dispose();
+    if (sent != true || text.isEmpty) return;
+    await Mesh.instance.queueMessage(recipientPublicKey: contact.peer, text: text);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+          'Message mis en file pour ${contact.label} — part au prochain contact Bluetooth croisé'),
+    ));
   }
 
   @override
@@ -188,6 +333,48 @@ class _MeshScreenState extends State<MeshScreen> {
                 ),
               ),
             ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: Text('Contacts Bluetooth', style: Theme.of(context).textTheme.titleMedium),
+              ),
+              IconButton(
+                icon: const Icon(Icons.person_add_outlined),
+                tooltip: 'Ajouter un contact',
+                onPressed: _addContact,
+              ),
+            ],
+          ),
+          if (_contacts.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+              child: Text(
+                'Aucun contact Bluetooth pour l\'instant. Ajoutez-en un pour pouvoir lui envoyer '
+                'un message hors-ligne.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+            )
+          else
+            ..._contacts.map((c) => Card(
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: murmureAvatarColor(meshB64(c.peer)),
+                      foregroundColor: Colors.white,
+                      child: Text(c.label.isEmpty ? '?' : c.label[0].toUpperCase()),
+                    ),
+                    title: Text(c.label),
+                    subtitle: Text('${meshB64(c.peer).substring(0, 8)}…'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.close),
+                      tooltip: 'Retirer',
+                      onPressed: () => _removeContact(c.peer),
+                    ),
+                    onTap: () => _composeAndSend(c),
+                  ),
+                )),
           const SizedBox(height: 8),
           Text('Journal', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),

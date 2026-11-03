@@ -144,7 +144,7 @@ class Mesh {
     _db = await sqlcipher.openDatabase(
       dbPath,
       password: await Account.dbKey(),
-      version: 3,
+      version: 4,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE outbox (
@@ -169,6 +169,7 @@ class Mesh {
           )
         ''');
         await _createRatchetTables(db);
+        await _createContactsTable(db);
       },
       onUpgrade: (db, oldV, newV) async {
         // v1 -> v2 : ajout du cliquet symétrique (confidentialité persistante, voir
@@ -191,9 +192,61 @@ class Mesh {
           await db.execute(
               'ALTER TABLE ratchet_skipped ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
         }
+        // v3 -> v4 : trouvé en audit interne — [queueMessage] existait déjà (mise en file d'un
+        // message chiffré pour une clé publique donnée) mais aucun écran ne l'appelait jamais, et
+        // aucune table ne conservait les contacts Bluetooth ajoutés par QR (voir le commentaire de
+        // [MeshIdentity] dans mesh_crypto.dart, qui mentionne ce flux sans qu'il existe). En
+        // pratique, le mode hors-ligne pouvait recevoir et relayer des messages, mais jamais en
+        // envoyer soi-même depuis l'interface : fonctionnalité silencieusement incomplète, pas
+        // seulement une maladresse d'ergonomie. Ajoute la table qui manquait ; voir
+        // ui/mesh_screen.dart pour l'écran de contacts/envoi qui l'utilise désormais.
+        if (oldV < 4) await _createContactsTable(db);
       },
     );
     return _db!;
+  }
+
+  Future<void> _createContactsTable(sqlcipher.Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS mesh_contacts (
+        peer BLOB PRIMARY KEY,
+        label TEXT NOT NULL,
+        added_at INTEGER NOT NULL
+      )
+    ''');
+  }
+
+  /// Enregistre un contact Bluetooth (clé publique X25519 obtenue par QR ou texte, voir
+  /// ui/qr_screens.dart) sous un nom choisi localement — jamais transmis à personne, purement un
+  /// repère pour cet appareil. `insert` avec [ConflictAlgorithm.replace] permet de renommer un
+  /// contact déjà connu en le « ré-ajoutant » avec un nouveau label, sans dupliquer la ligne.
+  Future<void> addContact(Uint8List peerPublicKey, String label) async {
+    final db = await _database();
+    await db.insert(
+      'mesh_contacts',
+      {
+        'peer': peerPublicKey,
+        'label': label,
+        'added_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> removeContact(Uint8List peerPublicKey) async {
+    final db = await _database();
+    await db.delete('mesh_contacts', where: 'peer = ?', whereArgs: [peerPublicKey]);
+  }
+
+  Future<List<({Uint8List peer, String label})>> contacts() async {
+    final db = await _database();
+    final rows = await db.query('mesh_contacts', orderBy: 'added_at ASC');
+    return rows
+        .map((r) => (
+              peer: Uint8List.fromList(r['peer'] as List<int>),
+              label: r['label'] as String,
+            ))
+        .toList();
   }
 
   Future<void> _createRatchetTables(sqlcipher.Database db) async {
