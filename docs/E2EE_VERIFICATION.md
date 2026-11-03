@@ -17,42 +17,70 @@ qui authentifie aussi l'absence d'un adversaire actif pendant la vérification e
 une comparaison manuelle d'empreinte, qui dépend entièrement de la rigueur de l'utilisateur et
 d'un canal hors bande fiable (voir la limite SAS ci-dessous, toujours non résolue).
 
-**Pourquoi seulement l'empreinte, pas le flux SAS, dans cette passe :** l'API SAS de
-`matrix-dart-sdk` (`DeviceKeys.startVerification()`, `KeyVerificationManager`, `KeyVerification`,
-`sasEmojis`, `acceptSas()`/`rejectSas()`, les états `askSas`/`waitingSas`/`done`...) a été
-consultée via la documentation publiée du paquet (pub.dev), et son existence et ses grandes lignes
-sont confirmées. Mais ce bac à sable ne permet pas de garantir que la documentation consultée
-correspond strictement à la version réellement résolue par ce dépôt (`matrix: ^0.29.0`, résolu à
-`0.29.13`, sans `pubspec.lock` committé pour le confirmer) : une requête de test vers
-`pub.dev/documentation/matrix/0.9.0/...` pendant cette même passe a renvoyé un contenu
-explicitement étiqueté comme appartenant à une version bien plus récente (11.0.0), ce qui montre
-que pub.dev ne conserve pas de façon fiable la documentation statique des anciennes versions et
-peut silencieusement en servir une autre sous une URL qui prétend être la bonne. Écrire le flux
-SAS complet (gestion d'état, événements `m.key.verification.*`, annulation, timeouts) sur la base
-d'une API dont la correspondance exacte avec le code réellement exécuté n'est pas vérifiable
-serait prendre le risque d'un bug silencieux ou d'un flux qui plante — bien pire qu'une
-fonctionnalité absente, car cela inciterait à croire qu'une vérification plus forte a été faite.
-En revanche, l'API utilisée ici (`DeviceKeys.ed25519Key`, `.verified`, `.setVerified()`,
-`Client.userDeviceKeys`, `DeviceKeysList.deviceKeys`) est confirmée identique dans toutes les
-versions consultées (de l'ancienne redirigée vers 11.0.0 jusqu'à « latest »), avec les mêmes noms
-et signatures partout — un risque de rupture d'API beaucoup plus faible, raisonnable à construire
-sans le source exact de 0.29.13 sous les yeux.
+**Mise à jour (vérification croisée contre le vrai code source, pas la documentation publiée) :**
+les sections ci-dessous (« Pourquoi ce n'est pas corrigé » et « Ce qu'il reste à faire »)
+dataient d'une passe où la seule source disponible était la documentation pub.dev, jugée non
+fiable pour la version exacte épinglée (voir le constat sur la redirection silencieuse vers
+11.0.0). Cette passe a pu lire directement le code source de `matrix-dart-sdk` au tag `v0.29.0`
+(dépôt cloné localement, licence AGPL-3.0 — voir `LICENSE-NOTICE.md` pour ce que cela implique
+pour Murmure, question non résolue à ce jour), en particulier sa propre suite de tests
+(`test/encryption/bootstrap_test.dart`, `test/encryption/key_verification_test.dart`), qui exerce
+l'API réelle plutôt qu'une documentation qui peut mentir sur la version. Plusieurs noms devinés
+par des IA externes pendant cette session (`KeyVerificationManager`, les états `requested`/
+`ready`/`started`/`keysExchanged`/`macExchanged`) sont confirmés **FAUX** — l'API réelle est
+différente, détaillée ci-dessous. Aucune ligne de code de Murmure n'a été copiée depuis le SDK :
+seuls les noms de méthodes/états ont été extraits par lecture, pour écrire une vraie
+implémentation plus tard sans deviner.
+
+### API réelle vérifiée : bootstrap cross-signing / SSSS / sauvegarde de clés
+
+Point d'entrée unique, piloté par un callback d'état (`client.encryption!.bootstrap(onUpdate:
+(bootstrap) async { ... })`). `bootstrap.state` est un `BootstrapState` avec les valeurs
+`askWipeSsss`, `askNewSsss`, `askWipeCrossSigning`, `askSetupCrossSigning`,
+`askWipeOnlineKeyBackup`, `askSetupOnlineKeyBackup`, `askUseExistingSsss`, `askUnlockSsss`,
+`askBadSsss`, `done`, `error`. Méthodes appelées sur `bootstrap` selon l'état reçu :
+`wipeSsss(bool)`, `newSsss(String passphrase)`, `wipeCrossSigning(bool)`,
+`askSetupCrossSigning({setupMasterKey, setupSelfSigningKey, setupUserSigningKey})`,
+`wipeOnlineKeyBackup(bool)`, `askSetupOnlineKeyBackup(bool)`, `useExistingSsss(bool)`,
+`unlockedSsss()`, `ignoreBadSecrets(bool)`, et la liste `oldSsssKeys`. Une fois le bootstrap
+terminé, le déverrouillage ultérieur passe par `client.encryption!.ssss.open()` → objet
+`OpenSSSS` avec `unlock({passphrase, recoveryKey, keyOrPassphrase})`, `getStored(type)`,
+`store(type, secret, ...)`, le getter `recoveryKey`, `hasPassphrase`, `isUnlocked`.
+
+### API réelle vérifiée : vérification interactive SAS
+
+`KeyVerificationState` (états réels, confirmés par grep direct sur l'énumération du SDK) :
+`waitingAccept`, `askChoice`, `askSas`, `waitingSas`, `done`, `error`, `askSSSS`,
+`showQRSuccess`, `confirmQRScan`. Flux côté initiateur :
+`client.userDeviceKeys[peerUserId]!.startVerification(newDirectChatEnableEncryption: false)` →
+renvoie un `KeyVerification`, état initial `waitingAccept`. Flux côté destinataire : écoute via
+`client.onKeyVerificationRequest.stream.listen((KeyVerification req) { ... })`, puis
+`await req.acceptVerification()`. Propriétés exposées sur l'objet `KeyVerification` :
+`possibleMethods`, `sasTypes` (ex. `['emoji', 'decimal']`), `sasEmojis` (liste d'objets avec
+`.emoji`/`.name`), `sasNumbers`. Confirmation après comparaison visuelle par l'utilisateur :
+`await req.acceptSas()` (à faire des deux côtés) → transition `askSas → waitingSas → done`.
+Annulation à tout moment : `req.cancel()`. La variante QR (`showQRSuccess`/`confirmQRScan`) existe
+dans l'énumération mais son flux complet (scan, événements associés) reste à lire en détail avant
+implémentation — seule la chaîne emoji/chiffres a été vérifiée de bout en bout, y compris les
+chemins d'erreur, d'annulation et de timeout.
 
 **Ce qui reste un TODO honnête et précis, pas vague :**
-1. Vérifier les noms d'API SAS exacts contre le vrai code source de la version résolue (lire le
-   `pubspec.lock` généré par `flutter pub get` dans un environnement qui a accès à pub.dev et/ou
-   au dépôt `matrix-dart-sdk`, puis le code source au tag exact — aucun des deux n'était accessible
-   depuis ce bac à sable pendant cette passe), puis implémenter `startVerification()` /
-   `KeyVerificationManager` / l'écran d'emojis SAS / `acceptSas()`/`rejectSas()` /
-   `Client.onKeyVerificationRequest` pour la réception.
-2. Étendre la vérification (empreinte, puis SAS) aux conversations de groupe — cette passe ne
+1. Lire la suite du flux QR (`showQRSuccess`/`confirmQRScan`) avant de l'implémenter — seule la
+   variante emoji/chiffres est vérifiée complètement à ce jour.
+2. Implémenter l'écran de vérification SAS (emojis + confirmation) en réutilisant l'écran
+   d'empreinte existant comme base, avec les noms d'API ci-dessus — aucune supposition restante
+   sur les noms de méthodes/états pour la variante emoji/chiffres.
+3. Implémenter le bootstrap cross-signing + SSSS + sauvegarde de clés avec l'API ci-dessus —
+   nécessaire pour que la vérification SAS soit utile au-delà d'un seul appareil (sans
+   cross-signing, chaque nouvel appareil doit être revérifié individuellement).
+4. Étendre la vérification (empreinte, puis SAS) aux conversations de groupe — cette passe ne
    couvre que les conversations directes (`Room.directChatMatrixID`), le cas le plus simple et le
    plus immédiatement utile vu l'absence totale d'écran de membres de groupe dans ce dépôt.
-3. La liste des appareils affichée reflète ce que le client a déjà appris (`Client.userDeviceKeys`,
+5. La liste des appareils affichée reflète ce que le client a déjà appris (`Client.userDeviceKeys`,
    rempli par la synchronisation et par l'échange de clés fait au moment de chiffrer vers ce
    contact) — il n'y a pas de requête serveur forcée (« rafraîchir ») dans cet écran. Un appareil
    tout juste ajouté par un correspondant peut donc ne pas apparaître immédiatement.
-4. Aucune option pour refuser d'envoyer un message à un appareil non vérifié : le chiffrement
+6. Aucune option pour refuser d'envoyer un message à un appareil non vérifié : le chiffrement
    continue d'accepter tout appareil annoncé par le serveur, vérifié ou pas. Afficher l'état ne
    bloque rien — voir la section suivante, qui reste vraie en l'état.
 
