@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
@@ -13,6 +14,17 @@ import 'group_screen.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
 import 'qr_screens.dart';
+import 'theme.dart';
+
+/// Horodatage court pour une liste de conversations ou une bulle de message : heure seule
+/// aujourd'hui, jour+mois au-delà — jamais la date complète, qui prendrait trop de place dans la
+/// liste. `DateFormat` vient de `intl`, déjà déclaré dans pubspec.yaml (dépendance transitive de
+/// matrix-dart-sdk pour ses traductions) mais jusqu'ici jamais importé directement dans ce dépôt.
+String _formatTimestamp(DateTime dt) {
+  final now = DateTime.now();
+  final sameDay = dt.year == now.year && dt.month == now.month && dt.day == now.day;
+  return sameDay ? DateFormat.Hm().format(dt) : DateFormat('d MMM').format(dt);
+}
 
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
@@ -80,26 +92,64 @@ class RoomsScreen extends StatelessWidget {
             return Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
-                child: Text(
-                  'Aucune conversation. Ajoutez un contact pour commencer.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyLarge,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline,
+                      size: 56,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Aucune conversation pour l\'instant',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Ajoutez un contact ou créez un groupe avec le bouton + ci-dessous.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
                 ),
               ),
             );
           }
           return ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 4),
             itemCount: rooms.length,
             itemBuilder: (context, i) {
               final room = rooms[i];
+              final name = room.getLocalizedDisplayname();
+              final lastTs = room.lastEvent?.originServerTs;
               return ListTile(
-                leading: CircleAvatar(child: Text(room.getLocalizedDisplayname()[0].toUpperCase())),
-                title: Text(room.getLocalizedDisplayname()),
+                leading: CircleAvatar(
+                  backgroundColor: murmureAvatarColor(room.id),
+                  foregroundColor: Colors.white,
+                  child: Text(name.isEmpty ? '?' : name[0].toUpperCase()),
+                ),
+                title: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 subtitle: Text(
                   room.lastEvent?.text ?? '',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                trailing: lastTs == null
+                    ? null
+                    : Text(
+                        _formatTimestamp(lastTs),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                      ),
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => ChatScreen(room: room, callManager: callManager),
                 )),
@@ -334,6 +384,17 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemBuilder: (context, i) {
                       final e = events[i];
                       final mine = e.senderId == widget.room.client.userID;
+                      final scheme = Theme.of(context).colorScheme;
+                      final bubbleColor =
+                          mine ? scheme.primaryContainer : scheme.surfaceContainerHighest;
+                      final textColor = mine ? scheme.onPrimaryContainer : scheme.onSurface;
+                      final metaColor =
+                          (mine ? scheme.onPrimaryContainer : scheme.onSurfaceVariant)
+                              .withValues(alpha: 0.7);
+                      // Nom de l'expéditeur affiché uniquement dans un groupe (jamais pour une
+                      // conversation directe à deux, où il serait redondant avec le titre de
+                      // l'écran) et jamais pour ses propres messages.
+                      final showSenderName = !mine && !widget.room.isDirectChat;
                       return Align(
                         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
                         child: Container(
@@ -341,12 +402,33 @@ class _ChatScreenState extends State<ChatScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
                           decoration: BoxDecoration(
-                            color: mine
-                                ? Theme.of(context).colorScheme.primaryContainer
-                                : Theme.of(context).colorScheme.surfaceContainerHighest,
+                            color: bubbleColor,
                             borderRadius: BorderRadius.circular(16),
                           ),
-                          child: Text(e.text),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (showSenderName)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 2),
+                                  child: Text(
+                                    e.senderFromMemoryOrFallback.calcDisplayname(),
+                                    style: TextStyle(
+                                      color: murmureAvatarColor(e.senderId),
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              Text(e.text, style: TextStyle(color: textColor)),
+                              const SizedBox(height: 2),
+                              Text(
+                                DateFormat.Hm().format(e.originServerTs),
+                                style: TextStyle(color: metaColor, fontSize: 11),
+                              ),
+                            ],
+                          ),
                         ),
                       );
                     },
@@ -354,18 +436,27 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _textCtrl,
                       decoration: const InputDecoration(hintText: 'Message…'),
+                      minLines: 1,
+                      maxLines: 5,
+                      textCapitalization: TextCapitalization.sentences,
                       onSubmitted: (_) => _send(),
                       textInputAction: TextInputAction.send,
                     ),
                   ),
-                  IconButton(icon: const Icon(Icons.send), onPressed: _send),
+                  const SizedBox(width: 6),
+                  IconButton.filled(
+                    icon: const Icon(Icons.send),
+                    tooltip: 'Envoyer',
+                    onPressed: _send,
+                  ),
                 ],
               ),
             ),
