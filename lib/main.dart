@@ -73,26 +73,45 @@ class _MurmureAppState extends State<MurmureApp> {
       // une fuite silencieuse et invisible. Voir aussi onboarding_screen.dart, qui met à jour
       // `client.httpClient` en direct si le mode change après ce démarrage.
       final net = await NetConfig.load();
-      // AUDIT OUVERT (pas tranché dans cette passe, à vérifier plutôt qu'à deviner) : la
-      // documentation publiée de matrix-dart-sdk confirme que son logger interne (`Logs()`)
-      // imprime sur la console sur toutes les plateformes « avant » tout callback `onLog » — mais
-      // ne précise, à aucune version consultée (y compris celle réellement épinglée ici), SI le
-      // contenu d'une requête/réponse HTTP (dont l'en-tête Authorization, qui porte le jeton
-      // d'accès) peut apparaître dans un message journalisé au niveau `warning` lors d'une erreur
-      // réseau — un défaut connu dans d'autres SDK Matrix (voir GHSA-fc4h-xcf3-qj5f pour le SDK
-      // Rust, un projet distinct, mais la même classe de défaut). `Level.warning` (déjà le niveau
-      // le plus restrictif raisonnable ici, au lieu du défaut plus verbeux du paquet) limite
-      // l'exposition sans la supprimer : AUCUNE option documentée ne permet de désactiver
-      // entièrement la sortie console de ce logger depuis l'appelant. Un `print()` en version
-      // publiée reste lisible par `adb logcat` par quiconque a un accès physique ET le débogage
-      // USB autorisé sur l'appareil — un sous-ensemble du modèle de menace visé (saisie), pas son
-      // intégralité. Non vérifié : capture logcat réelle sur un appareil physique pendant une
-      // erreur d'authentification provoquée, pour confirmer ou infirmer la présence du jeton dans
-      // la sortie — à faire avant de compter sur ce point pour l'OPSEC.
+      // Trouvé en audit interne : l'« AUDIT OUVERT » laissé ici par une passe précédente affirmait
+      // que `Level.warning` était « déjà le niveau le plus restrictif raisonnable » pour le logger
+      // interne de matrix-dart-sdk (`Logs()`) — vérifié faux en lisant le code source réel au tag
+      // pinné (`lib/matrix_api_lite/utils/logs.dart`) : l'énumération `Level` est ordonnée
+      // `wtf < error < warning < info < debug < verbose`, et `Logs().addLogEvent` imprime dès que
+      // `level.index <= logLevel.index` — autrement dit `Level.warning` laisse passer `wtf`, `error`
+      // ET `warning`, pas seulement les avertissements. `Level.wtf` (toujours disponible, jamais
+      // utilisé jusqu'ici) est strictement plus restrictif et n'existait pas moins permissif dans
+      // ce paquet.
+      //
+      // Ce changement de niveau n'est pas qu'un ajustement de principe : en lisant le code réel du
+      // SDK à ce même tag, un appel concret à ce niveau `warning` imprime en clair le contenu
+      // complet d'un message `to_device` en échec de renvoi (`client.dart`,
+      // `processToDeviceQueue` : `Logs().w('Payload: \$data')`) — qui porte, pour un message chiffré
+      // via Olm, la clé d'identité Curve25519 de l'expéditeur (`sender_key`), une métadonnée
+      // persistante et identifiante, pas seulement du texte déjà opaque. Avec `Level.warning`, cet
+      // appel s'exécutait réellement (2 <= 2) ; avec `Level.wtf` (index 0), il ne s'exécute plus
+      // (2 <= 0 est faux).
+      //
+      // Ce qui reste vérifié, et clôt la partie « jeton d'accès » de l'audit ouvert précédent (pas
+      // seulement affirmé) : `MatrixException` (`matrix_exception.dart`) ne porte QUE le corps JSON
+      // de la réponse du serveur (`raw`), jamais les en-têtes de la requête, et le jeton d'accès
+      // n'est envoyé que dans l'en-tête `Authorization: Bearer ...` (`matrix_api.dart`), jamais dans
+      // une URL — aucun des deux ne peut donc apparaître dans un message journalisé construit à
+      // partir de ces objets, à quelque niveau que ce soit.
+      //
+      // LIMITE HONNÊTE : `Level.wtf` reste le niveau le plus restrictif que ce paquet expose, pas
+      // une suppression totale — ses 4 appels `Logs().wtf(...)` dans ce dépôt (tag v0.29.0)
+      // continueront de s'imprimer sur `adb logcat` en cas d'échec grave (ex. l'exception brute
+      // d'une connexion HTTP, dont le contenu exact n'a pas été audité ligne à ligne pour toutes les
+      // erreurs réseau possibles). Un `print()` en version publiée reste de toute façon lisible par
+      // `adb logcat` par quiconque a un accès physique ET le débogage USB autorisé — un sous-ensemble
+      // du modèle de menace visé (saisie), pas son intégralité ; non vérifié par une capture logcat
+      // réelle sur un appareil physique, qui reste à faire avant de compter entièrement sur ce point
+      // pour l'OPSEC.
       final client = Client(
         'Murmure',
         databaseBuilder: (_) async => MatrixSdkDatabase('murmure', database: db),
-        logLevel: Level.warning,
+        logLevel: Level.wtf,
         httpClient: await net.httpClient(),
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
