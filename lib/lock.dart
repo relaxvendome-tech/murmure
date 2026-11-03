@@ -38,6 +38,28 @@ class AppLock {
   static const maxLength = 8;
   static final _kdf = Pbkdf2(macAlgorithm: Hmac.sha256(), iterations: 120000, bits: 256);
 
+  /// Trouvé en audit interne (revue croisée IA, confirmé en relisant la structure réelle des
+  /// widgets) : [LockGate] (ui/lock_screens.dart) n'est qu'un simple widget sous `home:` de
+  /// `MaterialApp` — PAS une frontière de navigation. Un `Navigator.push` fait depuis
+  /// `murmureNavigatorKey` (voir main.dart) empile donc une nouvelle route PAR-DESSUS lui, quel
+  /// que soit ce qu'il affiche à l'instant (écran de verrou/calculatrice OU l'appli réelle). Avant
+  /// ce correctif, un appel entrant (`MurmureWebRTCDelegate.handleNewCall`, voir
+  /// calls/services/call_manager.dart) poussait inconditionnellement `CallSessionScreen` ainsi :
+  /// l'écran d'appel « Appel entrant… » s'affichait donc BY-PASSANT entièrement le PIN/la
+  /// calculatrice, avec un bouton Décrocher donnant accès au micro sans aucun déverrouillage, et
+  /// révélant l'identité réelle de l'appli même en mode discret — exactement la double faille
+  /// (contrôle d'accès ET OPSEC) que ce verrou existe pour empêcher.
+  ///
+  /// Ce drapeau statique, maintenu par [LockGate] lui-même (jamais recalculé ailleurs), permet à
+  /// du code hors de l'arbre de widgets (comme ce delegate d'appels, construit avant tout widget,
+  /// voir main.dart) de savoir si l'appli est RÉELLEMENT déverrouillée à l'instant présent — pas
+  /// seulement si un code existe (`AppLock.enabled()`, qui ne dit rien de l'état de session en
+  /// cours). `true` par défaut tant qu'aucun [LockGate] n'a encore tranché (appli sans code
+  /// configuré, ou démarrage pas encore terminé) : un faux positif ici bloquerait des appels
+  /// légitimes sans aucun bénéfice de sécurité, puisque sans code configuré il n'y a justement
+  /// rien à bypasser.
+  static bool isUnlocked = true;
+
   static Future<bool> enabled() async => (await Account.read('pin_hash')) != null;
   static Future<bool> hasDuress() async => (await Account.read('duress_hash')) != null;
 

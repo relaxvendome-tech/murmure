@@ -48,6 +48,7 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
       _calcMode = calc == '1';
       _unlocked = !enabled;
     });
+    AppLock.isUnlocked = _unlocked!;
   }
 
   /// Trouvé en audit interne : comparait auparavant à un `Duration(seconds: 30)` codé en dur ici
@@ -63,6 +64,7 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
       final since = _backgroundedAt;
       if (since != null && DateTime.now().difference(since) > kRelockAfter) {
         setState(() => _unlocked = false);
+        AppLock.isUnlocked = false;
       }
     }
   }
@@ -78,6 +80,7 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   void _onUnlockSuccess() {
     unawaited(CallOpsecNotifier.clear());
     setState(() => _unlocked = true);
+    AppLock.isUnlocked = true;
   }
 
   @override

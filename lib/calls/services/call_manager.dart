@@ -9,8 +9,11 @@ import 'package:matrix/matrix.dart';
 // renvoie bien, à l'exécution, une instance compatible avec celle-ci).
 import 'package:webrtc_interface/webrtc_interface.dart' show MediaDevices;
 
+import '../../lock.dart';
 import '../../network.dart';
 import '../call_policy.dart';
+import 'call_opsec_notifier.dart';
+import 'call_opsec_store.dart';
 
 /// Lancé par [MurmureWebRTCDelegate.createPeerConnection] quand la politique réseau interdit
 /// l'appel (voir [CallPolicy]). C'est le SEUL endroit par lequel `matrix-dart-sdk` (via `VoIP`/
@@ -118,9 +121,38 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     return webrtc.createPeerConnection(iceConfig.toJson(), constraints);
   }
 
+  /// Trouvé en audit interne (revue croisée IA, confirmé en relisant la structure réelle des
+  /// widgets — voir le commentaire de [AppLock.isUnlocked]) : [LockGate] n'est pas une frontière
+  /// de navigation, donc le `push` ci-dessous s'empilait TOUJOURS par-dessus l'écran de
+  /// verrou/calculatrice, quel que soit son état. Un appel entrant affichait ainsi « Appel
+  /// entrant… » (bouton Décrocher = accès micro) sans aucun déverrouillage, et révélait l'appli
+  /// même en mode discret — un contournement direct du verrou, pas seulement un détail OPSEC.
+  ///
+  /// Tant que l'appli est verrouillée, on ne pousse donc plus aucune UI : la session suit son
+  /// cours côté signalisation (le correspondant la voit sonner puis expirer normalement, comme
+  /// n'importe quel appel non décroché), et on enregistre nous-mêmes l'appel manqué dès
+  /// `kEnded` — en dupliquant ici le strict minimum de ce que fait normalement
+  /// `CallSessionScreen._recordMissedCall` (lib/calls/ui/call_session_screen.dart), puisque cet
+  /// écran ne sera jamais monté pour cette session. La notification reste déjà camouflée selon
+  /// `calc_mode` par [CallOpsecNotifier.notifyMissedCall] lui-même.
   @override
   Future<void> handleNewCall(CallSession session) async {
     _watchActive(session);
+    if (!AppLock.isUnlocked) {
+      StreamSubscription<CallState>? sub;
+      sub = session.onCallStateChanged.stream.listen((state) async {
+        if (state != CallState.kEnded) return;
+        await sub?.cancel();
+        if (session.isOutgoing) return; // rien à enregistrer : pas un appel manqué entrant
+        await CallOpsecStore.insert(MissedCall(
+          roomId: session.room.id,
+          remoteUserId: session.remoteUserId,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ));
+        await CallOpsecNotifier.notifyMissedCall();
+      });
+      return;
+    }
     final builder = buildCallScreen;
     if (builder == null) return;
     navigatorKey?.currentState?.push(MaterialPageRoute(builder: (_) => builder(session)));
