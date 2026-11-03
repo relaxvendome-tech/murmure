@@ -176,19 +176,33 @@ class Mesh {
         // mesh_crypto.dart). Les anciennes tables ne changent pas ; on ajoute seulement les deux
         // nouvelles. Aucune donnée ancienne à migrer : les messages déjà passés restaient
         // chiffrés avec l'ancien schéma statique et ne dépendent pas de ces tables.
-        if (oldV < 2) await _createRatchetTables(db);
-        // v2 -> v3 : trouvé en audit interne — les clés de rangs sautés (`ratchet_skipped`,
-        // conservées pour tolérer les messages arrivant dans le désordre) n'avaient aucune
-        // expiration par ÂGE, seulement une limite de COMPTE (_maxSkippedPerPeer) par contact.
-        // Concrètement : la clé d'un message jamais livré restait indéfiniment en base tant que
-        // ce même contact n'était pas recroisé assez de fois pour l'évincer par ancienneté — un
-        // écart réel avec la garantie de confidentialité persistante que la documentation de ce
-        // fichier affirme sans nuance pour « tous les messages déjà passés ». Ajoute une colonne
-        // d'horodatage pour purger par âge ces clés (voir _purgeExpired), alignée sur la même
-        // fenêtre que les enveloppes elles-mêmes (MeshEnvelope.maxAgeHours) : une clé gardée plus
-        // longtemps que la durée de vie maximale d'un message n'a plus aucune utilité, le message
-        // qu'elle pourrait déchiffrer étant de toute façon considéré expiré et abandonné ailleurs.
-        if (oldV < 3) {
+        //
+        // Trouvé en audit interne (revue croisée IA, vérifiée contre le code réel — bug réel, pas
+        // un faux positif) : [_createRatchetTables] crée désormais `ratchet_skipped` avec sa
+        // colonne `created_at` DÈS LA CRÉATION (voir plus bas), pour que les installations
+        // neuves (onCreate) l'aient d'emblée. Mais cette même fonction est réutilisée ICI pour
+        // amener un appareil de la version 1 à la version 2 — donc pour un tel appareil, la table
+        // vient d'être créée AVEC la colonne. Le `if (oldV < 3)` qui suit étant alors également
+        // vrai (1 < 3), l'ALTER TABLE qui l'accompagnait tentait d'ajouter une colonne déjà
+        // présente : `duplicate column name: created_at`, une exception SQLite fatale faisant
+        // planter l'appli au tout premier démarrage pour quiconque mettait à jour depuis une
+        // version 1 directement vers la 4. Un `else if` (plutôt que deux `if` indépendants) rend
+        // les deux branches mutuellement exclusives : un appareil en v1 obtient la colonne via la
+        // création de table ci-dessus et n'a plus besoin de l'ALTER ; un appareil déjà en v2 (sans
+        // cette colonne, schéma d'avant ce correctif) obtient l'ALTER sans repasser par la
+        // création de table.
+        if (oldV < 2) {
+          await _createRatchetTables(db);
+        } else if (oldV < 3) {
+          // v2 -> v3 : les clés de rangs sautés (`ratchet_skipped`, conservées pour tolérer les
+          // messages arrivant dans le désordre) n'avaient aucune expiration par ÂGE, seulement une
+          // limite de COMPTE (_maxSkippedPerPeer) par contact. Concrètement : la clé d'un message
+          // jamais livré restait indéfiniment en base tant que ce même contact n'était pas
+          // recroisé assez de fois pour l'évincer par ancienneté — un écart réel avec la garantie
+          // de confidentialité persistante que la documentation de ce fichier affirme sans nuance
+          // pour « tous les messages déjà passés ». Ajoute une colonne d'horodatage pour purger
+          // par âge ces clés (voir _purgeExpired), alignée sur la même fenêtre que les enveloppes
+          // elles-mêmes (MeshEnvelope.maxAgeHours).
           await db.execute(
               'ALTER TABLE ratchet_skipped ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
         }

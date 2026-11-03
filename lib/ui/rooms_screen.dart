@@ -254,6 +254,16 @@ class _AddContactScreenState extends State<AddContactScreen> {
   bool _busy = false;
   String? _error;
 
+  // Trouvé en audit interne (revue croisée IA, vérifiée contre le code réel) : ce contrôleur
+  // n'était jamais libéré — aucun dispose() sur cet état. Une fuite mineure par passage sur cet
+  // écran (il n'est affiché qu'un court instant avant navigation ou fermeture), mais sans raison
+  // de la laisser : TextEditingController alloue des ressources natives qui doivent être rendues.
+  @override
+  void dispose() {
+    _idCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _start() async {
     final raw = _idCtrl.text.trim();
     final id = parseUserId(raw) ?? (raw.startsWith('@') ? raw : null);
@@ -361,6 +371,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }).then((t) {
       if (mounted) setState(() => _timeline = t);
     });
+  }
+
+  // Trouvé en audit interne (revue croisée IA, vérifiée contre le code réel) : cette classe
+  // n'avait aucun dispose() — _textCtrl n'était jamais libéré, contrairement à toutes les autres
+  // vues à TextEditingController de cette appli (voir AddContactScreen, NewGroupScreen,
+  // ProfileScreen). Cet écran étant celui qu'on ouvre et referme le plus souvent (chaque
+  // conversation), la fuite ici est la plus significative des deux trouvées sur ce fichier.
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    super.dispose();
   }
 
   /// Lance un appel audio. Vérifie la politique réseau ICI, de façon à afficher un message
