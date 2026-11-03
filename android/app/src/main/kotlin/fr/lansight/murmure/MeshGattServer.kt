@@ -201,8 +201,8 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
          * Long Characteristic Values" de la spec Bluetooth dès qu'une écriture dépasse le MTU ATT
          * négocié (`mtu` − 3 octets) : la valeur arrive alors fragmentée en plusieurs écritures
          * "préparées" (`preparedWrite = true`, un `offset` croissant à chaque appel), suivies d'un
-         * `onExecuteWriteRequest` qui valide (ou annule) l'ensemble. C'est exactement le cas quand
-         * la négociation MTU échoue d'un côté ou de l'autre (voir le commentaire sur
+         * `onExecuteWrite` qui valide (ou annule) l'ensemble. C'est exactement le cas quand la
+         * négociation MTU échoue d'un côté ou de l'autre (voir le commentaire sur
          * `requestMtu(517)` dans mesh.dart — déjà documenté comme un cas réel, pas hypothétique :
          * appareil ancien, ou iOS où `requestMtu` n'a pas d'effet garanti) : chaque fragment partait
          * alors ici vers Dart comme une enveloppe à part entière — un message tronqué et
@@ -210,8 +210,8 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
          * corrompu. Le relais échouait donc silencieusement précisément dans le cas que la
          * négociation MTU est censée couvrir en best-effort.
          *
-         * Corrigé en accumulant les fragments par appareil jusqu'à [onExecuteWriteRequest], qui
-         * les réassemble dans l'ordre des `offset` avant de transmettre l'enveloppe complète.
+         * Corrigé en accumulant les fragments par appareil jusqu'à [onExecuteWrite], qui les
+         * réassemble dans l'ordre des `offset` avant de transmettre l'enveloppe complète.
          */
         @SuppressLint("MissingPermission")
         override fun onCharacteristicWriteRequest(
@@ -261,7 +261,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
          * par le central (Cancel Write) : on jette simplement le tampon, rien à transmettre.
          */
         @SuppressLint("MissingPermission")
-        override fun onExecuteWriteRequest(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+        override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
             val chunks = pendingPreparedWrites.remove(device.address)
             if (execute && chunks != null && chunks.isNotEmpty()) {
                 val total = chunks.sumOf { it.second.size }
