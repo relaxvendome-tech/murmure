@@ -220,7 +220,12 @@ class _PinScreenState extends State<PinScreen> {
         // sans aucun signal d'alerte pour l'utilisateur. Corrigé en comparant directement à
         // l'empreinte déjà en stockage via [AppLock.classify], qui n'a besoin que du PIN candidat
         // tout juste saisi — jamais de code en clair à faire transiter.
-        if (await AppLock.classify(_pin) == PinResult.ok) {
+        //
+        // Trouvé en audit interne (optimisation réelle, pas de principe) : cette vérification et
+        // l'écriture qui suivait faisaient chacune leur propre dérivation PBKDF2-SHA256 à 120 000
+        // itérations pour le même PIN/sel — deux calculs délibérément coûteux pour une seule
+        // action utilisateur. `AppLock.trySetDuress` fait maintenant les deux en un seul calcul.
+        if (!await AppLock.trySetDuress(_pin)) {
           if (!mounted) return;
           setState(() {
             _busy = false;
@@ -229,7 +234,6 @@ class _PinScreenState extends State<PinScreen> {
           });
           return;
         }
-        await AppLock.setDuress(_pin);
         if (!mounted) return;
         Navigator.of(context).pop();
     }

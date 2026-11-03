@@ -76,6 +76,27 @@ class AppLock {
   static Future<void> setDuress(String pin) async =>
       Account.write('duress_hash', await _hash(pin, await _salt()));
 
+  /// Définit [pin] comme code de contrainte, mais seulement s'il diffère du code normal déjà
+  /// enregistré — retourne `false` sans rien écrire si ce n'est pas le cas (l'appelant doit alors
+  /// montrer une erreur, voir `ui/lock_screens.dart`).
+  ///
+  /// Trouvé en audit interne : l'appelant faisait jusqu'ici `AppLock.classify(pin)` (une dérivation
+  /// PBKDF2-SHA256 à 120 000 itérations pour comparer au code normal) PUIS, si différent,
+  /// `AppLock.setDuress(pin)` — qui recalculait la MÊME dérivation PBKDF2 depuis zéro pour le même
+  /// `pin`/sel, alors que le résultat du premier calcul était déjà disponible et jeté. Deux
+  /// dérivations coûteuses (délibérément lentes, c'est tout l'intérêt de PBKDF2) pour une seule
+  /// action utilisateur, sur le thread où tourne l'interface — un gaspillage de calcul redondant,
+  /// pas seulement un ralentissement de principe. Cette méthode fait le calcul une seule fois et
+  /// réutilise directement son résultat pour l'écriture.
+  static Future<bool> trySetDuress(String pin) async {
+    final salt = await _salt();
+    final h = await _hash(pin, salt);
+    final pinHash = await Account.read('pin_hash');
+    if (pinHash != null && _same(h, pinHash)) return false;
+    await Account.write('duress_hash', h);
+    return true;
+  }
+
   static Future<void> removeDuress() => Account.delete('duress_hash');
 
   static Future<void> disable() async {
