@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
+import 'theme.dart';
 
 /// Mode Bluetooth maillé : fonctionnement sans réseau ni serveur (coupure, brouillage). Scanne ET
 /// s'annonce simultanément (rôles BLE central + peripheral, voir mesh.dart) : deux téléphones
@@ -160,10 +162,55 @@ class _MeshScreenState extends State<MeshScreen> {
             ),
           const SizedBox(height: 8),
           Text('Journal', style: Theme.of(context).textTheme.titleMedium),
-          ..._log.map((l) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 2),
-                child: Text(l.label),
-              )),
+          const SizedBox(height: 4),
+          if (_log.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'Aucun message pour l\'instant. Activez le Bluetooth ci-dessus pour commencer à '
+                'découvrir des contacts à portée.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+            )
+          else
+            ..._log.map((l) => Card(
+                  child: ListTile(
+                    leading: l.isStatus
+                        ? Icon(
+                            l.label.contains('démarrée')
+                                ? Icons.bluetooth_connected
+                                : Icons.bluetooth_disabled,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          )
+                        : CircleAvatar(
+                            backgroundColor: murmureAvatarColor(meshB64(l.sender!)),
+                            foregroundColor: Colors.white,
+                            radius: 16,
+                            child: Text(
+                              meshB64(l.sender!).substring(0, 1).toUpperCase(),
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                    title: Text(
+                      l.isStatus ? l.label : l.text!,
+                      maxLines: l.isStatus ? 1 : 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: l.isStatus
+                        ? null
+                        : Text('De ${meshB64(l.sender!).substring(0, 8)}…'),
+                    trailing: l.ts == 0
+                        ? null
+                        : Text(
+                            DateFormat.Hm().format(DateTime.fromMillisecondsSinceEpoch(l.ts)),
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                ),
+                          ),
+                  ),
+                )),
         ],
       ),
     );
@@ -172,12 +219,22 @@ class _MeshScreenState extends State<MeshScreen> {
 
 /// Une ligne du journal affiché sur cet écran : soit un changement d'état (démarré/arrêté), soit
 /// un message reçu — auquel cas on garde l'expéditeur pour pouvoir au moins distinguer deux
-/// contacts entre eux (voir le commentaire d'`initState` ci-dessus).
+/// contacts entre eux (voir le commentaire d'`initState` ci-dessus). Les champs bruts (plutôt
+/// qu'un unique `label` déjà formaté comme avant cette passe visuelle) permettent à l'affichage de
+/// distinguer une icône, un avatar coloré et un horodatage par type de ligne.
 class _LogEntry {
-  const _LogEntry.status(this.label) : ts = 0;
-  _LogEntry.message({required List<int> sender, required String text, required this.ts})
-      : label = 'De ${meshB64(sender).substring(0, 8)}… : $text';
+  const _LogEntry.status(this.label)
+      : ts = 0,
+        sender = null,
+        text = null,
+        isStatus = true;
+  _LogEntry.message({required this.sender, required this.text, required this.ts})
+      : label = '',
+        isStatus = false;
 
+  final bool isStatus;
   final String label;
+  final List<int>? sender;
+  final String? text;
   final int ts;
 }
