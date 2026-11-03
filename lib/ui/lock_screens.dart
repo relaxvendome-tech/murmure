@@ -175,7 +175,15 @@ class _PinScreenState extends State<PinScreen> {
           case PinResult.duress:
             await widget.onWipe?.call();
           case PinResult.wrong:
+            // Trouvé en audit interne (lecture directe, confirmé indépendamment par recherche
+            // croisée) : le "if (!mounted) return" ci-dessus ne protège que le premier await
+            // (AppLock.check). Un second await (AppLock.remaining(), lui aussi asynchrone) suit
+            // juste en dessous, et pouvait laisser passer un setState() après démontage du widget
+            // si l'app repasse en arrière-plan assez longtemps pendant la vérification pour que
+            // LockGate relock (voir didChangeAppLifecycleState) remplace cet écran entre les deux
+            // await — "setState() called after dispose()" côté testeurs humains. Revérifié ici.
             final remaining = await AppLock.remaining();
+            if (!mounted) return;
             setState(() {
               _busy = false;
               _pin = '';
@@ -426,6 +434,13 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
               onChanged: (v) async {
                 if (v) {
                   final pinHash = await Account.read('pin_hash');
+                  // Trouvé en audit interne : BuildContext utilisé juste en dessous
+                  // (Navigator.of(context)) après cet await, sans revérifier mounted. L'écran de
+                  // réglages reste normalement ouvert tout du long, mais Account.read passe par le
+                  // Keystore (flutter_secure_storage) — un démontage pendant cette lecture (retour
+                  // arrière rapide de l'utilisateur, par exemple) ferait planter l'appli au lieu de
+                  // simplement abandonner l'action.
+                  if (!mounted) return;
                   if (pinHash == null) return;
                   await Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) => const PinScreen(mode: PinScreenMode.setDuress),
@@ -433,6 +448,7 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                 } else {
                   await AppLock.removeDuress();
                 }
+                if (!mounted) return;
                 await _load();
               },
             ),
