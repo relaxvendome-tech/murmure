@@ -20,6 +20,14 @@ import 'package:path_provider/path_provider.dart';
 /// quiconque récupère le fichier déchiffré ensuite, les verrait en clair même si le transport est
 /// chiffré. Toute fonctionnalité d'envoi de média devra dépouiller ces métadonnées AVANT
 /// chiffrement/envoi, jamais s'appuyer sur le serveur ou le destinataire pour le faire.
+///
+/// Trouvé en audit interne (passe suivante) : `image_picker` et `video_player` étaient déclarés
+/// dans `pubspec.yaml` sans qu'aucun fichier du dépôt ne les importe — morts depuis leur ajout
+/// (vérifié avec `git log -p -- pubspec.yaml`), probablement pré-déclarés en prévision de cette
+/// même fonctionnalité jamais commencée. Retirés : un plugin natif non utilisé reste du poids
+/// (taille de l'APK) et une surface fusionnée dans le manifeste final (permissions/`<queries>` du
+/// plugin) invisible à la seule lecture d'`AndroidManifest.xml`, pour un bénéfice nul tant que rien
+/// ne les appelle. À rajouter explicitement le jour où cette fonctionnalité sera construite.
 class MediaCache {
   static Future<Directory> _dir() async {
     final base = await getTemporaryDirectory();
