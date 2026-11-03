@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -367,6 +368,28 @@ class _ChatScreenState extends State<ChatScreen> {
   Timeline? _timeline;
   bool _sendingMedia = false;
 
+  // Indicateur « en train d'écrire » — cité par plusieurs IA (revue croisée « niveau
+  // Telegram/Signal ») comme absent de cette appli alors que le SDK matrix-dart pinné l'expose
+  // déjà intégralement (vérifié dans /tmp/matrix_v : `Room.setTyping(bool, {int? timeout})`,
+  // `Room.typingUsers`, lib/src/room.dart). Rien à ajouter côté protocole, seulement câbler l'UI.
+  //
+  // Émission : debattue par un minuteur d'inactivité plutôt qu'à chaque frappe, pour deux
+  // raisons — éviter de spammer le homeserver d'un événement m.typing à chaque caractère, et
+  // limiter la fenêtre pendant laquelle ce signal de métadonnée (« cette personne est en train
+  // d'écrire ici, maintenant ») existe, cohérent avec le reste de l'OPSEC de cette appli. Le délai
+  // de 20 secondes transmis au serveur est documenté par le SDK comme une durée de validité, pas
+  // un engagement : on l'arrête nous-mêmes explicitement dès l'envoi ou le champ vidé plutôt que
+  // de compter sur son expiration côté serveur.
+  //
+  // Réception : `Room.typingUsers` lit un état déjà tenu à jour par le SDK (`ephemerals['m.typing']`),
+  // mais sans flux dédié — `client.onSync.stream` est le signal déjà utilisé ailleurs dans ce
+  // fichier (voir `_roomsSignature` dans RoomsScreen) pour détecter ce genre de mise à jour
+  // éphémère, donc même pattern ici plutôt qu'en introduire un nouveau.
+  Timer? _typingStopTimer;
+  StreamSubscription<SyncUpdate>? _typingSub;
+  bool _typingActive = false;
+  Set<String> _typingOtherUserIds = {};
+
   @override
   void initState() {
     super.initState();
@@ -375,6 +398,39 @@ class _ChatScreenState extends State<ChatScreen> {
     }).then((t) {
       if (mounted) setState(() => _timeline = t);
     });
+    _refreshTypingUsers();
+    _typingSub = widget.room.client.onSync.stream.listen((_) => _refreshTypingUsers());
+  }
+
+  void _refreshTypingUsers() {
+    final myId = widget.room.client.userID;
+    final ids = widget.room.typingUsers.map((u) => u.id).where((id) => id != myId).toSet();
+    if (ids.length == _typingOtherUserIds.length && ids.containsAll(_typingOtherUserIds)) {
+      return;
+    }
+    if (mounted) setState(() => _typingOtherUserIds = ids);
+  }
+
+  void _onComposingChanged(String text) {
+    if (text.isEmpty) {
+      _stopTyping();
+      return;
+    }
+    _typingStopTimer?.cancel();
+    _typingStopTimer = Timer(const Duration(seconds: 4), _stopTyping);
+    if (_typingActive) return;
+    _typingActive = true;
+    // Best-effort : une notification de frappe manquée ou en échec (réseau coupé) n'a aucun
+    // impact fonctionnel, contrairement à l'envoi d'un message — pas de SnackBar ici.
+    unawaited(widget.room.setTyping(true, timeout: 20000).catchError((_) {}));
+  }
+
+  void _stopTyping() {
+    _typingStopTimer?.cancel();
+    _typingStopTimer = null;
+    if (!_typingActive) return;
+    _typingActive = false;
+    unawaited(widget.room.setTyping(false).catchError((_) {}));
   }
 
   // Trouvé en audit interne (revue croisée IA, vérifiée contre le code réel) : cette classe
@@ -393,6 +449,14 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _textCtrl.dispose();
     _timeline?.cancelSubscriptions();
+    _typingStopTimer?.cancel();
+    _typingSub?.cancel();
+    // Fire-and-forget : on quitte l'écran, pas la peine d'attendre la réponse du serveur, mais on
+    // prévient quand même les autres participants qu'on a arrêté d'écrire plutôt que de laisser
+    // l'indicateur expirer silencieusement après les 20 secondes annoncées.
+    if (_typingActive) {
+      unawaited(widget.room.setTyping(false).catchError((_) {}));
+    }
     super.dispose();
   }
 
@@ -488,6 +552,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
     _textCtrl.clear();
+    _stopTyping();
     final eventId = await widget.room.sendTextEvent(text);
     if (eventId == null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -666,6 +731,22 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
           ),
+          if (_typingOtherUserIds.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(
+                widget.room.isDirectChat
+                    ? 'En train d\'écrire…'
+                    : _typingOtherUserIds.length == 1
+                        ? '${widget.room.unsafeGetUserFromMemoryOrFallback(_typingOtherUserIds.first).calcDisplayname()} est en train d\'écrire…'
+                        : 'Plusieurs personnes écrivent…',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -690,6 +771,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       minLines: 1,
                       maxLines: 5,
                       textCapitalization: TextCapitalization.sentences,
+                      onChanged: _onComposingChanged,
                       onSubmitted: (_) => _send(),
                       textInputAction: TextInputAction.send,
                     ),
