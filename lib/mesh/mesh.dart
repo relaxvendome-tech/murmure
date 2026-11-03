@@ -302,33 +302,50 @@ class Mesh {
   Future<void> start() async {
     if (_running) return;
     _running = true;
-    await _database();
-    await identity();
-    final calcMode = await Account.read('calc_mode') == '1';
-    unawaited(MeshForegroundService.start(calcMode: calcMode));
-    await FlutterBluePlus.startScan(
-      withServices: [serviceUuid],
-      continuousUpdates: true,
-      timeout: const Duration(days: 1),
-    );
-    _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
-    // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : ce timer ne fait QUE
-    // purger (_purgeExpired ne touche que des lignes expirées depuis au moins maxAgeHours = 72 h),
-    // mais tournait toutes les 20 secondes — un réveil CPU/I/O SQLite totalement disproportionné
-    // par rapport à la granularité réellement utile, sur un usage où l'autonomie de la batterie
-    // compte (téléphone en poche en manifestation). 15 minutes laisse largement le temps de purger
-    // avant que quoi que ce soit ne dépende de cette fraîcheur (fenêtre de 72 h).
-    _relayTimer = Timer.periodic(const Duration(minutes: 15), (_) => _purgeExpired());
+    // Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : rien ici
+    // n'attrapait d'exception. `FlutterBluePlus.startScan` lève notamment si le Bluetooth est
+    // désactivé au moment de l'appel (pas seulement un refus de permission, déjà géré en amont
+    // côté UI — voir mesh_screen.dart) — et `_running` avait déjà été mis à `true` juste au-dessus.
+    // Conséquence concrète pour un testeur : Bluetooth coupé, bouton « activer » → exception non
+    // rattrapée (bouton restant bloqué en chargement côté mesh_screen.dart), ET `_running` reste
+    // bloqué à `true` pour toute la durée de vie de l'objet [Mesh] (singleton) — un nouvel appel à
+    // [start] ressort immédiatement à la ligne au-dessus sans rien faire, y compris après que
+    // l'utilisateur a réactivé le Bluetooth, jusqu'au redémarrage de l'appli. `stop()` dans le
+    // catch réutilise le nettoyage déjà idempotent (cancel null-safe de chaque abonnement/timer)
+    // pour ne pas laisser un démarrage partiel (ex. scan lancé mais rôle périphérique natif en
+    // échec) à moitié actif.
+    try {
+      await _database();
+      await identity();
+      final calcMode = await Account.read('calc_mode') == '1';
+      unawaited(MeshForegroundService.start(calcMode: calcMode));
+      await FlutterBluePlus.startScan(
+        withServices: [serviceUuid],
+        continuousUpdates: true,
+        timeout: const Duration(days: 1),
+      );
+      _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
+      // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : ce timer ne fait QUE
+      // purger (_purgeExpired ne touche que des lignes expirées depuis au moins maxAgeHours = 72 h),
+      // mais tournait toutes les 20 secondes — un réveil CPU/I/O SQLite totalement disproportionné
+      // par rapport à la granularité réellement utile, sur un usage où l'autonomie de la batterie
+      // compte (téléphone en poche en manifestation). 15 minutes laisse largement le temps de purger
+      // avant que quoi que ce soit ne dépende de cette fraîcheur (fenêtre de 72 h).
+      _relayTimer = Timer.periodic(const Duration(minutes: 15), (_) => _purgeExpired());
 
-    // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
-    // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
-    // est indisponible — le mode reste alors limité au rôle central, comme avant cette extension.
-    await MeshGattServerBridge.start();
-    _gattSub = MeshGattServerBridge.incoming().listen(_onGattWrite);
-    _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
-    unawaited(_rotateReadValue());
+      // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
+      // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
+      // est indisponible — le mode reste alors limité au rôle central, comme avant cette extension.
+      await MeshGattServerBridge.start();
+      _gattSub = MeshGattServerBridge.incoming().listen(_onGattWrite);
+      _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
+      unawaited(_rotateReadValue());
 
-    _eventsController.add(const MeshEvent.started());
+      _eventsController.add(const MeshEvent.started());
+    } catch (_) {
+      await stop();
+      rethrow;
+    }
   }
 
   Future<void> stop() async {

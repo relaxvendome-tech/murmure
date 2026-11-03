@@ -606,6 +606,18 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     } finally {
+      // Trouvé en audit interne : `ImagePicker` écrit sa propre copie recompressée
+      // (`imageQuality: 90`) dans le cache de l'appli, en dehors de `MediaCache`
+      // (lib/media.dart) — ni purgée au démarrage, ni effacée par le wipe d'urgence
+      // (Account.wipeLocal/panic, qui ne connaît que son propre répertoire `murmure_media`).
+      // `image_picker` ne garantit pas le retrait de l'EXIF (GPS, horodatage, modèle
+      // d'appareil) lors de sa recompression : exactement la donnée que
+      // [stripExifAndReencode] existe pour retirer avant tout envoi pouvait donc rester en
+      // clair sur le disque, hors de toute garantie d'effacement d'urgence documentée
+      // ailleurs dans ce dépôt. Best-effort : ne bloque jamais l'envoi sur ce nettoyage.
+      try {
+        await File(picked.path).delete();
+      } catch (_) {}
       if (mounted) setState(() => _sendingMedia = false);
     }
   }

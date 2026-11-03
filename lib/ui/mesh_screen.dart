@@ -281,7 +281,23 @@ class _MeshScreenState extends State<MeshScreen> {
         }
         return;
       }
-      await Mesh.instance.start();
+      try {
+        await Mesh.instance.start();
+      } catch (_) {
+        // Trouvé en audit interne (revue croisée IA) : Mesh.start() peut lever (Bluetooth
+        // désactivé, par exemple), ce qui restait auparavant non rattrapé ici — le bouton
+        // restait bloqué en chargement indéfiniment (le setState de fin de méthode n'était
+        // jamais atteint) pour un testeur dont le Bluetooth est simplement coupé.
+        if (mounted) {
+          setState(() => _busy = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Impossible d\'activer le mode hors-ligne (Bluetooth désactivé ?)'),
+            ),
+          );
+        }
+        return;
+      }
     } else {
       await Mesh.instance.stop();
     }
