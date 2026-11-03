@@ -59,14 +59,36 @@ renvoie un `KeyVerification`, état initial `waitingAccept`. Flux côté destina
 `possibleMethods`, `sasTypes` (ex. `['emoji', 'decimal']`), `sasEmojis` (liste d'objets avec
 `.emoji`/`.name`), `sasNumbers`. Confirmation après comparaison visuelle par l'utilisateur :
 `await req.acceptSas()` (à faire des deux côtés) → transition `askSas → waitingSas → done`.
-Annulation à tout moment : `req.cancel()`. La variante QR (`showQRSuccess`/`confirmQRScan`) existe
-dans l'énumération mais son flux complet (scan, événements associés) reste à lire en détail avant
-implémentation — seule la chaîne emoji/chiffres a été vérifiée de bout en bout, y compris les
-chemins d'erreur, d'annulation et de timeout.
+Avant `done`, un passage possible par `askSSSS` (demande d'ouverture du stockage secret partagé
+côté qui n'a pas encore sa clé maître directement vérifiée) : `await req.openSSSS(recoveryKey:
+...)`. Rejet/annulation : `req.rejectVerification()` (avant tout choix de méthode),
+`req.rejectSas()` (après comparaison, si les emojis/chiffres NE correspondent PAS — c'est le
+mécanisme qui détecte un homme du milieu), ou `req.cancel()` à tout moment ; dans tous les cas,
+les deux côtés passent à l'état `error`, à distinguer de l'erreur générique la même énumération.
+Un appareil tiers qui répond à la place de l'appareil attendu (`from_device` différent) est aussi
+détecté et produit `error`. Fin de vie : `keyVerificationManager.cleanup()` côté client, à appeler
+après chaque flux terminé (succès ou échec) pour libérer les requêtes en mémoire.
+
+**Variante QR, également vérifiée de bout en bout (pas seulement glimpsée) :** quand les deux
+masterKeys sont déjà vérifiées, `possibleMethods` inclut `EventTypes.Reciprocate` et
+`EventTypes.QRScan`/`EventTypes.QRShow` (lequel des deux dépend du sens scanneur/scanné) en plus
+de `EventTypes.Sas`. Le côté qui affiche le QR appelle `req.continueVerification(EventTypes
+.Reciprocate, qrDataRawBytes: <bytes scannés par l'autre côté>)` → son état passe à
+`showQRSuccess`, et `req1.randomSharedSecretForQRCode` doit égaler `req2.qrCode!
+.randomSharedSecret` (vérification croisée du secret partagé, propriété `qrCode` exposée sur
+`KeyVerification`). Le côté qui a scanné passe alors à `confirmQRScan`, confirme avec
+`await req.acceptQRScanConfirmation()` → les deux passent à `done`. Si une masterKey n'est pas
+vérifiée (signature manquante) ou si la méthode QR n'est pas dans `client.verificationMethods`
+(un `Set<KeyVerificationMethod>`, ex. `{KeyVerificationMethod.emoji, KeyVerificationMethod
+.numbers}` pour forcer SAS uniquement sans QR), `continueVerification` échoue proprement avec
+l'état `error` plutôt qu'un flux silencieusement cassé.
 
 **Ce qui reste un TODO honnête et précis, pas vague :**
-1. Lire la suite du flux QR (`showQRSuccess`/`confirmQRScan`) avant de l'implémenter — seule la
-   variante emoji/chiffres est vérifiée complètement à ce jour.
+1. Décider si la variante QR est utile pour Murmure (elle suppose de pouvoir scanner l'écran d'un
+   autre appareil physiquement — plausible dans le contexte visé de manifestants qui se croisent,
+   mais demande une caméra/un scanner QR dans l'UI, pas encore présent dans ce dépôt) ou si seule
+   la comparaison emoji/chiffres (plus simple à construire, fonctionne par lecture à voix haute)
+   est implémentée dans un premier temps.
 2. Implémenter l'écran de vérification SAS (emojis + confirmation) en réutilisant l'écran
    d'empreinte existant comme base, avec les noms d'API ci-dessus — aucune supposition restante
    sur les noms de méthodes/états pour la variante emoji/chiffres.
