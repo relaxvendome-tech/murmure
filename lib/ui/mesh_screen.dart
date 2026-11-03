@@ -21,22 +21,52 @@ class _MeshScreenState extends State<MeshScreen> {
   bool _active = false;
   bool _busy = false;
   StreamSubscription<MeshEvent>? _sub;
-  final _log = <String>[];
+  final _log = <_LogEntry>[];
   String? _myCode;
 
   @override
   void initState() {
     super.initState();
+    // Trouvé en audit interne : avant cette correction, ce journal n'affichait QUE les messages
+    // reçus pendant que cet écran était ouvert (liste en mémoire, jamais relue depuis la base) —
+    // alors que `Mesh._handleIncomingLocked` les enregistre bel et bien dans la table `inbox` de
+    // la base SQLCipher (voir mesh.dart). Un message arrivé pendant que le mode Bluetooth
+    // tournait en arrière-plan (voir mesh_foreground_service.dart), ou lors d'une session
+    // précédente, restait donc chiffré sur le disque mais invisible dans cette interface — perdu
+    // en pratique pour l'utilisateur, alors qu'il était bien là. On recharge maintenant l'historique
+    // persistant au démarrage de l'écran, puis on y ajoute les messages reçus en direct.
+    //
+    // Deuxième correction, dans le même esprit : le journal affichait seulement le TEXTE du
+    // message (`'Message reçu : $text'`), jamais l'expéditeur — illisible dès que plusieurs
+    // contacts envoient par Bluetooth, exactement le scénario visé (plusieurs téléphones croisés
+    // en manifestation). On affiche maintenant les premiers caractères de la clé publique BLE de
+    // l'expéditeur (même encodage que « Mon code de contact Bluetooth » ci-dessous) à côté de
+    // chaque message, pour pouvoir au moins les distinguer entre eux — pas un nom lisible (le mode
+    // Bluetooth n'a pas de carnet de contacts nommés), mais un identifiant stable et comparable.
+    Mesh.instance.inbox().then((rows) {
+      if (!mounted) return;
+      setState(() {
+        _log.addAll(rows.map((r) => _LogEntry.message(
+              sender: r['sender'] as List<int>,
+              text: r['plaintext'] as String,
+              ts: r['received_at'] as int,
+            )));
+        _log.sort((a, b) => b.ts.compareTo(a.ts));
+      });
+    });
     _sub = Mesh.instance.events.listen((e) {
       if (!mounted) return;
       setState(() {
         switch (e) {
           case MeshStarted():
-            _log.insert(0, 'Écoute Bluetooth démarrée');
+            _log.insert(0, _LogEntry.status('Écoute Bluetooth démarrée'));
           case MeshStopped():
-            _log.insert(0, 'Écoute Bluetooth arrêtée');
-          case MeshMessageReceived(:final text):
-            _log.insert(0, 'Message reçu : $text');
+            _log.insert(0, _LogEntry.status('Écoute Bluetooth arrêtée'));
+          case MeshMessageReceived(:final sender, :final text):
+            // Déjà inséré en base par Mesh._handleIncomingLocked ; on l'ajoute ici seulement à
+            // l'affichage en direct, jamais une deuxième fois en base.
+            _log.insert(
+                0, _LogEntry.message(sender: sender, text: text, ts: DateTime.now().millisecondsSinceEpoch));
         }
       });
     });
@@ -130,9 +160,24 @@ class _MeshScreenState extends State<MeshScreen> {
             ),
           const SizedBox(height: 8),
           Text('Journal', style: Theme.of(context).textTheme.titleMedium),
-          ..._log.map((l) => Text('• $l')),
+          ..._log.map((l) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(l.label),
+              )),
         ],
       ),
     );
   }
+}
+
+/// Une ligne du journal affiché sur cet écran : soit un changement d'état (démarré/arrêté), soit
+/// un message reçu — auquel cas on garde l'expéditeur pour pouvoir au moins distinguer deux
+/// contacts entre eux (voir le commentaire d'`initState` ci-dessus).
+class _LogEntry {
+  const _LogEntry.status(this.label) : ts = 0;
+  _LogEntry.message({required List<int> sender, required String text, required this.ts})
+      : label = 'De ${meshB64(sender).substring(0, 8)}… : $text';
+
+  final String label;
+  final int ts;
 }
