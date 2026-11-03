@@ -298,9 +298,17 @@ class _AddContactScreenState extends State<AddContactScreen> {
                   onPressed: () async {
                     final scanned = await Navigator.of(context)
                         .push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen()));
-                    if (scanned != null && mounted) {
-                      setState(() => _idCtrl.text = scanned);
-                    }
+                    if (scanned == null || !mounted) return;
+                    setState(() => _idCtrl.text = scanned);
+                    // Trouvé en audit interne (demande de simplicité comparable à Signal/Telegram) :
+                    // un scan réussi exigeait ensuite une seconde action manuelle ("Démarrer la
+                    // conversation") pour un identifiant déjà complet et déjà validé par le format du
+                    // QR — une étape de confirmation utile pour un identifiant COLLÉ ou tapé à la
+                    // main (où une relecture avant envoi a du sens), mais superflue ici : l'action
+                    // physique de scanner le code d'un contact EST déjà la confirmation délibérée.
+                    // On démarre directement si le texte scanné est un identifiant reconnu ; sinon on
+                    // laisse le champ rempli pour correction manuelle, comme avant.
+                    if (parseUserId(scanned) != null) await _start();
                   },
                 ),
               ),
