@@ -329,29 +329,47 @@ class _ChatScreenState extends State<ChatScreen> {
   /// façon, `CallManager.startCall` et `MurmureWebRTCDelegate.createPeerConnection` referont
   /// chacun cette vérification et refuseraient l'appel à leur tour (fail-closed en profondeur,
   /// pas seulement ici).
+  ///
+  /// Trouvé en audit interne : ce contrôle préalable ne couvre que le refus lié au MODE réseau
+  /// (Tor/proxy). `CallManager.startCall` peut aussi refuser l'appel (retour `null`) même en mode
+  /// direct, si le homeserver ne fournit aucun TURN exploitable — ce code ignorait jusqu'ici sa
+  /// valeur de retour : aucun message ne s'affichait alors, le bouton d'appel ne faisant
+  /// littéralement rien de visible. Corrigé en vérifiant le résultat et en affichant le même
+  /// message explicite dans ce cas-là aussi.
   Future<void> _call() async {
     final net = await NetConfig.load();
     if (!CallPolicy.isAllowed(net.mode)) {
-      if (!mounted) return;
-      showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Appel désactivé'),
-          content: const Text(
-            'Les appels audio/vidéo sont désactivés en mode Tor/proxy : le flux audio/vidéo ne '
-            'peut pas être protégé par ce mode. Voir docs/CALLS_ARCHITECTURE.md.',
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK')),
-          ],
-        ),
+      _showCallDisabledDialog(
+        'Les appels audio/vidéo sont désactivés en mode Tor/proxy : le flux audio/vidéo ne '
+        'peut pas être protégé par ce mode. Voir docs/CALLS_ARCHITECTURE.md.',
       );
       return;
     }
-    await widget.callManager.startCall(widget.room, type: CallType.kVoice);
-    // La navigation vers CallSessionScreen est faite par MurmureWebRTCDelegate.handleNewCall
+    final session = await widget.callManager.startCall(widget.room, type: CallType.kVoice);
+    if (session == null) {
+      _showCallDisabledDialog(
+        "L'appel n'a pas pu démarrer : aucun serveur TURN exploitable n'a été fourni par le "
+        'homeserver (voir docs/CALLS_ARCHITECTURE.md). Réessayez plus tard ou contactez '
+        "l'administrateur du serveur.",
+      );
+    }
+    // Sinon, la navigation vers CallSessionScreen est faite par MurmureWebRTCDelegate.handleNewCall
     // (voir lib/calls/services/call_manager.dart), pas ici : c'est le même chemin que pour un
     // appel entrant, donc un seul endroit à maintenir pour l'UI d'appel.
+  }
+
+  void _showCallDisabledDialog(String message) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Appel désactivé'),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK')),
+        ],
+      ),
+    );
   }
 
   Future<void> _send() async {

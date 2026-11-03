@@ -183,11 +183,29 @@ class CallManager {
   /// correspondant pour un appel qui ne pourra jamais aboutir. Retourne `null` si le mode réseau
   /// ne permet pas l'appel (voir [CallPolicy.isAllowed]) — à l'appelant de montrer un message
   /// explicite, jamais un échec silencieux.
+  ///
+  /// Trouvé en audit interne : même en mode direct (donc `CallPolicy.isAllowed == true`),
+  /// [CallPolicy.buildIceConfig] peut refuser l'appel (`CallBlockedException`, voir
+  /// `createPeerConnection`) si le homeserver ne fournit aucun serveur TURN exploitable
+  /// (`Client.getTurnServer()` échoue ou vide — le cas avant qu'un coturn ne soit réellement
+  /// déployé, voir docs/CALLS_ARCHITECTURE.md). Cette exception traverse
+  /// `CallSession.initOutboundCall` → `_preparePeerConnection`, qui l'avale silencieusement côté
+  /// SDK (elle ne fait que logger) SANS relancer ni positionner d'état d'erreur ; `pc` reste donc
+  /// `null` et le code du SDK continue (`addLocalStream` notamment), ce qui finit par lever une
+  /// exception de null-check (`pc!...`) non interceptée — remontant jusqu'ici en laissant
+  /// l'utilisateur sans aucun message (le bouton d'appel ne fait alors rien de visible), alors que
+  /// la politique a bien refusé l'appel comme prévu. Intercepté ici pour honorer le contrat déjà
+  /// documenté par ce commentaire (retourner `null`, jamais un échec silencieux) quelle que soit
+  /// l'origine exacte du refus.
   Future<CallSession?> startCall(Room room, {required CallType type}) async {
     final net = await NetConfig.load();
     if (!CallPolicy.isAllowed(net.mode)) return null;
-    final session = await voip.inviteToCall(room, type);
-    delegate._watchActive(session);
-    return session;
+    try {
+      final session = await voip.inviteToCall(room, type);
+      delegate._watchActive(session);
+      return session;
+    } catch (_) {
+      return null;
+    }
   }
 }
