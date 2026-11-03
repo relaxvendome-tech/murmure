@@ -1,4 +1,62 @@
-# Vérification des appareils (clés E2EE) — constat d'audit, non résolu
+# Vérification des appareils (clés E2EE)
+
+## État actuel (mise à jour : vérification manuelle d'empreinte implémentée)
+
+Depuis cette passe, Murmure implémente la partie la plus immédiate du constat ci-dessous :
+- `lib/ui/device_verification_screen.dart` liste les appareils connus d'un contact (conversation
+  directe uniquement pour l'instant), affiche l'empreinte Ed25519 de chacun en clair (groupée par
+  blocs de 4 caractères pour une comparaison visuelle), et un bouton « Vérifier » qui, après
+  confirmation explicite que l'empreinte a été comparée *hors bande*, appelle
+  `DeviceKeys.setVerified(true)`.
+- `lib/ui/rooms_screen.dart` affiche, dans la barre d'app d'une conversation directe, une icône
+  (bouclier vert si tous les appareils connus du contact sont vérifiés, bouclier orange sinon)
+  qui ouvre cet écran.
+
+Ce n'est **pas** une vérification SAS interactive (comparaison d'emojis entre les deux appareils,
+qui authentifie aussi l'absence d'un adversaire actif pendant la vérification elle-même). C'est
+une comparaison manuelle d'empreinte, qui dépend entièrement de la rigueur de l'utilisateur et
+d'un canal hors bande fiable (voir la limite SAS ci-dessous, toujours non résolue).
+
+**Pourquoi seulement l'empreinte, pas le flux SAS, dans cette passe :** l'API SAS de
+`matrix-dart-sdk` (`DeviceKeys.startVerification()`, `KeyVerificationManager`, `KeyVerification`,
+`sasEmojis`, `acceptSas()`/`rejectSas()`, les états `askSas`/`waitingSas`/`done`...) a été
+consultée via la documentation publiée du paquet (pub.dev), et son existence et ses grandes lignes
+sont confirmées. Mais ce bac à sable ne permet pas de garantir que la documentation consultée
+correspond strictement à la version réellement résolue par ce dépôt (`matrix: ^0.29.0`, résolu à
+`0.29.13`, sans `pubspec.lock` committé pour le confirmer) : une requête de test vers
+`pub.dev/documentation/matrix/0.9.0/...` pendant cette même passe a renvoyé un contenu
+explicitement étiqueté comme appartenant à une version bien plus récente (11.0.0), ce qui montre
+que pub.dev ne conserve pas de façon fiable la documentation statique des anciennes versions et
+peut silencieusement en servir une autre sous une URL qui prétend être la bonne. Écrire le flux
+SAS complet (gestion d'état, événements `m.key.verification.*`, annulation, timeouts) sur la base
+d'une API dont la correspondance exacte avec le code réellement exécuté n'est pas vérifiable
+serait prendre le risque d'un bug silencieux ou d'un flux qui plante — bien pire qu'une
+fonctionnalité absente, car cela inciterait à croire qu'une vérification plus forte a été faite.
+En revanche, l'API utilisée ici (`DeviceKeys.ed25519Key`, `.verified`, `.setVerified()`,
+`Client.userDeviceKeys`, `DeviceKeysList.deviceKeys`) est confirmée identique dans toutes les
+versions consultées (de l'ancienne redirigée vers 11.0.0 jusqu'à « latest »), avec les mêmes noms
+et signatures partout — un risque de rupture d'API beaucoup plus faible, raisonnable à construire
+sans le source exact de 0.29.13 sous les yeux.
+
+**Ce qui reste un TODO honnête et précis, pas vague :**
+1. Vérifier les noms d'API SAS exacts contre le vrai code source de la version résolue (lire le
+   `pubspec.lock` généré par `flutter pub get` dans un environnement qui a accès à pub.dev et/ou
+   au dépôt `matrix-dart-sdk`, puis le code source au tag exact — aucun des deux n'était accessible
+   depuis ce bac à sable pendant cette passe), puis implémenter `startVerification()` /
+   `KeyVerificationManager` / l'écran d'emojis SAS / `acceptSas()`/`rejectSas()` /
+   `Client.onKeyVerificationRequest` pour la réception.
+2. Étendre la vérification (empreinte, puis SAS) aux conversations de groupe — cette passe ne
+   couvre que les conversations directes (`Room.directChatMatrixID`), le cas le plus simple et le
+   plus immédiatement utile vu l'absence totale d'écran de membres de groupe dans ce dépôt.
+3. La liste des appareils affichée reflète ce que le client a déjà appris (`Client.userDeviceKeys`,
+   rempli par la synchronisation et par l'échange de clés fait au moment de chiffrer vers ce
+   contact) — il n'y a pas de requête serveur forcée (« rafraîchir ») dans cet écran. Un appareil
+   tout juste ajouté par un correspondant peut donc ne pas apparaître immédiatement.
+4. Aucune option pour refuser d'envoyer un message à un appareil non vérifié : le chiffrement
+   continue d'accepter tout appareil annoncé par le serveur, vérifié ou pas. Afficher l'état ne
+   bloque rien — voir la section suivante, qui reste vraie en l'état.
+
+## Constat d'audit initial (ce qui a motivé ce qui précède)
 
 ## Ce qui a été trouvé
 
