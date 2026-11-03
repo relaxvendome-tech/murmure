@@ -231,6 +231,15 @@ class _CreateAccountScreenState extends State<_CreateAccountScreen> {
   bool _busy = false;
   String? _error;
 
+  // Trouvé en audit interne (revue croisée IA + vérification du reste du fichier contre le même
+  // défaut) : seul _ServerSetupScreenState, l'autre écran de ce fichier, libérait ses contrôleurs
+  // ; celui-ci ne le faisait pas.
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _create() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) {
