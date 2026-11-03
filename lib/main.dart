@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_vodozemac/flutter_vodozemac.dart' as vod;
 import 'package:matrix/matrix.dart';
 
 import 'account.dart';
@@ -19,6 +20,20 @@ final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Trouvé en audit interne, et sérieux : `flutter_vodozemac` est bien déclaré dans pubspec.yaml
+  // et cité dans plusieurs commentaires de ce dépôt comme le moteur Olm/Megolm réellement utilisé,
+  // mais rien n'appelait jamais son `init()` — qui charge la bibliothèque native (Rust via
+  // flutter_rust_bridge) sur laquelle reposent TOUTES les opérations de chiffrement du SDK Matrix,
+  // y compris la création même du compte et la connexion. Vérifié contre l'implémentation de
+  // référence du même éditeur (Famedly) que matrix-dart-sdk, FluffyChat, dont `main()` appelle
+  // explicitement `vod.init(...)` avant tout usage du SDK — jamais en interne par le SDK lui-même.
+  // Sans cet appel, soit `Client(...).init()` plus bas lève une exception (l'écran d'erreur de
+  // démarrage s'affiche, au moins visible), soit — plus grave, non exclu sans test sur appareil
+  // réel — une tentative plus tardive d'opération cryptographique échoue silencieusement ailleurs
+  // dans l'appli. `wasmPath` (utilisé par FluffyChat) ne s'applique qu'aux builds web ; Murmure est
+  // Android uniquement, donc aucun argument n'est nécessaire ici (la bibliothèque native est
+  // chargée depuis l'emplacement par défaut du plugin).
+  await vod.init();
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
   await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
   runApp(const MurmureApp());
