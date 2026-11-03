@@ -378,9 +378,17 @@ class _ChatScreenState extends State<ChatScreen> {
   // vues à TextEditingController de cette appli (voir AddContactScreen, NewGroupScreen,
   // ProfileScreen). Cet écran étant celui qu'on ouvre et referme le plus souvent (chaque
   // conversation), la fuite ici est la plus significative des deux trouvées sur ce fichier.
+  //
+  // Deuxième fuite trouvée dans la même classe, après une remarque d'une IA externe sur ce point
+  // précis (vérifiée directement dans le SDK matrix-dart pinné, lib/src/timeline.dart) : `Timeline`
+  // s'abonne en interne aux mises à jour de la timeline du salon et expose explicitement
+  // `cancelSubscriptions()` pour s'en désabonner — jamais appelé ici. Sans ce correctif, chaque
+  // conversation ouverte puis fermée laissait son Timeline continuer à écouter indéfiniment les
+  // événements du salon en arrière-plan.
   @override
   void dispose() {
     _textCtrl.dispose();
+    _timeline?.cancelSubscriptions();
     super.dispose();
   }
 
