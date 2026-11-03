@@ -39,6 +39,17 @@ dependencies:
   # Notification d'appel manqué (voir lib/calls/services/call_opsec_notifier.dart) : nécessaire
   # pour afficher quoi que ce soit dans la barre d'état Android en dehors de l'appli elle-même.
   flutter_local_notifications: ^18.0.1
+  # Envoi de photos (voir lib/media.dart et ChatScreen._pickAndSendImage) — version confirmée via
+  # pub.dev au moment de cet ajout (1.2.4), pas une supposition. Sélecteur système uniquement
+  # (galerie), jamais de caméra directe dans cette passe pour limiter la surface de permissions
+  # ajoutée d'un coup.
+  image_picker: ^1.2.4
+  # Déjà utilisé en transitif par `matrix` (génération de vignettes), déclaré en direct ici car
+  # lib/media.dart l'importe maintenant explicitement pour dépouiller les EXIF (GPS, horodatage
+  # précis, modèle d'appareil) avant tout chiffrement/envoi — voir le threat model documenté en
+  # tête de ce fichier. Version alignée sur celle déjà résolue par matrix-dart-sdk 0.29.x (vérifiée
+  # dans son pubspec.yaml), pour ne pas introduire de contrainte de version concurrente.
+  image: ^4.0.15
 
 dev_dependencies:
   flutter_test:

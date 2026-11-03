@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -11,23 +13,13 @@ import 'package:path_provider/path_provider.dart';
 /// réécriture par le système — l'écrasement réduit la fenêtre d'exposition, sans garantie absolue
 /// sur SSD avec wear-leveling, ce qu'aucune appli ne peut garantir).
 ///
-/// À NE PAS OUBLIER quand l'envoi de médias sera implémenté (constaté en audit interne : aucun
-/// sélecteur de photo/caméra n'existe encore dans ce dépôt — `lib/ui/rooms_screen.dart` n'envoie
-/// que du texte, donc rien à corriger ici pour l'instant, mais ce point structurera cette
-/// fonctionnalité dès sa conception plutôt qu'en correctif après coup) : une photo prise par
-/// l'appareil embarque typiquement des métadonnées EXIF (coordonnées GPS, horodatage précis,
-/// modèle de l'appareil) qui survivraient au chiffrement de bout en bout — le destinataire, ou
-/// quiconque récupère le fichier déchiffré ensuite, les verrait en clair même si le transport est
-/// chiffré. Toute fonctionnalité d'envoi de média devra dépouiller ces métadonnées AVANT
-/// chiffrement/envoi, jamais s'appuyer sur le serveur ou le destinataire pour le faire.
-///
-/// Trouvé en audit interne (passe suivante) : `image_picker` et `video_player` étaient déclarés
-/// dans `pubspec.yaml` sans qu'aucun fichier du dépôt ne les importe — morts depuis leur ajout
-/// (vérifié avec `git log -p -- pubspec.yaml`), probablement pré-déclarés en prévision de cette
-/// même fonctionnalité jamais commencée. Retirés : un plugin natif non utilisé reste du poids
-/// (taille de l'APK) et une surface fusionnée dans le manifeste final (permissions/`<queries>` du
-/// plugin) invisible à la seule lecture d'`AndroidManifest.xml`, pour un bénéfice nul tant que rien
-/// ne les appelle. À rajouter explicitement le jour où cette fonctionnalité sera construite.
+/// Suite à la revue croisée IA (« niveau Telegram/Signal ») notant l'absence d'envoi de
+/// photo/vidéo : implémenté ici pour la partie photo (voir `ChatScreen._pickAndSendImage` dans
+/// `lib/ui/rooms_screen.dart`), avec [stripExifAndReencode] appelée AVANT tout chiffrement/envoi —
+/// jamais après, jamais côté serveur ou destinataire — conformément au threat model documenté
+/// ci-dessus : une photo prise par l'appareil embarque typiquement des métadonnées EXIF
+/// (coordonnées GPS, horodatage précis, modèle de l'appareil) qui survivraient telles quelles au
+/// chiffrement de bout en bout sinon.
 class MediaCache {
   static Future<Directory> _dir() async {
     final base = await getTemporaryDirectory();
@@ -82,3 +74,23 @@ class MediaCache {
 
 /// Alias pour compatibilité avec le nom utilisé dans main.dart (`purgeMediaCache`).
 Future<void> purgeMediaCache() => MediaCache.purgeAll();
+
+/// Redécode [bytes] puis les réencode en JPEG, en repartant d'un [img.ExifData] neuf plutôt que de
+/// compter sur un éventuel `clear()` partiel de l'EXIF décodé : une instance fraîchement construite
+/// est vide par construction (aucune ambiguïté sur ce qu'elle contient encore), donc aucune
+/// coordonnée GPS, horodatage ou identifiant d'appareil du fichier d'origine ne peut survivre dans
+/// la sortie. Toujours réencodée en JPEG quel que soit le format d'entrée reconnu par
+/// `package:image` (PNG, WebP, etc. embarquent aussi des chunks de métadonnées propres au format,
+/// pas seulement de l'EXIF) : repartir d'un format de sortie unique et simple évite d'avoir à
+/// auditer séparément le comportement de chaque encodeur pour chaque format source.
+///
+/// Lève [FormatException] si [bytes] n'est pas reconnu comme une image par `package:image` —
+/// l'appelant doit alors refuser l'envoi plutôt que d'envoyer les octets bruts non vérifiés.
+Uint8List stripExifAndReencode(Uint8List bytes, {int quality = 90}) {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) {
+    throw const FormatException('Image illisible : format non reconnu.');
+  }
+  decoded.exif = img.ExifData();
+  return Uint8List.fromList(img.encodeJpg(decoded, quality: quality));
+}

@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:matrix/matrix.dart';
 
@@ -8,6 +10,7 @@ import '../account.dart';
 import '../calls/call_policy.dart';
 import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
+import '../media.dart';
 import '../network.dart';
 import '../stealth.dart';
 import 'device_verification_screen.dart';
@@ -362,6 +365,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _textCtrl = TextEditingController();
   Timeline? _timeline;
+  bool _sendingMedia = false;
 
   @override
   void initState() {
@@ -495,6 +499,52 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Suite à la revue croisée IA (« niveau Telegram/Signal ») notant l'absence d'envoi de
+  /// photo/vidéo — jamais implémentée jusqu'ici dans ce dépôt (voir `lib/media.dart`).
+  /// Sélecteur système uniquement (galerie) : pas de caméra directe dans cette première passe,
+  /// pour limiter la surface de permissions ajoutée d'un coup.
+  ///
+  /// [stripExifAndReencode] est appelée AVANT tout chiffrement/envoi, jamais après — voir le
+  /// threat model documenté dans `lib/media.dart` (GPS, horodatage précis, modèle d'appareil
+  /// survivraient sinon au chiffrement de bout en bout). `MatrixImageFile` + `Room.sendFileEvent`
+  /// chiffrent automatiquement la pièce jointe pour un salon chiffré (vérifié contre le SDK
+  /// matrix-dart pinné : `Room.sendFileEvent` chiffre dès que `encrypted && client.
+  /// fileEncryptionEnabled`, ce qui est le cas ici — ce dépôt appelle `vod.init()` au démarrage).
+  Future<void> _pickAndSendImage() async {
+    if (_sendingMedia) return;
+    final XFile? picked =
+        await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 90);
+    if (picked == null) return;
+    if (!mounted) return;
+    setState(() => _sendingMedia = true);
+    try {
+      final rawBytes = await picked.readAsBytes();
+      final Uint8List clean;
+      try {
+        clean = stripExifAndReencode(rawBytes);
+      } on FormatException {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Image illisible : fichier non reconnu, envoi annulé')),
+          );
+        }
+        return;
+      }
+      final file = MatrixImageFile(bytes: clean, name: 'photo.jpg');
+      final eventId = await widget.room.sendFileEvent(file);
+      if (eventId == null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                "Photo non envoyée (réseau indisponible ou serveur injoignable) — réessayez plus tard"),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sendingMedia = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final events = _timeline?.events.where((e) => e.type == EventTypes.Message).toList() ?? [];
@@ -571,7 +621,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                     ),
                                   ),
                                 ),
-                              Text(e.text, style: TextStyle(color: textColor)),
+                              if (e.messageType == MessageTypes.Image)
+                                _MessageImage(event: e)
+                              else
+                                Text(e.text, style: TextStyle(color: textColor)),
                               const SizedBox(height: 2),
                               // Trouvé en audit interne, suite à la revue croisée IA sur l'écart avec
                               // Telegram/Signal : `_send()` lit déjà `EventStatus` (voir plus haut)
@@ -619,6 +672,17 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  IconButton(
+                    icon: _sendingMedia
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.image_outlined),
+                    tooltip: 'Envoyer une photo',
+                    onPressed: _sendingMedia ? null : _pickAndSendImage,
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _textCtrl,
@@ -641,6 +705,81 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Affiche une image reçue : télécharge et déchiffre la pièce jointe via le SDK matrix-dart
+/// (`Event.downloadAndDecryptAttachment`, vérifié contre le SDK pinné — gère aussi bien les
+/// pièces jointes chiffrées, avec `file`/`key`/`iv`, que non chiffrées), puis l'affiche
+/// directement depuis la mémoire (`Image.memory`) sans jamais l'écrire sur le disque de
+/// l'appareil : pour une vignette de conversation, garder les octets déchiffrés uniquement en
+/// mémoire — jamais même brièvement en clair sur le disque — est une protection plus stricte que
+/// le couple écriture-puis-effacement de [MediaCache] (réservé à un futur écran plein cadre/
+/// sauvegarde explicite, pas à l'affichage courant de la liste de messages).
+///
+/// Le futur de téléchargement est calculé une seule fois dans [initState] (jamais reconstruit à
+/// chaque frame de la liste, qui se reconstruit souvent — nouveaux messages, changement de statut
+/// d'envoi) et mis en cache par événement grâce à la [Key] stable passée par l'appelant
+/// (`event.eventId`), pour qu'un nouveau widget ne soit créé, et donc qu'un nouveau téléchargement
+/// ne soit relancé, que pour un événement réellement différent.
+class _MessageImage extends StatefulWidget {
+  _MessageImage({required this.event}) : super(key: ValueKey(event.eventId));
+  final Event event;
+
+  @override
+  State<_MessageImage> createState() => _MessageImageState();
+}
+
+class _MessageImageState extends State<_MessageImage> {
+  late final Future<MatrixFile> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.event.downloadAndDecryptAttachment();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: FutureBuilder<MatrixFile>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Container(
+              width: 180,
+              height: 120,
+              alignment: Alignment.center,
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Icon(Icons.broken_image_outlined,
+                  color: Theme.of(context).colorScheme.onErrorContainer),
+            );
+          }
+          final file = snapshot.data;
+          if (file == null) {
+            return const SizedBox(
+              width: 180,
+              height: 120,
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            );
+          }
+          return Image.memory(
+            file.bytes,
+            width: 240,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => Container(
+              width: 180,
+              height: 120,
+              alignment: Alignment.center,
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Icon(Icons.broken_image_outlined,
+                  color: Theme.of(context).colorScheme.onErrorContainer),
+            ),
+          );
+        },
       ),
     );
   }
