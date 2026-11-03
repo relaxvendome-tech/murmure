@@ -49,9 +49,18 @@ terminé, le déverrouillage ultérieur passe par `client.encryption!.ssss.open(
 
 ### API réelle vérifiée : vérification interactive SAS
 
-`KeyVerificationState` (états réels, confirmés par grep direct sur l'énumération du SDK) :
-`waitingAccept`, `askChoice`, `askSas`, `waitingSas`, `done`, `error`, `askSSSS`,
-`showQRSuccess`, `confirmQRScan`. Flux côté initiateur :
+`KeyVerificationState` (énumération réelle, lue directement dans
+`matrix-dart-sdk/lib/encryption/utils/key_verification.dart`, pas seulement dans les tests) :
+`askChoice`, `askAccept`, `askSSSS`, `waitingAccept`, `askSas`, `showQRSuccess`, `confirmQRScan`,
+`waitingSas`, `done`, `error`. `askAccept` (absent des tests parce qu'ils appellent
+`acceptVerification()` immédiatement sans vérifier l'état intermédiaire) est l'état dans lequel se
+trouve l'objet `KeyVerification` reçu côté destinataire via `onKeyVerificationRequest`, avant tout
+appel à `acceptVerification()`/`rejectVerification()` — c'est l'état à afficher pour montrer les
+boutons Accepter/Refuser d'une demande entrante. **Notification de changement d'état pour l'UI** :
+`KeyVerification` expose un champ public assignable `void Function()? onUpdate` — le SDK l'appelle
+lui-même après chaque `setState(KeyVerificationState ...)` interne. Un widget doit donc faire
+`request.onUpdate = () => setState(() {})` (Flutter) pour se reconstruire à chaque transition —
+rien à écouter côté `Stream`, c'est un callback simple, pas un flux. Flux côté initiateur :
 `client.userDeviceKeys[peerUserId]!.startVerification(newDirectChatEnableEncryption: false)` →
 renvoie un `KeyVerification`, état initial `waitingAccept`. Flux côté destinataire : écoute via
 `client.onKeyVerificationRequest.stream.listen((KeyVerification req) { ... })`, puis

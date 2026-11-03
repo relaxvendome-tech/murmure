@@ -1,31 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
-/// Vérification manuelle (par empreinte) des appareils d'un contact — voir
-/// `docs/E2EE_VERIFICATION.md` pour le constat d'audit qui a mené à cet écran et pour ce qui
-/// reste volontairement non fait.
+import 'sas_verification_screen.dart';
+
+/// Vérification des appareils d'un contact — par empreinte (manuelle, hors bande) OU par SAS
+/// (comparaison interactive d'émojis) — voir `docs/E2EE_VERIFICATION.md` pour le constat d'audit
+/// initial et pour l'API SAS, désormais vérifiée directement contre le code source de
+/// `matrix-dart-sdk` (tag `v0.29.0`, pas devinée depuis une documentation ou une IA externe).
 ///
-/// LIMITE HONNÊTE : cet écran compare une empreinte Ed25519 affichée en clair, à vérifier
-/// *hors bande* (en personne, par appel vocal déjà authentifié, etc.) — il n'y a PAS de
-/// vérification interactive SAS (comparaison d'emojis entre les deux appareils). Le flux SAS de
-/// `matrix-dart-sdk` (`DeviceKeys.startVerification()`, `KeyVerification`, `sasEmojis`,
-/// `acceptSas()`...) a été consulté via la documentation publiée du paquet, mais ce bac à sable ne
-/// permet pas d'accéder de façon fiable à la documentation strictement alignée sur la version
-/// épinglée ici (`matrix: ^0.29.0`, résolu à `0.29.13`) : pub.dev a été constaté, pendant cette
-/// même passe, en train de servir le contenu d'une version ultérieure bien plus récente sous une
-/// URL censée correspondre à une ancienne version (`.../0.9.0/...` a renvoyé un contenu étiqueté
-/// version 11.0.0). Implémenter le flux SAS sur la base d'une documentation dont on ne peut pas
-/// garantir qu'elle correspond au code réellement résolu serait exactement le type d'erreur que ce
-/// dépôt cherche à éviter (voir CLAUDE.md / l'historique de `build.gradle.kts`). Tant que cette
-/// vérification de version n'est pas possible de façon fiable, seule la vérification manuelle
-/// d'empreinte — dont l'API (`DeviceKeys.ed25519Key`, `.verified`, `.setVerified()`) est stable et
-/// inchangée dans tout l'historique public du paquet consulté — est implémentée ici.
+/// Le SAS authentifie en plus l'absence d'un adversaire actif au moment même de l'échange de
+/// clés — la comparaison d'empreinte seule ne protège pas contre ce cas précis. Les deux méthodes
+/// restent proposées : le SAS suppose que le correspondant est disponible pour comparer en direct
+/// tout de suite, l'empreinte peut se vérifier en différé (ex. lue par téléphone déjà authentifié).
 ///
-/// Appareils marqués "vérifié" ici : confiance réelle, basée sur une comparaison faite par
-/// l'utilisateur. Appareils non marqués : toujours en confiance TOFU pure (le SDK les accepte et
-/// leur chiffre des messages sans distinction) — ce que ce dépôt documentait déjà comme non
-/// résolu. Cet écran ne change PAS ce que le SDK fait réellement avec un appareil non vérifié : il
-/// ne fait que rendre visible, pour la première fois dans Murmure, qui a été vérifié ou pas.
+/// Appareils marqués "vérifié" ici (par l'une ou l'autre méthode) : confiance réelle. Appareils
+/// non marqués : toujours en confiance TOFU pure (le SDK les accepte et leur chiffre des messages
+/// sans distinction) — ce que ce dépôt documentait déjà comme non résolu. Cet écran ne change PAS
+/// ce que le SDK fait réellement avec un appareil non vérifié : il ne fait que rendre visible qui
+/// a été vérifié ou pas, et proposer les deux moyens de le faire.
 class DeviceVerificationScreen extends StatefulWidget {
   const DeviceVerificationScreen({
     super.key,
@@ -45,6 +37,35 @@ class DeviceVerificationScreen extends StatefulWidget {
 class _DeviceVerificationScreenState extends State<DeviceVerificationScreen> {
   // Évite un double-appui pendant qu'un setVerified() est en cours pour un appareil donné.
   String? _busyDeviceId;
+
+  // Évite de lancer deux demandes SAS en parallèle vers le même contact.
+  bool _startingSas = false;
+
+  /// Lance une vérification SAS vers [widget.userId] (pas vers un appareil précis : le SDK choisit
+  /// l'appareil qui répond — voir `startVerification()` sur `DeviceKeysList`, docs/E2EE_VERIFICATION.md).
+  /// `.verified` (affiché par [_DeviceTile]) reflète déjà `directVerified`, positionné par le SDK
+  /// lui-même dès que le SAS réussit : pas de `setVerified()` manuel à faire ici, juste rafraîchir
+  /// l'affichage au retour de [SasVerificationScreen].
+  Future<void> _startSas() async {
+    if (_startingSas) return;
+    setState(() => _startingSas = true);
+    try {
+      final list = widget.client.userDeviceKeys[widget.userId];
+      if (list == null) return;
+      final request = await list.startVerification();
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => SasVerificationScreen(request: request, peerName: widget.displayName),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Impossible de démarrer la vérification : $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _startingSas = false);
+    }
+  }
 
   /// Regroupe une empreinte Ed25519 (base64, ~43 caractères) en blocs de 4 pour une comparaison
   /// visuelle plus facile — convention courante pour l'affichage d'empreintes de clé publique.
@@ -130,6 +151,21 @@ class _DeviceVerificationScreenState extends State<DeviceVerificationScreen> {
                   ),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              onPressed: _startingSas ? null : _startSas,
+              icon: _startingSas
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.emoji_emotions_outlined),
+              label: const Text('Vérifier par émojis (SAS)'),
             ),
           ),
           const SizedBox(height: 16),

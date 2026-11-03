@@ -12,6 +12,7 @@ import 'ui/lock_screens.dart';
 import 'ui/onboarding_screen.dart';
 import 'ui/rooms_screen.dart';
 import 'ui/theme.dart';
+import 'verification/verification_manager.dart';
 
 /// Permet à [MurmureWebRTCDelegate] (construit avant tout arbre de widgets, voir
 /// `lib/calls/services/call_manager.dart`) de naviguer vers l'écran d'appel à la réception d'un
@@ -51,6 +52,7 @@ class MurmureApp extends StatefulWidget {
 class _MurmureAppState extends State<MurmureApp> {
   Client? _client;
   CallManager? _callManager;
+  VerificationManager? _verificationManager;
   bool _booting = true;
   String? _bootError;
 
@@ -123,10 +125,17 @@ class _MurmureAppState extends State<MurmureApp> {
       callManager.delegate.navigatorKey = murmureNavigatorKey;
       callManager.delegate.buildCallScreen = (session) => CallSessionScreen(session: session);
 
+      // Vérification SAS (voir lib/verification/verification_manager.dart et
+      // docs/E2EE_VERIFICATION.md) : même raison de construction précoce que CallManager
+      // ci-dessus, pour ne manquer aucune demande entrante dès le premier rendu.
+      final verificationManager = VerificationManager(client: client)..navigatorKey = murmureNavigatorKey;
+      verificationManager.start();
+
       if (!mounted) return;
       setState(() {
         _client = client;
         _callManager = callManager;
+        _verificationManager = verificationManager;
         _booting = false;
       });
     } catch (e) {
@@ -141,6 +150,12 @@ class _MurmureAppState extends State<MurmureApp> {
   /// Effacement d'urgence déclenché depuis l'écran de verrou (code de contrainte, ou trop
   /// d'essais) : ferme immédiatement l'appli après avoir tout effacé, voir [Account.panic].
   Future<void> _panic() => Account.panic(_client);
+
+  @override
+  void dispose() {
+    _verificationManager?.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
