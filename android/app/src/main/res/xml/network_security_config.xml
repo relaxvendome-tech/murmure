@@ -1,7 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- HTTPS uniquement, certificats du système seulement : pas de clear-text, pas d'autorité
      ajoutée par l'utilisateur acceptée (empêche une interception par un certificat installé de
-     force sur l'appareil, scénario plausible pour un téléphone saisi/examiné). -->
+     force sur l'appareil, scénario plausible pour un téléphone saisi/examiné).
+
+     LIMITE HONNÊTE (trouvé en audit interne, corroboré par revue croisée IA avec sources précises :
+     issues flutter/flutter#183153, #106678, dart-lang/sdk#50435, advisory Dart GHSA-frr6-h895-5pxx) :
+     ce fichier ne régit QUE la pile réseau native Android (java.net/OkHttp, WebView). Tout le trafic
+     réel de Murmure (Matrix via lib/network.dart) passe par dart:io (HttpClient/package:http/
+     IOClient), qui embarque sa propre pile TLS (BoringSSL) totalement indépendante de ce fichier —
+     cleartextTrafficPermitted="false" ne bloque donc PAS un homeserver configuré en http:// via ce
+     mécanisme (voir plutôt la validation explicite du schéma dans ui/onboarding_screen.dart, qui est
+     le vrai point de contrôle). Le risque visé par ce commentaire (CA installée de force) reste
+     couvert en pratique : dart:io sur Android ne consulte pas non plus le magasin de CA utilisateur,
+     seulement les CA racines système — mais c'est un comportement par défaut de dart:io, pas une
+     garantie apportée par ce fichier, et il cesserait de s'appliquer si une dépendance future
+     basculait vers un client HTTP natif (ex. cronet_http). Conservé malgré tout en défense en
+     profondeur pour toute future requête qui passerait par la pile Android native (WebView, plugin
+     tiers), pas pour le trafic Matrix lui-même. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
