@@ -26,6 +26,28 @@ String _formatTimestamp(DateTime dt) {
   return sameDay ? DateFormat.Hm().format(dt) : DateFormat('d MMM').format(dt);
 }
 
+/// Résume tout ce qui peut changer l'affichage de la liste des conversations (ordre, nom, dernier
+/// message) — voir son usage avec `distinct()` dans [RoomsScreen.build].
+///
+/// Trouvé en audit interne — un vrai défaut de réactivité, pas une optimisation de principe :
+/// `client.onSync.stream` émet à CHAQUE synchronisation avec le homeserver, y compris pour des
+/// événements qui n'ont rien à voir avec cette liste (un accusé de lecture, une notification de
+/// frappe dans une conversation ouverte ailleurs, une mise à jour de présence d'un contact...).
+/// Avant cette correction, un tel événement reconstruisait pourtant TOUTE la liste — filtrage, tri,
+/// et pour chaque salon la couleur d'avatar, le nom localisé et le texte du dernier message —
+/// aussi souvent que ces événements arrivent, même quand rien de visible n'avait réellement changé.
+/// `distinct()` sur cette signature fait que seul un changement qui affecte vraiment ce qui est
+/// affiché déclenche cette reconstruction.
+String _roomsSignature(Client client) {
+  final rooms = client.rooms.where((r) => !r.isSpace);
+  final parts = rooms.map((r) {
+    final last = r.lastEvent;
+    return '${r.id}\u0000${r.getLocalizedDisplayname()}\u0000${last?.eventId ?? ''}\u0000'
+        '${last?.originServerTs.millisecondsSinceEpoch ?? 0}';
+  });
+  return parts.join('\u0001');
+}
+
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
 class RoomsScreen extends StatelessWidget {
@@ -82,8 +104,9 @@ class RoomsScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: StreamBuilder<Object?>(
-        stream: client.onSync.stream,
+      body: StreamBuilder<String>(
+        stream: client.onSync.stream.map((_) => _roomsSignature(client)).distinct(),
+        initialData: _roomsSignature(client),
         builder: (context, _) {
           final rooms = client.rooms.where((r) => !r.isSpace).toList()
             ..sort((a, b) => (b.lastEvent?.originServerTs ?? DateTime(0))
