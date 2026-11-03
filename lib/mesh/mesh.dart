@@ -245,7 +245,13 @@ class Mesh {
       timeout: const Duration(days: 1),
     );
     _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
-    _relayTimer = Timer.periodic(const Duration(seconds: 20), (_) => _purgeExpired());
+    // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : ce timer ne fait QUE
+    // purger (_purgeExpired ne touche que des lignes expirées depuis au moins maxAgeHours = 72 h),
+    // mais tournait toutes les 20 secondes — un réveil CPU/I/O SQLite totalement disproportionné
+    // par rapport à la granularité réellement utile, sur un usage où l'autonomie de la batterie
+    // compte (téléphone en poche en manifestation). 15 minutes laisse largement le temps de purger
+    // avant que quoi que ce soit ne dépende de cette fraîcheur (fenêtre de 72 h).
+    _relayTimer = Timer.periodic(const Duration(minutes: 15), (_) => _purgeExpired());
 
     // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
     // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
@@ -587,15 +593,20 @@ class Mesh {
 
   /// Ne garde que les [_maxSkippedPerPeer] rangs sautés les plus récents par contact (les plus
   /// anciens ont le moins de chances d'être un jour réclamés par un message très en retard).
+  ///
+  /// Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : cette méthode lisait
+  /// toutes les lignes du contact puis supprimait l'excédent une par une (une requête DELETE par
+  /// ligne en trop). Appelée après CHAQUE message reçu qui avance le cliquet (voir [_recvKeyFor]),
+  /// donc potentiellement très souvent en maillage dense — un simple gaspillage d'I/O SQLite, pas
+  /// une faille, mais une requête unique suffit et évite l'aller-retour en boucle.
   Future<void> _trimSkipped(Uint8List peerPublicKey) async {
     final db = await _database();
-    final rows = await db.query('ratchet_skipped',
-        where: 'peer = ?', whereArgs: [peerPublicKey], orderBy: 'counter DESC');
-    if (rows.length <= _maxSkippedPerPeer) return;
-    for (final r in rows.skip(_maxSkippedPerPeer)) {
-      await db.delete('ratchet_skipped',
-          where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, r['counter']]);
-    }
+    await db.delete(
+      'ratchet_skipped',
+      where: 'peer = ? AND counter NOT IN '
+          '(SELECT counter FROM ratchet_skipped WHERE peer = ? ORDER BY counter DESC LIMIT ?)',
+      whereArgs: [peerPublicKey, peerPublicKey, _maxSkippedPerPeer],
+    );
   }
 
   Future<List<MeshEnvelope>> _allOutbox() async {
