@@ -1,23 +1,39 @@
 # Déploiement du serveur Murmure
 
 Serveur Matrix minimal (Conduit) + HTTPS automatique (Caddy), pensé pour une petite instance low-cost
-(AWS Lightsail Nano, EC2 t3.micro, ou tout VPS avec Docker).
+(Hetzner CX22, AWS Lightsail Nano, EC2 t3.micro, ou tout VPS avec Docker).
 
 ## Avant de lancer
 
-1. Un nom de domaine (ou sous-domaine) pointant vers l'IP du serveur — Caddy a besoin du DNS en
-   place pour obtenir un certificat Let's Encrypt automatiquement.
-2. Modifier `conduit.toml` :
-   - `server_name` → votre domaine
-   - `registration_token` → une longue chaîne aléatoire (`openssl rand -hex 32`)
-3. Ouvrir les ports 80 et 443 sur le pare-feu du serveur (et le security group AWS si Lightsail/EC2).
+1. Un nom de domaine (ou sous-domaine) pointant vers l'IP du serveur (enregistrement DNS A) —
+   Caddy a besoin du DNS en place pour obtenir un certificat Let's Encrypt automatiquement.
+2. Ports 80 et 443 ouverts sur le pare-feu du serveur (et le pare-feu Cloud du fournisseur, le cas
+   échéant — distinct de `ufw`, voir le panneau Hetzner/AWS).
 
-## Lancer
+## Lancer — en une commande (`deploy.sh`)
+
+Installe Docker si besoin, clone ce dépôt, remplit `conduit.toml` (domaine + jeton d'inscription
+généré aléatoirement — jamais à saisir à la main), ouvre le pare-feu, démarre Conduit+Caddy
+(coturn exclu de cette première mise en ligne, voir l'en-tête du script), puis vérifie que le
+serveur répond en HTTPS :
 
 ```bash
-export MURMURE_DOMAIN=votre-domaine.fr
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/relaxvendome-tech/murmure/main/scripts/server/deploy.sh \
+  | bash -s -- votre-domaine.fr
 ```
+
+Le jeton d'inscription généré n'est affiché qu'une seule fois (relire `conduit.toml` sur le
+serveur ensuite si besoin). Relancer ce script sur un serveur déjà déployé est sans risque : il ne
+régénère pas le jeton ni ne touche aux données existantes.
+
+## Lancer — manuellement (si vous préférez tout contrôler vous-même)
+
+1. Modifier `conduit.toml` : `server_name` → votre domaine, `registration_token` → une longue
+   chaîne aléatoire (`openssl rand -hex 32`).
+2. ```bash
+   export MURMURE_DOMAIN=votre-domaine.fr
+   docker compose up -d conduit caddy
+   ```
 
 Caddy obtient son certificat HTTPS automatiquement au premier démarrage (peut prendre une minute).
 
