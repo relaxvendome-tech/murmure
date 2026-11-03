@@ -35,7 +35,11 @@ class _MissedCallsScreenState extends State<MissedCallsScreen> {
   }
 
   Future<void> _clear() async {
+    // Trouvé en audit interne (revue croisée IA) : `_refresh()` (donc `setState`) était appelé
+    // après cet `await` sans revérifier `mounted` — risque de "setState() called after dispose()"
+    // si l'écran disparaît (ex. relock automatique) pendant la purge.
     await CallOpsecStore.clear();
+    if (!mounted) return;
     _refresh();
   }
 

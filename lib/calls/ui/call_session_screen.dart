@@ -41,6 +41,15 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   StreamSubscription<CallState>? _stateSub;
   bool _missedRecorded = false;
 
+  /// Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : vrai dans tous
+  /// les chemins qui terminent proprement la session (`_decline`, `_hangUp`, ou la fin détectée à
+  /// distance ci-dessous) — jamais mis à vrai par une simple fermeture d'écran (bouton retour
+  /// système, navigation externe). Sert à la fois à éviter un double `pop()` quand la fin à
+  /// distance et l'action locale se recoupent, et de signal pour [dispose] : si cet écran disparaît
+  /// sans être passé par `_closing = true`, la session WebRTC (donc le micro) n'a jamais été
+  /// explicitement raccrochée.
+  bool _closing = false;
+
   @override
   void initState() {
     super.initState();
@@ -73,10 +82,21 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     // reconstruisait cette détection à la main par-dessus un événement `m.call.hangup` brut et
     // une API qui n'existe pas dans ce SDK (`voip.currentSession`) — l'état de CallSession
     // lui-même est la source de vérité correcte, pas un événement réinterprété de l'extérieur.
+    // Trouvé en audit interne (revue croisée IA) : seul le cas « appel manqué » (jamais décroché)
+    // réagissait à `kEnded` — un appel DÉCROCHÉ puis terminé par le correspondant (raccroché à
+    // distance) ne déclenchait jamais `_hangUp`/`_decline` localement, donc cet écran restait
+    // affiché indéfiniment (micro ouvert, vidéo figée) jusqu'à un retour manuel de l'utilisateur.
+    // `_closing` évite un double `pop()` quand la fin à distance et une action locale
+    // (`_decline`/`_hangUp`, qui pop déjà elles-mêmes) se recoupent.
     _stateSub = widget.session.onCallStateChanged.stream.listen((state) {
-      if (state == CallState.kEnded && !_answered && !widget.session.isOutgoing && !_missedRecorded) {
+      if (state != CallState.kEnded) return;
+      if (!_answered && !widget.session.isOutgoing && !_missedRecorded) {
         _missedRecorded = true;
         unawaited(_recordMissedCall());
+      }
+      if (!_closing && mounted) {
+        _closing = true;
+        Navigator.of(context).pop();
       }
     });
 
@@ -126,6 +146,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   }
 
   Future<void> _decline() async {
+    _closing = true;
     await widget.session.reject();
     if (mounted) Navigator.of(context).pop();
   }
@@ -138,12 +159,26 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   }
 
   Future<void> _hangUp() async {
+    _closing = true;
     await widget.session.hangup(reason: CallErrorCode.userHangup);
     if (mounted) Navigator.of(context).pop();
   }
 
   @override
   void dispose() {
+    // Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : avant ce
+    // correctif, rien ici ne raccrochait la session si l'écran disparaissait sans passer par
+    // `_decline`/`_hangUp` — en particulier le bouton retour système (ce fichier n'a pas de
+    // PopScope qui l'intercepte). Dans ce cas, la `CallSession` restait active côté SDK (micro
+    // potentiellement ouvert) jusqu'à un éventuel timeout, sans que l'utilisateur ne le sache.
+    // Filet de sécurité générique plutôt qu'une interception du bouton retour spécifique : couvre
+    // aussi une navigation externe forcée (ex. verrouillage automatique qui remplace tout l'arbre
+    // de widgets). `unawaited` : dispose() ne peut pas être async, et on ne bloque pas la
+    // destruction de l'écran sur la confirmation réseau du raccroché.
+    if (!_closing) {
+      _closing = true;
+      unawaited(widget.session.hangup(reason: CallErrorCode.userHangup).catchError((_) {}));
+    }
     _addSub?.cancel();
     _removeSub?.cancel();
     _stateSub?.cancel();
