@@ -13,7 +13,6 @@ import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
 import '../media.dart';
 import '../network.dart';
-import '../stealth.dart';
 import 'device_verification_screen.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
@@ -103,7 +102,6 @@ class RoomsScreen extends StatelessWidget {
             tooltip: 'Réglages',
             onPressed: () => Navigator.of(context).push(MaterialPageRoute(
               builder: (_) => LockSettingsScreen(
-                onToggleCalcMode: Stealth.setStealth,
                 // Comme pour l'effacement d'urgence (Account.panic), on ferme l'appli juste
                 // après : plus simple et plus sûr que de reconstruire l'état en mémoire d'un
                 // client Matrix dont la base locale vient d'être supprimée sous ses pieds.

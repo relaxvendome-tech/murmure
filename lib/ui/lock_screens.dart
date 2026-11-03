@@ -349,13 +349,12 @@ class _Key extends StatelessWidget {
 }
 
 /// Réglages du verrou : activer/désactiver le code, définir un code de contrainte, et basculer
-/// le « mode discret » (apparence calculatrice sur l'icône et l'écran de verrou).
+/// le « mode discret » (l'écran de verrou devient une calculatrice ; l'icône de l'appli, elle,
+/// reste toujours « Murmure » — voir docs/UPDATES.md pour pourquoi aucun changement d'icône de
+/// lancement n'est fait : Google Play interdit qu'une appli change son icône/nom affichés pour se
+/// faire passer pour une autre, voir la policy « Impersonation »).
 class LockSettingsScreen extends StatefulWidget {
-  const LockSettingsScreen({super.key, required this.onToggleCalcMode, this.onDeleteAccount});
-
-  /// Appelé après le changement du réglage, avec la nouvelle valeur — pour que l'appelant
-  /// bascule l'icône de lancement via le MethodChannel natif (voir MainActivity.kt).
-  final Future<void> Function(bool enabled) onToggleCalcMode;
+  const LockSettingsScreen({super.key, this.onDeleteAccount});
 
   /// Supprime le compte sur le serveur puis efface tout du téléphone (voir
   /// [Account.deleteEverything]). Null si aucun compte n'est connecté (ne devrait pas arriver
@@ -412,17 +411,14 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                 if (ok != null) {}
               } else {
                 // Trouvé en audit interne : désactiver le PIN sans aussi désactiver le mode
-                // discret laissait une incohérence dangereuse — l'icône de lancement restait
-                // « Calculatrice » (voir MainActivity.kt, bascule d'alias) alors que l'appli,
-                // elle, s'ouvrait désormais directement sur Murmure sans aucun verrou
-                // (LockGate._init() lit AppLock.enabled(), qui redevient false ici). Quelqu'un
-                // qui compte sur l'icône calculatrice pour dissimuler l'appli se retrouverait
-                // donc à exposer la messagerie en clair au premier appui, sans le savoir. On
-                // revient donc explicitement à l'icône par défaut ET on efface calc_mode AVANT
-                // de supprimer le code, dans cet ordre : si la désactivation de l'alias natif
-                // échoue, le PIN reste actif et protège encore l'accès.
+                // discret laissait une incohérence dangereuse — l'écran de verrou calculatrice
+                // était configuré pour s'afficher (voir LockGate._init(), qui lit calc_mode) alors
+                // que l'appli, elle, s'ouvrait désormais directement sur Murmure sans aucun verrou
+                // (LockGate._init() lit aussi AppLock.enabled(), qui redevient false ici).
+                // Quelqu'un qui compte sur l'écran calculatrice pour dissimuler l'appli se
+                // retrouverait donc à exposer la messagerie en clair au premier appui, sans le
+                // savoir. On efface donc calc_mode AVANT de supprimer le code.
                 if (_calcMode) {
-                  await widget.onToggleCalcMode(false);
                   await Account.write('calc_mode', '0');
                 }
                 await AppLock.disable();
@@ -459,11 +455,11 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
             SwitchListTile(
               title: const Text('Mode discret'),
               subtitle: const Text(
-                  'L\'icône et l\'écran de verrou deviennent une calculatrice. Le même code ouvre Murmure.'),
+                  'L\'écran de verrou devient une calculatrice. Le même code ouvre Murmure. '
+                  'L\'icône de l\'appli reste toujours « Murmure ».'),
               value: _calcMode,
               onChanged: (v) async {
                 await Account.write('calc_mode', v ? '1' : '0');
-                await widget.onToggleCalcMode(v);
                 await _load();
               },
             ),

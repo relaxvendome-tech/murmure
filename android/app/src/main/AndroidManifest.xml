@@ -66,19 +66,29 @@
         android:fullBackupContent="false"
         android:networkSecurityConfig="@xml/network_security_config">
 
-        <!-- Activité principale, SANS filtre LAUNCHER : c'est l'un des deux alias ci-dessous qui
-             sert de point d'entrée visible, selon le mode discret (voir MainActivity.kt). La
-             désactiver directement rendrait l'appli impossible à relancer — seuls les alias sont
-             basculés. -->
+        <!-- Activité principale et point d'entrée direct : icône et nom de lancement toujours
+             « Murmure » (voir MainActivity.kt et docs/UPDATES.md). Il y avait auparavant deux
+             activity-alias ici, pour basculer l'icône entre « Murmure » et « Calculatrice » selon
+             le mode discret — retiré : la policy Google Play « Impersonation » interdit qu'une
+             appli change son icône/nom affichés pour se faire passer pour une autre, même à titre
+             optionnel. Seul l'écran de verrou interne (CalculatorLockScreen, côté Dart) peut
+             encore prendre l'apparence d'une calculatrice une fois l'appli ouverte — l'icône et le
+             nom dans le tiroir d'applications, eux, restent honnêtes en toute circonstance. -->
         <activity
             android:name=".MainActivity"
-            android:exported="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="Murmure"
             android:launchMode="singleTop"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
@@ -86,35 +96,6 @@
                 android:name="flutterEmbedding"
                 android:value="2" />
         </activity>
-
-        <!-- Icône/libellé "Murmure" — activée par défaut. -->
-        <activity-alias
-            android:name=".DefaultAlias"
-            android:targetActivity=".MainActivity"
-            android:enabled="true"
-            android:exported="true"
-            android:icon="@mipmap/ic_launcher"
-            android:label="Murmure">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
-        <!-- Icône/libellé "Calculatrice" — désactivée par défaut, activée depuis les réglages
-             (mode discret). Voir MainActivity.kt : seul cet alias bascule, jamais MainActivity. -->
-        <activity-alias
-            android:name=".CalculatorAlias"
-            android:targetActivity=".MainActivity"
-            android:enabled="false"
-            android:exported="true"
-            android:icon="@mipmap/ic_calculator"
-            android:label="Calculatrice">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
 
         <!-- Voir MeshForegroundService.kt : fait survivre le mode Bluetooth maillé à la mise en
              arrière-plan de l'appli (usage visé : téléphone en poche pendant une manifestation).

@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 /// Pont vers le serveur GATT natif (android/.../MeshGattServer.kt) qui donne à CE téléphone le
 /// rôle "périphérique" BLE : annoncer le service du maillage et répondre aux lectures/écritures
 /// d'autres téléphones Murmure, en plus du rôle "central" (scan) déjà géré par `flutter_blue_plus`
-/// dans mesh.dart. Comme Stealth (stealth.dart), ce pont échoue silencieusement sur les
+/// dans mesh.dart. Comme les autres ponts natifs best-effort de ce dépôt, ce pont échoue silencieusement sur les
 /// plateformes sans ce canal (iOS, desktop, web) : le maillage y reste limité au rôle central.
 class MeshGattServerBridge {
   static const _method = MethodChannel('fr.lansight.murmure/mesh_gatt');

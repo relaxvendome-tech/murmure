@@ -16,15 +16,19 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
   plus présenter StrongBox comme acquis) — jamais dérivée du PIN
 - code de contrainte ("duress PIN") : efface tout et ferme l'appli immédiatement (`exit(0)`),
   sans redémarrage visible qui trahirait son usage
-- mode discret (icône et écran de verrou "Calculatrice") implémenté sans jamais coder de PIN en
-  dur dans le binaire — toute comparaison passe par la même vérification PBKDF2 que le verrou
-  normal
+- mode discret (écran de verrou "Calculatrice") implémenté sans jamais coder de PIN en dur dans
+  le binaire — toute comparaison passe par la même vérification PBKDF2 que le verrou normal.
+  L'icône et le nom de l'appli dans le tiroir d'applications, eux, restent toujours "Murmure" :
+  une bascule d'icône de lancement existait dans une version antérieure de ce dépôt, retirée (voir
+  `docs/UPDATES.md`) car elle violait la policy Google Play "Impersonation", qui interdit à une
+  appli de changer son icône/nom affichés pour se faire passer pour une autre, y compris en option
 
 ## Fonctionnalités
 
 - Comptes anonymes (pas de téléphone, pas d'e-mail)
 - Chiffrement de bout en bout (Matrix/Megolm)
-- Verrou PIN + code de contrainte + mode discret calculatrice
+- Verrou PIN + code de contrainte + mode discret calculatrice (écran de verrou uniquement, icône
+  de l'appli toujours honnête — voir `docs/UPDATES.md`)
 - Connexion directe, via Tor (Orbot), ou via proxy SOCKS5 personnalisé — basculable sans recompiler
 - Mode Bluetooth maillé pour fonctionner sans réseau (voir `lib/mesh/`, limites documentées dans
   `lib/mesh/mesh.dart`)
@@ -38,7 +42,7 @@ lib/            code Dart/Flutter
   network.dart  configuration réseau (serveur, Tor, proxy)
   mesh/         maillage Bluetooth hors-ligne
   ui/           écrans
-android/        projet Android natif (icônes, alias de lancement, signature)
+android/        projet Android natif (icônes, signature)
 scripts/server/ déploiement du serveur (Conduit + Caddy, Docker)
 docs/           documentation (dont ADMIN_KEY.md : architecture de la clé administrateur)
 .github/workflows/ construction automatique de l'AAB/APK signés

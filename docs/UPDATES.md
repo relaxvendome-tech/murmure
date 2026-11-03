@@ -1,18 +1,40 @@
 # Mises à jour
 
-## Pourquoi pas le Google Play Store
+## Le mode discret et le Play Store
 
-Murmure n'est volontairement pas distribué via le Play Store :
-- Le mode discret (icône/écran de verrou « calculatrice », voir `MainActivity.kt` et
-  `lib/ui/lock_screens.dart`) viole les règles de Google Play sur la représentation trompeuse
-  d'une appli — publier Murmure tel qu'il est reviendrait à le faire retirer, ou à devoir
-  retirer cette fonctionnalité qui est pourtant centrale au modèle de menace visé.
-- Un compte développeur Google Play identifie son titulaire (pièce d'identité, parfois paiement)
-  — contraire à l'anonymat recherché pour une appli destinée à des manifestants.
+Une version antérieure de ce dépôt faisait basculer l'**icône et le nom de l'appli dans le
+tiroir d'applications** entre « Murmure » et « Calculatrice » (via deux `activity-alias`, voir
+l'historique git de `AndroidManifest.xml` et `MainActivity.kt`). Cette bascule a été retirée :
+elle violait directement la policy Google Play « Impersonation », qui interdit à une appli de
+changer l'icône/le nom affichés pour se faire passer pour une autre appli — y compris de façon
+optionnelle, et y compris si l'intention est défensive plutôt que malveillante. Le scanner
+automatisé de Google recherche spécifiquement ce pattern de code (changement de composant
+launcher après installation), identique à une technique connue des adwares pour échapper à la
+désinstallation. Une violation de cette policy met en jeu non seulement Murmure mais la
+suspension possible de tout le compte développeur Google Play utilisé pour la publier.
 
-Murmure se distribue donc en APK, installé manuellement (« hors Play Store »). Sans Play Store,
-il n'y a pas non plus de mise à jour automatique fournie par un magasin d'applications : c'est ce
-que ce document et le code sous `lib/update/` remplacent.
+Ce qui **reste** : l'écran de verrou calculatrice à l'intérieur de l'appli
+(`lib/ui/calculator_lock_screen.dart`, réglage `calc_mode`, voir `lib/ui/lock_screens.dart`).
+Entrer le bon code sur ce clavier calculatrice ouvre Murmure. L'icône et le nom affichés sur
+l'écran d'accueil du téléphone, eux, restent toujours honnêtement « Murmure ». C'est le même
+principe que les applis « coffre-fort calculatrice » qui existent légitimement sur le Play
+Store : leur listing et leur icône sont honnêtes, seul leur contenu interne est caché.
+
+Avec ce changement, une publication sur le Play Store redevient possible côté policy
+d'usurpation — mais reste un choix distinct et plus large : il faut toujours un compte
+développeur Google Play (qui identifie nommément son titulaire, pièce d'identité et parfois
+paiement — à évaluer selon le niveau d'anonymat recherché), une fiche de présentation, le
+passage de la revue de l'appli dans son ensemble, et la clé de signature release (voir la
+section suivante, `key.properties`, volontairement jamais générée ni détenue par un assistant
+externe à ce dépôt).
+
+## Pourquoi un mécanisme de mise à jour auto-hébergé malgré tout
+
+Que Murmure soit un jour publié sur le Play Store ou non, la distribution directe en APK reste
+pertinente (installation sans compte Google, sans lien avec une identité, utile en complément
+même si une version Play Store existe). C'est ce que ce document et le code sous `lib/update/`
+couvrent : sans Play Store, il n'y a pas de mise à jour automatique fournie par un magasin
+d'applications.
 
 ## Vue d'ensemble
 

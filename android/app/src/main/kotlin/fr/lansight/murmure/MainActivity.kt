@@ -1,8 +1,6 @@
 package fr.lansight.murmure
 
-import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -17,21 +15,20 @@ import java.io.File
  * Activité unique de Murmure.
  *
  * - FLAG_SECURE : pas de capture d'écran, aperçu masqué dans les applis récentes.
- * - Canal "fr.lansight.murmure/stealth" : bascule de l'icône (Murmure <-> Calculatrice) par
- *   activity-alias. AUCUNE vérification de code PIN ici : elle reste en Dart (AppLock, PBKDF2 +
- *   empreinte dans le Keystore), jamais de code en clair dans l'APK.
- *
- * MainActivity n'a PAS d'intent-filter LAUNCHER : seules les deux alias en ont un.
- * On n'active/désactive QUE les alias. Désactiver MainActivity rendrait l'appli impossible à lancer
- * (un alias dont la cible est désactivée ne démarre plus).
+ * - Icône et nom de lancement : toujours « Murmure », jamais basculés en « Calculatrice ». Un
+ *   canal "fr.lansight.murmure/stealth" existait ici pour faire cette bascule via activity-alias ;
+ *   retiré (voir docs/UPDATES.md) car la policy Google Play « Impersonation » interdit qu'une
+ *   appli change son icône/nom affichés pour se faire passer pour une autre appli, y compris de
+ *   façon optionnelle — seul l'écran de verrou interne (voir CalculatorLockScreen côté Dart) peut
+ *   encore prendre l'apparence d'une calculatrice, ce qui reste autorisé (même principe que les
+ *   « vault apps » existant légitimement sur le Play Store, dont le listing et l'icône restent
+ *   honnêtes). AUCUNE vérification de code PIN ici de toute façon : elle reste en Dart (AppLock,
+ *   PBKDF2 + empreinte dans le Keystore), jamais de code en clair dans l'APK.
  */
 class MainActivity : FlutterFragmentActivity() {
 
-    private val channelName = "fr.lansight.murmure/stealth"
     private val meshFgChannelName = "fr.lansight.murmure/mesh_fg"
     private val updateChannelName = "fr.lansight.murmure/update"
-    private val aliasDefault get() = ComponentName(this, "$packageName.DefaultAlias")
-    private val aliasCalculator get() = ComponentName(this, "$packageName.CalculatorAlias")
 
     // Serveur GATT du maillage Bluetooth hors-ligne (voir MeshGattServer.kt / lib/mesh/mesh.dart).
     // S'enregistre lui-même ses propres canaux (fr.lansight.murmure/mesh_gatt + _incoming) dans son
@@ -46,25 +43,6 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         meshGattServer = MeshGattServer(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "setStealth" -> {
-                    val enabled = call.argument<Boolean>("enabled")
-                    if (enabled == null) {
-                        result.error("BAD_ARGS", "enabled manquant", null)
-                    } else {
-                        try {
-                            setStealth(enabled)
-                            result.success(true)
-                        } catch (e: Exception) {
-                            result.error("ALIAS", e.message, null)
-                        }
-                    }
-                }
-                "isStealth" -> result.success(isStealth())
-                else -> result.notImplemented()
-            }
-        }
         // Service de premier plan du maillage Bluetooth (voir MeshForegroundService.kt). Piloté
         // uniquement depuis Dart par lib/mesh/mesh_foreground_service.dart, lui-même appelé par
         // lib/mesh/mesh.dart au démarrage/arrêt du scan BLE — jamais démarré d'initiative ici.
@@ -169,18 +147,4 @@ class MainActivity : FlutterFragmentActivity() {
         }
         startActivity(intent)
     }
-
-    /** Active d'abord le nouvel alias, puis désactive l'ancien : jamais zéro icône. */
-    private fun setStealth(enabled: Boolean) {
-        val on = if (enabled) aliasCalculator else aliasDefault
-        val off = if (enabled) aliasDefault else aliasCalculator
-        packageManager.setComponentEnabledSetting(
-            on, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
-        packageManager.setComponentEnabledSetting(
-            off, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
-    }
-
-    private fun isStealth(): Boolean =
-        packageManager.getComponentEnabledSetting(aliasCalculator) ==
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
 }

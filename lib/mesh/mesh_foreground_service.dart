@@ -8,7 +8,7 @@ import 'package:flutter/services.dart';
 /// (lib/mesh/mesh.dart) — alors que l'usage visé (téléphone en poche pendant une manifestation)
 /// exige justement qu'il continue sans que l'appli reste à l'écran.
 ///
-/// Comme [Stealth] (lib/stealth.dart), ce pont est best-effort et ne lève jamais : sur une
+/// Comme les autres ponts natifs best-effort de ce dépôt, ce pont ne lève jamais : sur une
 /// plateforme sans ce canal (iOS, desktop, web), [start]/[stop] ne font rien et le scan BLE
 /// continue de fonctionner au premier plan comme avant ce correctif — seule la survie en
 /// arrière-plan n'est pas garantie sur ces plateformes, ce qui n'a jamais été prétendu ailleurs
