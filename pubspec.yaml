@@ -39,11 +39,16 @@ dependencies:
   # Notification d'appel manqué (voir lib/calls/services/call_opsec_notifier.dart) : nécessaire
   # pour afficher quoi que ce soit dans la barre d'état Android en dehors de l'appli elle-même.
   flutter_local_notifications: ^18.0.1
-  # Envoi de photos (voir lib/media.dart et ChatScreen._pickAndSendImage) — version confirmée via
-  # pub.dev au moment de cet ajout (1.2.4), pas une supposition. Sélecteur système uniquement
-  # (galerie), jamais de caméra directe dans cette passe pour limiter la surface de permissions
-  # ajoutée d'un coup.
-  image_picker: ^1.2.4
+  # Envoi de photos (voir lib/media.dart et ChatScreen._pickAndSendImage). pub.dev donnait 1.2.4
+  # comme dernière version au moment de cet ajout, mais la CI (seul endroit de ce bac à sable où
+  # `flutter pub get` tourne réellement) a rejeté cette contrainte : image_picker >=1.2.2 exige
+  # Dart SDK >=3.9.0, alors que Flutter est épinglé à 3.29.0 dans ce dépôt (Dart 3.7.0 résolu par
+  # la CI elle-même, voir le run qui a précédé ce correctif) — écart entre ce que documente pub.dev
+  # et ce que permet la version de Flutter réellement utilisée ici, pas une erreur de frappe.
+  # Rabaissé à la suggestion donnée par `flutter pub get` dans ce même run CI. Sélecteur système
+  # uniquement (galerie), jamais de caméra directe dans cette passe pour limiter la surface de
+  # permissions ajoutée d'un coup.
+  image_picker: ^1.2.1
   # Déjà utilisé en transitif par `matrix` (génération de vignettes), déclaré en direct ici car
   # lib/media.dart l'importe maintenant explicitement pour dépouiller les EXIF (GPS, horodatage
   # précis, modèle d'appareil) avant tout chiffrement/envoi — voir le threat model documenté en
