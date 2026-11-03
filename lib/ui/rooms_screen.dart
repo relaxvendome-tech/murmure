@@ -14,6 +14,7 @@ import 'device_verification_screen.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
+import 'profile_screen.dart';
 import 'qr_screens.dart';
 import 'theme.dart';
 
@@ -62,6 +63,13 @@ class RoomsScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Murmure'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.badge_outlined),
+            tooltip: 'Mon profil',
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => ProfileScreen(client: client),
+            )),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code),
             tooltip: 'Mon code',
