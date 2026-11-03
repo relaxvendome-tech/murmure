@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
+// Voir le commentaire équivalent dans ui/sas_verification_screen.dart : `KeyVerification` vit
+// dans le barrel séparé `package:matrix/encryption.dart`, pas dans `package:matrix/matrix.dart`.
+import 'package:matrix/encryption.dart';
 
 import '../lock.dart';
 import '../ui/sas_verification_screen.dart';

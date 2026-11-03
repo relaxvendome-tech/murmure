@@ -1,5 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
+// Trouvé en audit interne (échec de CI, pas une supposition corrigée a priori) : `KeyVerification`
+// / `KeyVerificationState` / `KeyVerificationEmoji` ne sont PAS réexportés par le barrel principal
+// `package:matrix/matrix.dart` (vérifié en lisant `lib/matrix.dart` du paquet : aucune ligne
+// `export` n'y mentionne `encryption/utils/key_verification.dart`). Ils vivent dans le barrel
+// séparé `package:matrix/encryption.dart` (`lib/encryption.dart` du paquet, qui exporte bien ce
+// fichier), nécessaire en plus de l'import ci-dessus.
+import 'package:matrix/encryption.dart';
 
 /// Vérification interactive SAS (comparaison d'émojis/chiffres entre deux appareils) — voir
 /// `docs/E2EE_VERIFICATION.md` pour l'API vérifiée directement contre le code source de
@@ -221,5 +228,10 @@ class _SasVerificationScreenState extends State<SasVerificationScreen> {
           ],
         );
     }
+    // Inatteignable (switch exhaustif sur les 10 valeurs réelles de l'énumération, voir
+    // docs/E2EE_VERIFICATION.md) — gardé explicite plutôt que de compter sur l'analyse de flux du
+    // compilateur pour un `switch` statement (contrairement à un `switch` expression, elle ne
+    // garantit pas qu'un retour est toujours atteint), au cas où le SDK ajouterait une valeur.
+    return const SizedBox.shrink();
   }
 }
