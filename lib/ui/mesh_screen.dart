@@ -26,6 +26,17 @@ class _MeshScreenState extends State<MeshScreen> {
   final _log = <_LogEntry>[];
   String? _myCode;
 
+  /// Minuteur d'auto-effacement du presse-papiers après une copie du code de contact — voir
+  /// [_copyMyCode]. Trouvé en audit interne : avant cette correction, `Clipboard.setData` n'était
+  /// jamais suivi d'un effacement, donc le code (clé publique BLE de l'utilisateur) restait dans
+  /// le presse-papiers système INDÉFINIMENT après usage — lisible par n'importe quelle autre appli
+  /// qui y accède (y compris, selon l'appareil/la version d'Android, en arrière-plan ; et visible
+  /// dans un éventuel gestionnaire d'historique de presse-papiers) bien après que l'utilisateur ait
+  /// quitté cet écran. Ce n'est pas un secret de chiffrement, mais c'est un identifiant stable et
+  /// partageable qui ne devrait pas survivre plus longtemps que nécessaire pour être collé une
+  /// fois.
+  Timer? _clipboardClearTimer;
+
   @override
   void initState() {
     super.initState();
@@ -80,7 +91,30 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void dispose() {
     _sub?.cancel();
+    _clipboardClearTimer?.cancel();
     super.dispose();
+  }
+
+  /// Copie [_myCode] dans le presse-papiers, puis programme son effacement (voir le commentaire
+  /// de [_clipboardClearTimer]). On ne réécrase le presse-papiers à l'échéance QUE s'il contient
+  /// encore exactement ce qu'on y a mis : si l'utilisateur a copié autre chose pendant ce délai
+  /// (un code reçu d'un contact, par exemple), on ne veut surtout pas effacer CE contenu-là à sa
+  /// place.
+  Future<void> _copyMyCode() async {
+    final code = _myCode;
+    if (code == null) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Code copié (effacé du presse-papiers dans 30 s)')),
+    );
+    _clipboardClearTimer?.cancel();
+    _clipboardClearTimer = Timer(const Duration(seconds: 30), () async {
+      final current = await Clipboard.getData(Clipboard.kTextPlain);
+      if (current?.text == code) {
+        await Clipboard.setData(const ClipboardData(text: ''));
+      }
+    });
   }
 
   Future<void> _toggle(bool on) async {
@@ -150,13 +184,7 @@ class _MeshScreenState extends State<MeshScreen> {
                 trailing: IconButton(
                   icon: const Icon(Icons.copy),
                   tooltip: 'Copier',
-                  onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: _myCode!));
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Code copié')),
-                    );
-                  },
+                  onPressed: _copyMyCode,
                 ),
               ),
             ),
