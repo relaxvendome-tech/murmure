@@ -69,6 +69,19 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
     /// (adresse MAC). Voir [onCharacteristicWriteRequest]/[onExecuteWriteRequest] pour pourquoi
     /// c'est nécessaire : une seule écriture logique côté Dart peut arriver ici fragmentée en
     /// plusieurs appels de ce callback.
+    ///
+    /// Trouvé en audit interne : les callbacks de [BluetoothGattServerCallback] sont livrés par le
+    /// processus Bluetooth système via Binder, et peuvent arriver concurremment sur des threads
+    /// différents dès que PLUSIEURS appareils sont connectés en même temps — le cas normal, pas un
+    /// cas limite, pour un maillage censé fonctionner au milieu d'une manifestation avec plusieurs
+    /// téléphones Murmure à portée. Une `mutableMapOf` simple n'est pas thread-safe : deux appareils
+    /// écrivant au même instant pouvaient corrompre la structure ou lever une
+    /// `ConcurrentModificationException`, faisant planter tout le service (donc toute l'appli au
+    /// premier plan). Toutes les lectures/écritures de cette map sont désormais synchronisées sur
+    /// elle-même (voir les blocs `synchronized(pendingPreparedWrites)` plus bas) plutôt que de
+    /// changer son type : ce fichier reste la seule classe à y toucher, donc un verrou explicite ici
+    /// est plus lisible qu'une collection concurrente dont les garanties fines ne serviraient à rien
+    /// de plus.
     private val pendingPreparedWrites = mutableMapOf<String, MutableList<Pair<Int, ByteArray>>>()
 
     private val methodChannel = MethodChannel(messenger, "fr.lansight.murmure/mesh_gatt")
@@ -170,7 +183,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         advertiser = null
         gattServer = null
         characteristic = null
-        pendingPreparedWrites.clear()
+        synchronized(pendingPreparedWrites) { pendingPreparedWrites.clear() }
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -224,19 +237,26 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             value: ByteArray,
         ) {
             if (preparedWrite) {
-                val pending = pendingPreparedWrites.getOrPut(device.address) { mutableListOf() }
-                val pendingTotal = pending.sumOf { it.second.size }
-                if (pendingTotal + value.size > MAX_PENDING_WRITE_BYTES) {
+                val tooBig = synchronized(pendingPreparedWrites) {
+                    val pending = pendingPreparedWrites.getOrPut(device.address) { mutableListOf() }
+                    val pendingTotal = pending.sumOf { it.second.size }
+                    if (pendingTotal + value.size > MAX_PENDING_WRITE_BYTES) {
+                        pendingPreparedWrites.remove(device.address)
+                        true
+                    } else {
+                        pending.add(offset to value)
+                        false
+                    }
+                }
+                if (tooBig) {
                     // Garde-fou DoS (voir MAX_PENDING_WRITE_BYTES) : on abandonne ce tampon plutôt
                     // que de le laisser grossir sans borne ; l'enveloppe en cours sera simplement
                     // perdue, comme n'importe quelle écriture déjà rejetée ailleurs dans mesh.dart.
-                    pendingPreparedWrites.remove(device.address)
                     if (responseNeeded) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                     }
                     return
                 }
-                pending.add(offset to value)
                 if (responseNeeded) {
                     // Spec ATT : la réponse à une Prepare Write Request échoie l'offset et la
                     // valeur reçus, pour que le central puisse vérifier l'intégrité avant d'exécuter.
@@ -262,7 +282,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
          */
         @SuppressLint("MissingPermission")
         override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
-            val chunks = pendingPreparedWrites.remove(device.address)
+            val chunks = synchronized(pendingPreparedWrites) { pendingPreparedWrites.remove(device.address) }
             if (execute && chunks != null && chunks.isNotEmpty()) {
                 val total = chunks.sumOf { it.second.size }
                 val assembled = ByteArray(total)
@@ -285,7 +305,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             // d'annuler explicitement (sinon fuite mémoire : adresse jamais revue mais tampon
             // jamais libéré) — trouvé en audit interne en ajoutant le réassemblage ci-dessus.
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                pendingPreparedWrites.remove(device.address)
+                synchronized(pendingPreparedWrites) { pendingPreparedWrites.remove(device.address) }
             }
         }
     }
