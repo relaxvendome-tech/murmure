@@ -36,6 +36,17 @@ jobs:
       - name: Analyser (lint)
         run: flutter analyze --no-fatal-infos
 
+      - name: Tests automatisés (logique pure, sans homeserver ni matériel Bluetooth)
+        # Trouvé en audit interne : zéro test automatisé n'existait avant ce commit (CI ne
+        # vérifiait que la compilation et le lint, jamais le comportement). Place avant les builds
+        # de release pour qu'un test cassé bloque la publication d'un binaire défaillant plutôt que
+        # d'être découvert après coup. Volontairement limité pour l'instant au code pur et
+        # déterministe (cliquet cryptographique du mesh, dépouillement EXIF) qui ne demande rien de
+        # plus que ce que ce runner fournit déjà ; les tests d'intégration (Matrix, BLE réel)
+        # demanderaient une infrastructure encore absente de ce pipeline (serveur Synapse/Dendrite,
+        # matériel ou émulation Bluetooth), volontairement pas abordés dans ce commit.
+        run: flutter test
+
       - name: Reconstituer le keystore de signature
         env:
           UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
