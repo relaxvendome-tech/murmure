@@ -105,24 +105,40 @@ class Account {
       client.setDisplayName(client.userID!, name);
 
   /// Supprime le compte sur le serveur, puis efface tout de ce téléphone.
+  ///
+  /// Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : le `rethrow`
+  /// ci-dessous (erreur serveur/réseau NE nécessitant PAS d'authentification supplémentaire —
+  /// timeout, 500, serveur injoignable) remontait directement à l'appelant, et `wipeLocal(client)`
+  /// n'était alors JAMAIS atteint. Quelqu'un demandant explicitement la suppression de son compte
+  /// pendant une coupure réseau se retrouvait donc avec absolument RIEN effacé localement — clés,
+  /// messages, médias intacts — alors que l'intention explicite était de tout détruire. La
+  /// suppression côté serveur peut légitimement échouer (c'est un appel réseau comme un autre),
+  /// mais l'effacement local, lui, ne doit jamais dépendre de ce succès : c'est exactement ce que
+  /// [panic] garantit déjà sans aucun réseau. `try/finally` plutôt que `catch` générique : on
+  /// propage toujours l'erreur serveur à l'appelant (pour qu'il puisse prévenir l'utilisateur que
+  /// la suppression côté serveur a échoué), mais `wipeLocal` s'exécute dans tous les cas avant que
+  /// cette propagation n'ait lieu.
   static Future<void> deleteEverything(Client client) async {
-    final password = await _storage.read(key: 'password');
-    if (password != null && client.isLogged()) {
-      try {
-        await client.deactivateAccount();
-      } on MatrixException catch (e) {
-        if (!e.requireAdditionalAuthentication) rethrow;
-        await client.deactivateAccount(
-          auth: AuthenticationData.fromJson({
-            'type': 'm.login.password',
-            'identifier': {'type': 'm.id.user', 'user': client.userID},
-            'password': password,
-            'session': e.session,
-          }),
-        );
+    try {
+      final password = await _storage.read(key: 'password');
+      if (password != null && client.isLogged()) {
+        try {
+          await client.deactivateAccount();
+        } on MatrixException catch (e) {
+          if (!e.requireAdditionalAuthentication) rethrow;
+          await client.deactivateAccount(
+            auth: AuthenticationData.fromJson({
+              'type': 'm.login.password',
+              'identifier': {'type': 'm.id.user', 'user': client.userID},
+              'password': password,
+              'session': e.session,
+            }),
+          );
+        }
       }
+    } finally {
+      await wipeLocal(client);
     }
-    await wipeLocal(client);
   }
 
   /// Effacement d'urgence : sans réseau, en quelques centaines de millisecondes.
@@ -157,12 +173,21 @@ class Account {
       final path = p.join(dir.path, name);
       try {
         await sqlcipher.deleteDatabase(path);
-      } catch (_) {
-        for (final suffix in ['', '-wal', '-shm', '-journal']) {
-          try {
-            await File('$path$suffix').delete();
-          } catch (_) {}
-        }
+      } catch (_) {}
+      // Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : ce nettoyage
+      // des fichiers annexes WAL/SHM/journal n'était tenté que dans le `catch` ci-dessus, donc
+      // jamais exécuté quand `deleteDatabase` réussissait — alors que SQLite/SQLCipher peut
+      // parfaitement réussir à supprimer le fichier principal tout en laissant `-wal`/`-shm`
+      // derrière (comportement connu, pas spécifique à ce dépôt). La clé SQLCipher a déjà été
+      // détruite tout en haut de cette méthode (`_storage.deleteAll()`), donc ces fichiers ne
+      // contiennent rien de déchiffrable pour quiconque les retrouverait — mais leur simple
+      // existence (nom de fichier, taille, horodatage) reste une trace qu'une base de données a
+      // existé à cet endroit, contrairement à l'objectif affiché par cette méthode de ne rien
+      // laisser derrière. Tenté maintenant inconditionnellement, plus seulement en cas d'échec.
+      for (final suffix in ['-wal', '-shm', '-journal']) {
+        try {
+          await File('$path$suffix').delete();
+        } catch (_) {}
       }
     }
     await purgeMediaCache();
