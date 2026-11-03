@@ -10,6 +10,7 @@ import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
 import '../network.dart';
 import '../stealth.dart';
+import 'device_verification_screen.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
@@ -381,6 +382,34 @@ class _ChatScreenState extends State<ChatScreen> {
     // appel entrant, donc un seul endroit à maintenir pour l'UI d'appel.
   }
 
+  /// Résume l'état de vérification des appareils du contact d'une conversation directe, pour
+  /// l'icône d'app bar — voir `device_verification_screen.dart` et
+  /// `docs/E2EE_VERIFICATION.md`. `null` pour un groupe (plusieurs contacts, hors scope de cette
+  /// première passe) ou tant qu'aucune clé d'appareil n'est encore connue pour ce contact.
+  bool? _deviceVerificationStatus() {
+    if (!widget.room.isDirectChat) return null;
+    final otherId = widget.room.directChatMatrixID;
+    if (otherId == null) return null;
+    final devices = widget.room.client.userDeviceKeys[otherId]?.deviceKeys.values;
+    if (devices == null || devices.isEmpty) return null;
+    return devices.every((d) => d.verified);
+  }
+
+  Future<void> _openDeviceVerification() async {
+    final otherId = widget.room.directChatMatrixID;
+    if (otherId == null) return;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DeviceVerificationScreen(
+        client: widget.room.client,
+        userId: otherId,
+        displayName: widget.room.getLocalizedDisplayname(),
+      ),
+    ));
+    // L'état "vérifié" a pu changer pendant l'écran ouvert : on reconstruit pour mettre à jour
+    // l'icône de l'app bar (voir _deviceVerificationStatus).
+    if (mounted) setState(() {});
+  }
+
   void _showCallDisabledDialog(String message) {
     if (!mounted) return;
     showDialog<void>(
@@ -405,10 +434,24 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final events = _timeline?.events.where((e) => e.type == EventTypes.Message).toList() ?? [];
+    final verificationStatus = _deviceVerificationStatus();
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.room.getLocalizedDisplayname()),
         actions: [
+          if (verificationStatus != null)
+            IconButton(
+              icon: Icon(
+                verificationStatus ? Icons.verified_user : Icons.gpp_maybe_outlined,
+                color: verificationStatus
+                    ? Colors.green
+                    : Theme.of(context).colorScheme.error,
+              ),
+              tooltip: verificationStatus
+                  ? 'Appareils vérifiés'
+                  : 'Appareils non vérifiés — appuyez pour vérifier',
+              onPressed: _openDeviceVerification,
+            ),
           IconButton(
             icon: const Icon(Icons.call),
             tooltip: 'Appeler',
