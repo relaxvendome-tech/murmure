@@ -284,6 +284,29 @@ class Mesh {
   Future<void> _tryExchange(BluetoothDevice device) async {
     try {
       await device.connect(timeout: const Duration(seconds: 8), autoConnect: false);
+
+      // Trouvé en audit interne — un défaut sérieux, pas cosmétique : le commentaire ci-dessous
+      // ("au-delà du MTU négocié typique") supposait depuis le début qu'une négociation de MTU
+      // avait lieu quelque part, mais rien dans ce fichier ne l'a jamais demandée. Le MTU ATT par
+      // défaut, SANS négociation explicite, est de 23 octets (20 utiles après les 3 octets
+      // d'en-tête ATT) — alors que la plus petite enveloppe possible (`MeshEnvelope.serialize()` :
+      // identifiant 16 + clé publique expéditeur 32 + indice destinataire 32 + compteur 4 + nonce
+      // 12 + longueur 2 + MAC + ttl 1 + horodatage 4, avant même le texte chiffré) dépasse déjà
+      // largement ces 20 octets. Concrètement : `char.write()` plus bas échouait silencieusement
+      // (`GATT_INVALID_ATTRIBUTE_LENGTH`, avalé par le `catch (_) { continue; }` suivant) pour
+      // TOUT message réel — le relais Bluetooth ne délivrait jamais rien, quel que soit le temps
+      // de contact entre deux téléphones. On demande maintenant explicitement un MTU de 517 (le
+      // maximum du protocole ATT, voir Bluetooth Core Spec) avant d'écrire quoi que ce soit, ce
+      // qui donne 514 octets utiles — au-delà du plafond de 512 déjà appliqué ci-dessous à chaque
+      // enveloppe. Best-effort : un appareil qui refuse ou ignore la demande (iOS, où la
+      // négociation est automatique et `requestMtu` n'a pas d'effet documenté ; un ancien
+      // appareil Android) retombe sur le comportement déjà présent avant ce correctif, pas pire.
+      try {
+        await device.requestMtu(517);
+      } catch (_) {
+        // Voir le commentaire ci-dessus : on tente quand même les écritures, comme avant.
+      }
+
       final services = await device.discoverServices();
       final svc = services.where((s) => s.uuid == serviceUuid).firstOrNull;
       if (svc == null) return;
@@ -294,7 +317,7 @@ class Mesh {
       final queue = await _allOutbox();
       for (final env in queue) {
         final bytes = env.serialize();
-        if (bytes.length > 512) continue; // au-delà du MTU négocié typique, on laisse de côté
+        if (bytes.length > 512) continue; // au-delà du MTU négocié ci-dessus, on laisse de côté
         try {
           await char.write(bytes, withoutResponse: false);
         } catch (_) {
