@@ -79,7 +79,21 @@ class _MissedCallsScreenState extends State<MissedCallsScreen> {
           final calls = snapshot.data!;
           if (calls.isEmpty) {
             return Center(
-              child: Text('Aucun appel manqué', style: Theme.of(context).textTheme.bodyLarge),
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.phone_missed_outlined,
+                      size: 48,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(height: 12),
+                    Text('Aucun appel manqué', style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+              ),
             );
           }
           return ListView.separated(
@@ -88,7 +102,7 @@ class _MissedCallsScreenState extends State<MissedCallsScreen> {
             itemBuilder: (context, i) {
               final call = calls[i];
               return ListTile(
-                leading: const Icon(Icons.phone_missed),
+                leading: Icon(Icons.phone_missed, color: Theme.of(context).colorScheme.error),
                 title: Text(_label(call), maxLines: 1, overflow: TextOverflow.ellipsis),
                 subtitle: Text(_formatTimestamp(call.timestamp)),
               );

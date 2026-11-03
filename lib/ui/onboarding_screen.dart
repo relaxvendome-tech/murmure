@@ -191,7 +191,9 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
             const SizedBox(height: 20),
             FilledButton(
               onPressed: _testing ? null : _save,
-              child: _testing ? const CircularProgressIndicator() : const Text('Continuer'),
+              child: _testing
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Continuer'),
             ),
             const SizedBox(height: 8),
             Text(

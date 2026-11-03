@@ -288,7 +288,9 @@ class _AddContactScreenState extends State<AddContactScreen> {
             const SizedBox(height: 16),
             FilledButton(
               onPressed: _busy ? null : _start,
-              child: _busy ? const CircularProgressIndicator() : const Text('Démarrer la conversation'),
+              child: _busy
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Démarrer la conversation'),
             ),
           ],
         ),

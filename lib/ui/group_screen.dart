@@ -3,6 +3,7 @@ import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import 'qr_screens.dart';
+import 'theme.dart';
 
 /// Création d'un groupe chiffré (Megolm, comme toute conversation Murmure) à plusieurs membres.
 /// Contrairement au canal Bluetooth hors-ligne (voir mesh_crypto.dart), la distribution des clés
@@ -149,7 +150,11 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
                   : ListView.builder(
                       itemCount: _members.length,
                       itemBuilder: (context, i) => ListTile(
-                        leading: const Icon(Icons.person_outline),
+                        leading: CircleAvatar(
+                          backgroundColor: murmureAvatarColor(_members[i]),
+                          foregroundColor: Colors.white,
+                          child: const Icon(Icons.person, size: 18),
+                        ),
                         title: Text(_members[i]),
                         trailing: IconButton(
                           icon: const Icon(Icons.close),
