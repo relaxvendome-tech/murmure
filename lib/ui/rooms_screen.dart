@@ -573,10 +573,39 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ),
                               Text(e.text, style: TextStyle(color: textColor)),
                               const SizedBox(height: 2),
-                              Text(
-                                DateFormat.Hm().format(e.originServerTs),
-                                style: TextStyle(color: metaColor, fontSize: 11),
-                              ),
+                              // Trouvé en audit interne, suite à la revue croisée IA sur l'écart avec
+                              // Telegram/Signal : `_send()` lit déjà `EventStatus` (voir plus haut)
+                              // pour prévenir une fois en cas d'échec, mais rien n'affichait ensuite
+                              // l'état du message DANS la bulle elle-même — un message resté en
+                              // `sending` (réseau coupé juste après l'envoi, cas normal pour l'usage
+                              // visé par cette appli) ou passé en `error` reprenait l'apparence
+                              // exacte d'un message bien parti dès que le SnackBar disparaissait.
+                              // `Event.status` (matrix-dart-sdk, event_status.dart) est vérifié ici
+                              // contre le SDK pinné : `.isSending`/`.isError` existent tels quels.
+                              if (mine && (e.status.isSending || e.status.isError))
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      e.status.isError ? Icons.error_outline : Icons.schedule,
+                                      size: 12,
+                                      color: e.status.isError ? scheme.error : metaColor,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      e.status.isError ? 'Échec de l\'envoi' : 'En attente…',
+                                      style: TextStyle(
+                                        color: e.status.isError ? scheme.error : metaColor,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              else
+                                Text(
+                                  DateFormat.Hm().format(e.originServerTs),
+                                  style: TextStyle(color: metaColor, fontSize: 11),
+                                ),
                             ],
                           ),
                         ),
