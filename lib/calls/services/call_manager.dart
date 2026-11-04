@@ -64,6 +64,16 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   @override
   bool get canHandleNewCall => _active == null;
 
+  /// Trouvé en audit interne (revue croisée à 5 IA, consensus unanime sur la question ouverte du
+  /// reverrouillage automatique pendant un appel — voir [LockGate._relock] dans
+  /// `ui/lock_screens.dart`) : expose ici, PAS comme un simple getter ponctuel mais comme un
+  /// [ValueNotifier] observable, le fait qu'un appel soit actuellement en cours. [LockGate] n'a
+  /// aucune autre façon de savoir qu'un appel se termine PENDANT qu'il attend déjà (différer le
+  /// reverrouillage ne suffit pas s'il ne se déclenche jamais quand l'appel finit par se
+  /// terminer) — un simple `bool get hasActiveCall` ponctuel aurait obligé [LockGate] à faire du
+  /// polling, inutilement coûteux et potentiellement en retard de plusieurs secondes.
+  final ValueNotifier<bool> activeCallNotifier = ValueNotifier(false);
+
   /// Verrou de sûreté, en plus de [handleCallEnded]/[handleMissedCall] : si
   /// [createPeerConnection] refuse l'appel (fail-closed, voir [CallBlockedException]) AVANT que
   /// le SDK n'ait eu l'occasion d'appeler l'un de ces deux callbacks pour nettoyer, [_active]
@@ -74,10 +84,12 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// dès `CallState.kEnded`, quoi qu'il arrive par ailleurs côté SDK.
   void _watchActive(CallSession session) {
     _active = session;
+    activeCallNotifier.value = true;
     _activeStateSub?.cancel();
     _activeStateSub = session.onCallStateChanged.stream.listen((state) {
       if (state == CallState.kEnded && _active == session) {
         _active = null;
+        activeCallNotifier.value = false;
         _activeStateSub?.cancel();
         _activeStateSub = null;
       }
@@ -162,6 +174,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   Future<void> handleCallEnded(CallSession session) async {
     if (_active == session) {
       _active = null;
+      activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;
     }
@@ -171,6 +184,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   Future<void> handleMissedCall(CallSession session) async {
     if (_active == session) {
       _active = null;
+      activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;
     }
@@ -208,6 +222,13 @@ class CallManager {
 
   final MurmureWebRTCDelegate delegate;
   late final VoIP voip;
+
+  /// Trouvé en audit interne (revue croisée à 5 IA, consensus unanime) : [LockGate] lit ceci
+  /// avant de reverrouiller automatiquement, pour ne jamais couper un appel en cours (micro
+  /// ouvert) juste parce que l'appli revient de l'arrière-plan après [kRelockAfter] — voir
+  /// `ui/lock_screens.dart`. Simple relais public du [ValueNotifier] du delegate, qui seul
+  /// observe réellement l'état de la session WebRTC/`CallSession`.
+  ValueListenable<bool> get activeCallListenable => delegate.activeCallNotifier;
 
   /// Démarre un appel sortant vers [room]. Vérifie la politique réseau ICI, avant même d'envoyer
   /// un `m.call.invite` — pas seulement au moment de créer la connexion WebRTC (qui refuserait de

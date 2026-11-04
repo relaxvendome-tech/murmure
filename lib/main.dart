@@ -224,6 +224,7 @@ class _MurmureAppState extends State<MurmureApp> {
                 })
               : LockGate(
                   onWiped: _panic,
+                  callManager: _callManager!,
                   child: _Home(client: _client!, callManager: _callManager!),
                 ),
     );

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../account.dart';
+import '../calls/services/call_manager.dart';
 import '../calls/services/call_opsec_notifier.dart';
 import '../config.dart';
 import '../lock.dart';
@@ -14,10 +15,20 @@ import 'update_screen.dart';
 /// le réglage « mode discret ») tant que l'appli n'est pas déverrouillée, puis laisse passer vers
 /// [child]. Reverrouille automatiquement après [Config.kRelockAfter] en arrière-plan.
 class LockGate extends StatefulWidget {
-  const LockGate({super.key, required this.child, required this.onWiped});
+  const LockGate({super.key, required this.child, required this.onWiped, required this.callManager});
 
   final Widget child;
   final Future<void> Function() onWiped;
+
+  /// Trouvé en audit interne (revue croisée à 5 IA, demandée explicitement par l'utilisateur sur
+  /// ce point précis — question ouverte restée en suspens après le correctif de
+  /// [AppLock.isUnlocked]) : un appel DÉJÀ décroché et affiché (micro ouvert) ne doit jamais être
+  /// raccroché automatiquement par un reverrouillage qui survient pendant l'appel. Consensus unanime des 5
+  /// IA consultées : ne jamais détruire une session d'appel en cours pour reverrouiller — un appel
+  /// peut être exactement le canal par lequel un utilisateur en manifestation signale une
+  /// interpellation ou demande de l'aide juridique ; le couper automatiquement serait pire que de
+  /// retarder le verrou de quelques instants.
+  final CallManager callManager;
 
   @override
   State<LockGate> createState() => _LockGateState();
@@ -28,17 +39,33 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   bool _calcMode = false;
   DateTime? _backgroundedAt;
 
+  /// Vrai si un `didChangeAppLifecycleState(resumed)` a dépassé [kRelockAfter] PENDANT qu'un
+  /// appel était actif (voir [_relock]) : le reverrouillage n'a donc pas été appliqué sur le
+  /// moment, mais reste dû — [_onActiveCallChanged] le déclenche dès que l'appel se termine, sans
+  /// attendre un prochain cycle arrière-plan/premier-plan qui pourrait ne jamais survenir si
+  /// l'utilisateur reste simplement au premier plan jusqu'à la fin de l'appel.
+  bool _relockPendingCallEnd = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.callManager.activeCallListenable.addListener(_onActiveCallChanged);
     _init();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.callManager.activeCallListenable.removeListener(_onActiveCallChanged);
     super.dispose();
+  }
+
+  void _onActiveCallChanged() {
+    if (_relockPendingCallEnd && !widget.callManager.activeCallListenable.value) {
+      _relockPendingCallEnd = false;
+      unawaited(_relock());
+    }
   }
 
   Future<void> _init() async {
@@ -115,7 +142,25 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   /// dès le départ (fail closed, cohérent avec le choix de [AppLock.isUnlocked] lui-même). Si le
   /// relock est finalement annulé (pas de PIN configuré), la valeur est restaurée explicitement
   /// avant de sortir — l'appli reste alors affichée normalement, sans rien de verrouillé.
+  ///
+  /// Trouvé en audit interne (revue croisée à 5 IA — ChatGPT, Gemini, Grok et Perplexity,
+  /// consultés indépendamment, recommandent unanimement la même chose) : avant ce correctif, un
+  /// appel DÉCROCHÉ et affiché (`CallSessionScreen`, micro ouvert) se trouvait sur la pile de
+  /// navigation au même titre que n'importe quelle autre route — le `popUntil(isFirst)` ci-dessous
+  /// le dépilait donc comme n'importe quel autre écran à cacher, déclenchant son `dispose()` qui
+  /// raccroche sans condition (voir `calls/ui/call_session_screen.dart`, filet de sécurité
+  /// volontaire contre le bouton retour, pas prévu pour ce cas). Un appel en cours peut être le
+  /// canal par lequel l'utilisateur signale une interpellation ou demande de l'aide : le couper
+  /// automatiquement au premier retour au premier plan après [kRelockAfter] était un risque
+  /// opérationnel réel, pas seulement une gêne. On diffère donc intégralement le reverrouillage
+  /// (sans toucher à `AppLock.isUnlocked`, qui reste `true` : l'appli n'affiche RIEN de verrouillé
+  /// tant que l'appel dure) et on le rejoue dès que [CallManager.activeCallListenable] repasse à
+  /// `false` (voir [_onActiveCallChanged]) — jamais en détruisant la session pour reverrouiller.
   Future<void> _relock() async {
+    if (widget.callManager.activeCallListenable.value) {
+      _relockPendingCallEnd = true;
+      return;
+    }
     AppLock.isUnlocked = false;
     final enabled = await AppLock.enabled();
     if (!mounted || !enabled) {
