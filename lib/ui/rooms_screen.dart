@@ -619,7 +619,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// valeur de retour : aucun message ne s'affichait alors, le bouton d'appel ne faisant
   /// littéralement rien de visible. Corrigé en vérifiant le résultat et en affichant le même
   /// message explicite dans ce cas-là aussi.
-  Future<void> _call() async {
+  /// Trouvé en audit interne (revue croisée IA, recoupée par Grok et Qwen indépendamment,
+  /// vérifiée contre le code réel) : `CallManager.startCall` et `CallSession` (matrix-dart-sdk)
+  /// gèrent déjà un appel vidéo de bout en bout dès que `type: CallType.kVideo` leur est passé
+  /// (`voip.inviteToCall(room, type)` transmet tel quel ; `CallSessionScreen` affiche déjà deux
+  /// `RTCVideoView`, local et distant, quel que soit le type d'appel) — seul ce bouton, qui
+  /// n'appelait jamais qu'avec `CallType.kVoice`, manquait pour l'exposer à l'utilisateur.
+  Future<void> _call(CallType type) async {
     final net = await NetConfig.load();
     if (!CallPolicy.isAllowed(net.mode)) {
       _showCallDisabledDialog(
@@ -628,7 +634,7 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       return;
     }
-    final session = await widget.callManager.startCall(widget.room, type: CallType.kVoice);
+    final session = await widget.callManager.startCall(widget.room, type: type);
     if (session == null) {
       _showCallDisabledDialog(
         "L'appel n'a pas pu démarrer : aucun serveur TURN exploitable n'a été fourni par le "
@@ -714,19 +720,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Suite à la revue croisée IA (« niveau Telegram/Signal ») notant l'absence d'envoi de
   /// photo/vidéo — jamais implémentée jusqu'ici dans ce dépôt (voir `lib/media.dart`).
-  /// Sélecteur système uniquement (galerie) : pas de caméra directe dans cette première passe,
-  /// pour limiter la surface de permissions ajoutée d'un coup.
   ///
-  /// [stripExifAndReencode] est appelée AVANT tout chiffrement/envoi, jamais après — voir le
-  /// threat model documenté dans `lib/media.dart` (GPS, horodatage précis, modèle d'appareil
-  /// survivraient sinon au chiffrement de bout en bout). `MatrixImageFile` + `Room.sendFileEvent`
-  /// chiffrent automatiquement la pièce jointe pour un salon chiffré (vérifié contre le SDK
-  /// matrix-dart pinné : `Room.sendFileEvent` chiffre dès que `encrypted && client.
-  /// fileEncryptionEnabled`, ce qui est le cas ici — ce dépôt appelle `vod.init()` au démarrage).
-  Future<void> _pickAndSendImage() async {
+  /// Trouvé en audit interne (revue croisée IA, recoupée par Grok et Qwen indépendamment) :
+  /// seule la galerie était proposée, jamais la prise de photo directe — `CAMERA` est pourtant
+  /// déjà déclarée dans AndroidManifest.xml (pour les appels WebRTC), rien à y ajouter. [source]
+  /// vient du menu affiché par le bouton appareil photo de la barre de saisie, ci-dessous.
+  ///
+  /// [stripExifAndReencode] est appelée AVANT tout chiffrement/envoi, jamais après, QUELLE QUE
+  /// SOIT la source — voir le threat model documenté dans `lib/media.dart` (GPS, horodatage
+  /// précis, modèle d'appareil survivraient sinon au chiffrement de bout en bout) : une photo
+  /// prise à l'instant par l'appareil contient exactement les mêmes métadonnées EXIF qu'une photo
+  /// choisie dans la galerie, le même retrait s'applique donc sans distinction de source.
+  /// `MatrixImageFile` + `Room.sendFileEvent` chiffrent automatiquement la pièce jointe pour un
+  /// salon chiffré (vérifié contre le SDK matrix-dart pinné : `Room.sendFileEvent` chiffre dès que
+  /// `encrypted && client.fileEncryptionEnabled`, ce qui est le cas ici — ce dépôt appelle
+  /// `vod.init()` au démarrage).
+  Future<void> _pickAndSendImage(ImageSource source) async {
     if (_sendingMedia) return;
-    final XFile? picked =
-        await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 90);
+    final XFile? picked = await ImagePicker().pickImage(source: source, imageQuality: 90);
     if (picked == null) return;
     if (!mounted) return;
     setState(() => _sendingMedia = true);
@@ -793,8 +804,13 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           IconButton(
             icon: const Icon(Icons.call),
-            tooltip: 'Appeler',
-            onPressed: _call,
+            tooltip: 'Appel audio',
+            onPressed: () => _call(CallType.kVoice),
+          ),
+          IconButton(
+            icon: const Icon(Icons.videocam),
+            tooltip: 'Appel vidéo',
+            onPressed: () => _call(CallType.kVideo),
           ),
         ],
       ),
@@ -985,17 +1001,36 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  IconButton(
-                    icon: _sendingMedia
-                        ? const SizedBox(
+                  _sendingMedia
+                      ? const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: SizedBox(
                             width: 20,
                             height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.image_outlined),
-                    tooltip: 'Envoyer une photo',
-                    onPressed: _sendingMedia ? null : _pickAndSendImage,
-                  ),
+                          ),
+                        )
+                      : PopupMenuButton<ImageSource>(
+                          icon: const Icon(Icons.image_outlined),
+                          tooltip: 'Envoyer une photo',
+                          onSelected: _pickAndSendImage,
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: ImageSource.camera,
+                              child: ListTile(
+                                leading: Icon(Icons.photo_camera_outlined),
+                                title: Text('Prendre une photo'),
+                              ),
+                            ),
+                            PopupMenuItem(
+                              value: ImageSource.gallery,
+                              child: ListTile(
+                                leading: Icon(Icons.photo_library_outlined),
+                                title: Text('Choisir dans la galerie'),
+                              ),
+                            ),
+                          ],
+                        ),
                   Expanded(
                     child: TextField(
                       controller: _textCtrl,
