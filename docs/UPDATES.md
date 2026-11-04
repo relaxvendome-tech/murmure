@@ -116,9 +116,11 @@ jamais configurer d'adresse du tout si ce canal de trafic supplémentaire ne l'i
 
 ## Ce qui reste un TODO honnête
 
-1. `scripts/release/publish_update.sh` n'échappe pas les guillemets dans `notes` — un texte de
-   notes contenant un `"` produit un `manifest.json` invalide. À corriger avant un usage répété
-   avec des notes plus élaborées (le script avertit de cette limite à l'écran).
+1. ~~`scripts/release/publish_update.sh` n'échappe pas les guillemets dans `notes`~~ — corrigé en
+   audit interne : le script échappe désormais barre oblique inversée, guillemets, retours à la
+   ligne/chariot et tabulations dans `versionName`, `apkUrl` et `notes` avant de les écrire dans
+   `manifest.json`, et refuse (au lieu de produire un JSON invalide) un `version-code` ou
+   `min-supported-version-code` qui ne serait pas un entier.
 2. Aucun canal de diffusion (fédération Matrix elle-même, pour notifier les contacts d'une
    nouvelle version, par exemple) n'est implémenté : l'utilisateur doit penser à vérifier.
 3. Pas de delta/patch binaire : chaque mise à jour retélécharge l'APK complet (quelques dizaines
