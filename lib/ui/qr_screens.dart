@@ -70,7 +70,12 @@ class MyQrScreen extends StatelessWidget {
     if (!result.isValid || result.data == null) {
       return const Text('Impossible de générer le code QR.');
     }
-    final bytes = pngFromBytes(result.data!, result.width ?? size, result.height ?? size);
+    // `Encode` n'expose pas de getters `width`/`height` à la version réellement résolue ici
+    // (flutter_zxing 2.2.1, confirmé par l'échec de `flutter analyze` en CI — ajoutés seulement
+    // dans une version ultérieure du paquet) : on repasse donc la taille demandée, comme le fait
+    // `WriterWidget.createBarcode()` lui-même à cette version (il utilise les champs du
+    // formulaire, jamais `result.width`/`height`).
+    final bytes = pngFromBytes(result.data!, size, size);
     return Image.memory(bytes, width: size.toDouble(), height: size.toDouble());
   }
 
