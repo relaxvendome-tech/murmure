@@ -92,17 +92,26 @@ class CallOpsecStore {
   /// deux bases sœurs ont bien disparu). N'ouvre aucune connexion ici : chaque méthode ci-dessus
   /// ouvre puis referme la sienne, donc il n'y a jamais de handle à fermer au moment de l'essuyage
   /// (contrairement à `Mesh.reset()`, qui doit fermer un handle tenu en mémoire).
+  ///
+  /// Trouvé en audit interne (pas une proposition externe) : cette méthode reproduisait exactement
+  /// le même défaut déjà corrigé ailleurs dans ce fichier pour `murmure_matrix.db`/`murmure_mesh.db`
+  /// (voir `Account.wipeLocal`) — le nettoyage des fragments `-wal`/`-shm`/`-journal` n'était tenté
+  /// que dans le `catch`, donc jamais exécuté quand `deleteDatabase` réussissait, ce qui est le cas
+  /// courant. SQLite/SQLCipher peut parfaitement supprimer le fichier principal en laissant ces
+  /// fragments derrière (comportement connu). La clé SQLCipher est déjà détruite avant l'appel à
+  /// cette méthode (`_storage.deleteAll()` en tête de `Account.wipeLocal`), donc ces fragments ne
+  /// contiennent rien de déchiffrable — mais leur seule présence est une trace forensique que cette
+  /// méthode a justement pour but d'éliminer. Tenté maintenant inconditionnellement.
   static Future<void> wipe() async {
     final dir = await getApplicationSupportDirectory();
     final path = p.join(dir.path, _dbName);
     try {
       await sqlcipher.deleteDatabase(path);
-    } catch (_) {
-      for (final suffix in ['', '-wal', '-shm', '-journal']) {
-        try {
-          await File('$path$suffix').delete();
-        } catch (_) {}
-      }
+    } catch (_) {}
+    for (final suffix in ['-wal', '-shm', '-journal']) {
+      try {
+        await File('$path$suffix').delete();
+      } catch (_) {}
     }
   }
 }
