@@ -31,6 +31,28 @@ String _formatTimestamp(DateTime dt) {
   return sameDay ? DateFormat.Hm().format(dt) : DateFormat('d MMM').format(dt);
 }
 
+/// Retire le fallback texte que `Room.sendEvent` (matrix-dart-sdk pinné, lib/src/room.dart,
+/// `_stripBodyFallback`) insère automatiquement dans `body` pour un message envoyé avec
+/// `inReplyTo` (lignes préfixées par `> `, jusqu'à la première ligne vide) — pensé pour les
+/// clients qui ne savent pas afficher la citation autrement. Cette appli l'affiche elle-même (voir
+/// [_ReplyQuote] ci-dessous) : sans ce retrait, le texte du message répété deux fois (la citation
+/// brute en tête du corps, puis la vraie réponse, puis à nouveau le widget de citation construit à
+/// partir de la relation `m.in_reply_to`).
+///
+/// Port direct de la méthode du SDK (privée, donc non réutilisable depuis l'UI) — même logique,
+/// pas de dépendance cachée à son implémentation interne.
+String _stripReplyFallback(String body) {
+  if (!body.startsWith('> <@')) return body;
+  var out = '';
+  var inPrefix = true;
+  for (final line in body.split('\n')) {
+    if (inPrefix && (line.isEmpty || line.startsWith('> '))) continue;
+    inPrefix = false;
+    out += out.isEmpty ? line : '\n$line';
+  }
+  return out;
+}
+
 /// Résume tout ce qui peut changer l'affichage de la liste des conversations (ordre, nom, dernier
 /// message) — voir son usage avec `distinct()` dans [RoomsScreen.build].
 ///
@@ -478,17 +500,53 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _typingActive = false;
   Set<String> _typingOtherUserIds = {};
 
+  /// Message auquel la prochaine saisie va répondre (voir [_send], [_setReplyTarget],
+  /// [_cancelReply]) — citée au-dessus du champ de texte tant que non envoyée ou annulée.
+  Event? _replyingTo;
+
+  /// Dernier événement pour lequel un accusé de lecture a déjà été envoyé (voir
+  /// [_maybeSendReadMarker]) : évite de rappeler `Room.setReadMarker` — donc de renvoyer un
+  /// événement de réception au homeserver — à chaque reconstruction de cet écran (frappe d'un
+  /// autre participant, statut d'envoi d'un message, etc.) alors que rien de nouveau n'a été lu.
+  String? _lastReadMarkerEventId;
+
   @override
   void initState() {
     super.initState();
     widget.room.getTimeline(onUpdate: () {
       if (mounted) setState(() {});
+      _maybeSendReadMarker();
     }).then((t) {
       if (mounted) setState(() => _timeline = t);
+      _maybeSendReadMarker();
     });
     _refreshTypingUsers();
     _typingSub = widget.room.client.onSync.stream.listen((_) => _refreshTypingUsers());
   }
+
+  /// Signale au homeserver (et donc, potentiellement, à l'interlocuteur — voir l'indicateur
+  /// « Vu » dans les bulles ci-dessous) que les messages jusqu'au plus récent visible dans cet
+  /// écran ont été lus. Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
+  /// jamais implémenté jusqu'ici, alors que `Room.setReadMarker` est déjà exposé par le SDK pinné.
+  ///
+  /// Appelé uniquement tant que cet écran de conversation est effectivement ouvert — jamais en
+  /// arrière-plan — pour rester cohérent avec le reste de l'OPSEC de cette appli (même esprit que
+  /// l'indicateur de frappe juste au-dessus) : on ne signale pas la lecture d'une conversation que
+  /// l'utilisateur n'a pas réellement sous les yeux. Best-effort, comme tout le reste des accusés
+  /// de ce fichier : un échec réseau ne doit jamais interrompre la lecture elle-même.
+  void _maybeSendReadMarker() {
+    final latest = _timeline?.events
+        .where((e) => e.type == EventTypes.Message)
+        .fold<Event?>(null, (latest, e) =>
+            latest == null || e.originServerTs.isAfter(latest.originServerTs) ? e : latest);
+    if (latest == null || latest.eventId == _lastReadMarkerEventId) return;
+    _lastReadMarkerEventId = latest.eventId;
+    unawaited(widget.room.setReadMarker(latest.eventId, mRead: latest.eventId).catchError((_) {}));
+  }
+
+  void _setReplyTarget(Event e) => setState(() => _replyingTo = e);
+
+  void _cancelReply() => setState(() => _replyingTo = null);
 
   void _refreshTypingUsers() {
     final myId = widget.room.client.userID;
@@ -639,9 +697,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
+    final replyTo = _replyingTo;
     _textCtrl.clear();
+    if (replyTo != null) _cancelReply();
     _stopTyping();
-    final eventId = await widget.room.sendTextEvent(text);
+    final eventId = await widget.room.sendTextEvent(text, inReplyTo: replyTo);
     if (eventId == null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -760,77 +820,149 @@ class _ChatScreenState extends State<ChatScreen> {
                       // conversation directe à deux, où il serait redondant avec le titre de
                       // l'écran) et jamais pour ses propres messages.
                       final showSenderName = !mine && !widget.room.isDirectChat;
-                      return Align(
-                        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-                          decoration: BoxDecoration(
-                            color: bubbleColor,
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (showSenderName)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 2),
-                                  child: Text(
-                                    e.senderFromMemoryOrFallback.calcDisplayname(),
-                                    style: TextStyle(
-                                      color: murmureAvatarColor(e.senderId),
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                              if (e.messageType == MessageTypes.Image)
-                                _MessageImage(event: e)
-                              else
-                                Text(e.text, style: TextStyle(color: textColor)),
-                              const SizedBox(height: 2),
-                              // Trouvé en audit interne, suite à la revue croisée IA sur l'écart avec
-                              // Telegram/Signal : `_send()` lit déjà `EventStatus` (voir plus haut)
-                              // pour prévenir une fois en cas d'échec, mais rien n'affichait ensuite
-                              // l'état du message DANS la bulle elle-même — un message resté en
-                              // `sending` (réseau coupé juste après l'envoi, cas normal pour l'usage
-                              // visé par cette appli) ou passé en `error` reprenait l'apparence
-                              // exacte d'un message bien parti dès que le SnackBar disparaissait.
-                              // `Event.status` (matrix-dart-sdk, event_status.dart) est vérifié ici
-                              // contre le SDK pinné : `.isSending`/`.isError` existent tels quels.
-                              if (mine && (e.status.isSending || e.status.isError))
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      e.status.isError ? Icons.error_outline : Icons.schedule,
-                                      size: 12,
-                                      color: e.status.isError ? scheme.error : metaColor,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      e.status.isError ? 'Échec de l\'envoi' : 'En attente…',
+                      // Trouvé en audit interne (revue croisée IA) : citer un message précis en
+                      // répondant n'existait pas du tout. `inReplyTo` (voir [_send]) ajoute une
+                      // relation `m.in_reply_to` que le SDK reconnaît ici via `relationshipType` —
+                      // on résout l'événement cité pour l'afficher au-dessus de la réponse.
+                      final isReply = e.relationshipType == RelationshipTypes.reply;
+                      // Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
+                      // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur,
+                      // `Event.receipts` (SDK pinné) donne qui a lu CET événement précisément.
+                      final seenByOther =
+                          mine && e.receipts.any((r) => r.user.id != widget.room.client.userID);
+                      return GestureDetector(
+                        onLongPress: () => _setReplyTarget(e),
+                        child: Align(
+                          alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            constraints:
+                                BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+                            decoration: BoxDecoration(
+                              color: bubbleColor,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (showSenderName)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 2),
+                                    child: Text(
+                                      e.senderFromMemoryOrFallback.calcDisplayname(),
                                       style: TextStyle(
-                                        color: e.status.isError ? scheme.error : metaColor,
-                                        fontSize: 11,
+                                        color: murmureAvatarColor(e.senderId),
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 13,
                                       ),
                                     ),
-                                  ],
-                                )
-                              else
-                                Text(
-                                  DateFormat.Hm().format(e.originServerTs),
-                                  style: TextStyle(color: metaColor, fontSize: 11),
-                                ),
-                            ],
+                                  ),
+                                if (isReply)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 4),
+                                    child: _ReplyQuote(event: e, timeline: _timeline!, metaColor: metaColor),
+                                  ),
+                                if (e.messageType == MessageTypes.Image)
+                                  _MessageImage(event: e)
+                                else
+                                  Text(
+                                    isReply ? _stripReplyFallback(e.text) : e.text,
+                                    style: TextStyle(color: textColor),
+                                  ),
+                                const SizedBox(height: 2),
+                                // Trouvé en audit interne, suite à la revue croisée IA sur l'écart avec
+                                // Telegram/Signal : `_send()` lit déjà `EventStatus` (voir plus haut)
+                                // pour prévenir une fois en cas d'échec, mais rien n'affichait ensuite
+                                // l'état du message DANS la bulle elle-même — un message resté en
+                                // `sending` (réseau coupé juste après l'envoi, cas normal pour l'usage
+                                // visé par cette appli) ou passé en `error` reprenait l'apparence
+                                // exacte d'un message bien parti dès que le SnackBar disparaissait.
+                                // `Event.status` (matrix-dart-sdk, event_status.dart) est vérifié ici
+                                // contre le SDK pinné : `.isSending`/`.isError` existent tels quels.
+                                if (mine && (e.status.isSending || e.status.isError))
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        e.status.isError ? Icons.error_outline : Icons.schedule,
+                                        size: 12,
+                                        color: e.status.isError ? scheme.error : metaColor,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        e.status.isError ? 'Échec de l\'envoi' : 'En attente…',
+                                        style: TextStyle(
+                                          color: e.status.isError ? scheme.error : metaColor,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                else
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        DateFormat.Hm().format(e.originServerTs),
+                                        style: TextStyle(color: metaColor, fontSize: 11),
+                                      ),
+                                      if (seenByOther) ...[
+                                        const SizedBox(width: 4),
+                                        Icon(Icons.done_all, size: 13, color: metaColor),
+                                      ],
+                                    ],
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
                       );
                     },
                   ),
           ),
+          if (_replyingTo != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Réponse à ${_replyingTo!.senderFromMemoryOrFallback.calcDisplayname()}',
+                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                          ),
+                          Text(
+                            _stripReplyFallback(_replyingTo!.text),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: 'Annuler la réponse',
+                      onPressed: _cancelReply,
+                    ),
+                  ],
+                ),
+              ),
+            ),
           if (_typingOtherUserIds.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
@@ -888,6 +1020,43 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Citation affichée au-dessus d'un message qui répond à un autre (`m.in_reply_to`, voir
+/// [_ChatScreenState._send] et `_stripReplyFallback`). `Event.getReplyEvent` (SDK pinné) est
+/// asynchrone — il consulte d'abord la timeline déjà chargée en mémoire avant toute requête
+/// réseau — donc un `FutureBuilder` plutôt qu'une lecture synchrone ; le texte cité reste vide un
+/// court instant plutôt que de bloquer l'affichage du message lui-même.
+class _ReplyQuote extends StatelessWidget {
+  const _ReplyQuote({required this.event, required this.timeline, required this.metaColor});
+  final Event event;
+  final Timeline timeline;
+  final Color metaColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Event?>(
+      future: event.getReplyEvent(timeline),
+      builder: (context, snapshot) {
+        final quoted = snapshot.data;
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            border: Border(left: BorderSide(color: metaColor, width: 2)),
+          ),
+          child: Text(
+            quoted == null
+                ? '…'
+                : '${quoted.senderFromMemoryOrFallback.calcDisplayname()} : '
+                    '${_stripReplyFallback(quoted.text)}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: metaColor, fontSize: 12, fontStyle: FontStyle.italic),
+          ),
+        );
+      },
     );
   }
 }
