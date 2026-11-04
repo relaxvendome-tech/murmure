@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:matrix/matrix.dart';
 
 import '../network.dart';
+import 'qr_screens.dart';
 
 /// Trouvé en audit interne : une fois le compte créé, `OnboardingScreen` (et donc le seul
 /// formulaire de choix du mode réseau — direct/Tor/proxy personnalisé) n'était plus jamais
@@ -147,8 +148,24 @@ class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    final current = _current;
     return Scaffold(
-      appBar: AppBar(title: const Text('Réseau')),
+      appBar: AppBar(
+        title: const Text('Réseau'),
+        actions: [
+          if (current != null && current.homeserver.hasScheme)
+            IconButton(
+              icon: const Icon(Icons.qr_code),
+              tooltip: 'Partager ce serveur (QR)',
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => MyServerQrScreen(
+                  homeserver: current.homeserver,
+                  registrationToken: current.registrationToken,
+                ),
+              )),
+            ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: ListView(

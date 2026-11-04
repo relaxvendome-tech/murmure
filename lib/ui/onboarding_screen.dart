@@ -4,6 +4,7 @@ import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import '../network.dart';
+import 'qr_screens.dart';
 
 /// Premier lancement : configurer le serveur (jamais codé en dur, voir network.dart), puis créer
 /// un compte anonyme (identifiant et mot de passe aléatoires, seul le nom affiché est choisi).
@@ -72,6 +73,42 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
   NetMode _mode = NetMode.direct;
   bool _testing = false;
   String? _error;
+
+  /// Trouvé en audit interne (revue multi-IA croisée — ChatGPT, Qwen et Perplexity ont chacune
+  /// signalé, indépendamment, que taper à la main une URL de serveur et un jeton d'inscription
+  /// bloque un testeur dès le premier écran) : scanne un code généré par qui gère un serveur
+  /// Murmure (via [MyServerQrScreen] plus bas, pensé pour ça) pour remplir ce formulaire
+  /// automatiquement, plutôt que de recopier lettre par lettre une adresse et un jeton.
+  ///
+  /// DÉLIBÉRÉMENT PAS DE SERVEUR PAR DÉFAUT CODÉ EN DUR dans l'appli elle-même : c'est un principe
+  /// déjà affirmé par ce fichier (voir le commentaire de tête de `OnboardingScreen`) et par
+  /// `network.dart` — Murmure n'est lié à aucun serveur central unique, chacun peut héberger le
+  /// sien (`scripts/server/`), et figer une adresse dans l'APK créerait exactement le point
+  /// unique de surveillance/blocage que l'architecture décentralisée cherche à éviter. Ce scan
+  /// résout la friction de saisie sans revenir sur ce choix : il faut toujours qu'un serveur ait
+  /// été choisi et qu'un code en soit sorti, par qui que ce soit, avant ce scan.
+  Future<void> _scanServerQr() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const QrScanScreen()),
+    );
+    if (raw == null || !mounted) return;
+    const prefix = 'murmure-server:';
+    if (!raw.startsWith(prefix)) {
+      setState(() => _error = 'Code non reconnu (pas un code de serveur Murmure)');
+      return;
+    }
+    final uri = Uri.tryParse(raw.substring(prefix.length));
+    if (uri == null || uri.host.isEmpty) {
+      setState(() => _error = 'Code de serveur invalide');
+      return;
+    }
+    setState(() {
+      _urlCtrl.text = Uri(scheme: uri.scheme, host: uri.host, port: uri.hasPort ? uri.port : null)
+          .toString();
+      _tokenCtrl.text = uri.queryParameters['token'] ?? '';
+      _error = null;
+    });
+  }
 
   Future<void> _save() async {
     final uri = Uri.tryParse(_urlCtrl.text.trim());
@@ -161,10 +198,24 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
               'depuis l\'appli à tout moment, y compris sans connexion.',
             ),
             const SizedBox(height: 20),
-            TextField(
-              controller: _urlCtrl,
-              decoration: const InputDecoration(labelText: 'Adresse du serveur', hintText: 'https://…'),
-              keyboardType: TextInputType.url,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _urlCtrl,
+                    decoration:
+                        const InputDecoration(labelText: 'Adresse du serveur', hintText: 'https://…'),
+                    keyboardType: TextInputType.url,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  tooltip: 'Scanner le code d\'un serveur',
+                  onPressed: _scanServerQr,
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             TextField(

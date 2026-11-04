@@ -37,6 +37,85 @@ class QrScanScreen extends StatelessWidget {
   }
 }
 
+/// Affiche un QR code encodant l'adresse (et, si renseigné, le jeton d'inscription) d'un serveur
+/// Murmure, pour qu'un nouveau testeur puisse le scanner depuis l'écran de connexion
+/// (`onboarding_screen.dart`, `_ServerSetupScreenState._scanServerQr`) plutôt que de taper l'URL
+/// et le jeton à la main. Jamais affiché par défaut nulle part dans l'appli — accessible depuis
+/// `NetworkSettingsScreen` par qui connaît déjà l'adresse de SON serveur, jamais codée en dur.
+///
+/// Format : `murmure-server:<url>` ou `murmure-server:<url>?token=<jeton>` — même esprit que
+/// `murmure:@xxx:serveur` pour un contact ci-dessous, un préfixe stable à reconnaître au scan.
+class MyServerQrScreen extends StatelessWidget {
+  const MyServerQrScreen({super.key, required this.homeserver, this.registrationToken});
+  final Uri homeserver;
+  final String? registrationToken;
+
+  String get _payload {
+    final token = registrationToken;
+    final base = 'murmure-server:$homeserver';
+    return (token == null || token.isEmpty) ? base : '$base?token=$token';
+  }
+
+  Widget _buildQrImage() {
+    const size = 260;
+    final result = zx.encodeBarcode(
+      contents: _payload,
+      params: EncodeParams(
+        format: Format.qrCode,
+        width: size,
+        height: size,
+        margin: 0,
+        eccLevel: EccLevel.medium,
+      ),
+    );
+    if (!result.isValid || result.data == null) {
+      return const Text('Impossible de générer le code QR.');
+    }
+    final bytes = pngFromBytes(result.data!, size, size);
+    return Image.memory(bytes, width: size.toDouble(), height: size.toDouble());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Code de ce serveur')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                registrationToken == null || registrationToken!.isEmpty
+                    ? 'Faites scanner ce code à un nouveau testeur pour qu\'il configure ce '
+                        'serveur sans taper l\'adresse à la main.'
+                    : 'Ce code contient aussi le jeton d\'inscription — ne le faites scanner '
+                        'qu\'à une personne de confiance que vous invitez réellement sur ce '
+                        'serveur.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Padding(padding: const EdgeInsets.all(16), child: _buildQrImage()),
+              ),
+              const SizedBox(height: 16),
+              SelectableText(
+                _payload,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Affiche le QR code de l'identifiant Murmure de l'utilisateur, à faire scanner par un contact.
 /// Ce code ne contient que l'identifiant Matrix public (@xxx:serveur) — jamais de secret, jamais
 /// de clé : on ajoute un contact comme on échange un numéro, pas comme on partage un mot de passe.
