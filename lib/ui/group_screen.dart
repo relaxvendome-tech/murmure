@@ -53,8 +53,15 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
       setState(() => _error = 'Choisissez un nom de groupe');
       return;
     }
-    if (_members.length < 2) {
-      setState(() => _error = 'Ajoutez au moins deux autres membres');
+    // Trouvé en audit interne (revue croisée IA — Qwen : « contre-intuitif pour un groupe ») :
+    // exigeait AU MOINS DEUX autres membres (donc trois personnes au total) pour créer quoi que
+    // ce soit ici, alors qu'un groupe nommé à deux personnes est un cas d'usage parfaitement
+    // valide (le distinguer d'une conversation directe anonyme, par exemple). Un membre ajouté
+    // peut désormais toujours être retiré après coup depuis GroupInfoScreen
+    // (group_info_screen.dart) si l'un d'eux a été ajouté par erreur — plus besoin de bien faire
+    // du premier coup à la création.
+    if (_members.isEmpty) {
+      setState(() => _error = 'Ajoutez au moins un autre membre');
       return;
     }
     setState(() {

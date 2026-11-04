@@ -14,6 +14,7 @@ import '../calls/ui/missed_calls_screen.dart';
 import '../media.dart';
 import '../network.dart';
 import 'device_verification_screen.dart';
+import 'group_info_screen.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
 import 'mesh_screen.dart';
@@ -812,6 +813,18 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Appel vidéo',
             onPressed: () => _call(CallType.kVideo),
           ),
+          // Trouvé en audit interne (revue croisée IA) : une fois un groupe créé
+          // (NewGroupScreen, group_screen.dart), aucun moyen de l'administrer — ni ajouter ni
+          // retirer un membre, ni le renommer. N'a de sens que pour un groupe au sens Matrix
+          // (plusieurs membres), jamais pour une conversation directe à deux.
+          if (!widget.room.isDirectChat)
+            IconButton(
+              icon: const Icon(Icons.group_outlined),
+              tooltip: 'Infos du groupe',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => GroupInfoScreen(room: widget.room)),
+              ),
+            ),
         ],
       ),
       body: Column(
