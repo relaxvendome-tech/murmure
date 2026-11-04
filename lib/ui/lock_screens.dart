@@ -87,14 +87,32 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   ///    CHAQUE tentative compte comme un échec) — jusqu'à [PinResult.exhausted] et un effacement
   ///    total non voulu par un utilisateur qui n'avait simplement jamais activé de verrou. On
   ///    revérifie donc [AppLock.enabled] ici, pas seulement dans [_init], avant de reverrouiller.
+  ///
+  /// Trouvé en audit interne (revue croisée IA, confirmée en relisant [CallManager.handleNewCall]
+  /// dans `calls/services/call_manager.dart`) : régression introduite par le correctif ci-dessus.
+  /// `AppLock.isUnlocked` n'était mis à `false` qu'à LA FIN de cette méthode, après le `await
+  /// AppLock.enabled()`. [CallManager.handleNewCall] décide de pousser (ou non) `CallSessionScreen`
+  /// sur `murmureNavigatorKey` en lisant `AppLock.isUnlocked` de façon purement synchrone, sans
+  /// attendre ce correctif. Un appel natif arrivant PENDANT cet `await` (fenêtre asynchrone réelle
+  /// : lecture Keystore) voyait donc encore `isUnlocked == true`, poussait l'écran d'appel entrant
+  /// — puis le `popUntil(isFirst)` qui suivait la reprise de cette méthode le refermait aussitôt en
+  /// le prenant pour un écran pérîmé à cacher, supprimant un appel entrant légitime au lieu de
+  /// masquer une conversation. `isUnlocked` passe maintenant à `false` en premier, de façon
+  /// synchrone, AVANT tout `await` : toute la fenêtre asynchrone qui suit voit donc l'état verrouillé
+  /// dès le départ (fail closed, cohérent avec le choix de [AppLock.isUnlocked] lui-même). Si le
+  /// relock est finalement annulé (pas de PIN configuré), la valeur est restaurée explicitement
+  /// avant de sortir — l'appli reste alors affichée normalement, sans rien de verrouillé.
   Future<void> _relock() async {
+    AppLock.isUnlocked = false;
     final enabled = await AppLock.enabled();
-    if (!mounted || !enabled) return;
+    if (!mounted || !enabled) {
+      AppLock.isUnlocked = true; // relock annulé : rien n'est verrouillé, on restaure l'état réel.
+      return;
+    }
     if (Navigator.of(context).canPop()) {
       Navigator.of(context).popUntil((route) => route.isFirst);
     }
     setState(() => _unlocked = false);
-    AppLock.isUnlocked = false;
   }
 
   Future<void> _wipe() async {
