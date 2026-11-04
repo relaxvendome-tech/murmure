@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_vodozemac/flutter_vodozemac.dart' as vod;
 import 'package:matrix/matrix.dart';
+// `KeyVerificationMethod` vit dans le barrel séparé `package:matrix/encryption.dart`, pas dans
+// `package:matrix/matrix.dart` (voir le même commentaire dans verification_manager.dart).
+import 'package:matrix/encryption.dart';
 
 import 'account.dart';
 import 'calls/services/call_manager.dart';
@@ -115,6 +118,23 @@ class _MurmureAppState extends State<MurmureApp> {
         databaseBuilder: (_) async => MatrixSdkDatabase('murmure', database: db),
         logLevel: Level.wtf,
         httpClient: await net.httpClient(),
+        // Trouvé en audit interne (revue indépendante) : sans ce paramètre, `Client` retombe sur
+        // `verificationMethods ?? <KeyVerificationMethod>{}` (voir `client.dart` du SDK, tag
+        // v0.29.0) — un ensemble VIDE. Conséquence vérifiée dans le SDK réel : côté demande
+        // entrante, `KeyVerification.handlePayload(request)` calcule
+        // `possibleMethods = payload['methods'].intersect(client.verificationMethods)` ; vide,
+        // il annule immédiatement en `m.unknown_method` AVANT d'atteindre l'état `askAccept` —
+        // `onKeyVerificationRequest` ne s'émet donc jamais et `VerificationManager` ne reçoit
+        // rien. Côté demande sortante, `startVerification()` annonce `methods: []`, que le
+        // correspondant rejette aussitôt. Dans les deux cas l'écran affichait « Vérification
+        // annulée ou échouée… ne faites pas confiance » — un message qui ressemble à une alerte
+        // d'homme du milieu alors que c'était un simple paramètre manquant à la construction du
+        // client, la fonctionnalité de vérification d'appareil n'ayant jamais réellement
+        // fonctionné. Seul `emoji` est annoncé : c'est la seule méthode que l'UI de ce dépôt sait
+        // présenter (voir sas_verification_screen.dart, comparaison d'émojis uniquement — aucun
+        // flux QR `qrShow`/`qrScan`/`reciprocate` n'est implémenté côté écran, les annoncer sans
+        // les gérer romprait le protocole côté correspondant qui choisirait l'une d'elles).
+        verificationMethods: {KeyVerificationMethod.emoji},
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
 

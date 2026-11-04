@@ -11,8 +11,21 @@ import '../lock.dart';
 /// - Déverrouillage : taper le code PIN de l'appli (4 à 8 chiffres) puis « = ». Le code n'est PAS
 ///   dans l'appli : il est comparé à l'empreinte PBKDF2 gardée dans le Keystore (voir [AppLock]).
 /// - Code de contrainte : même geste, efface tout en silence ([onWipe]).
-/// - Aucun compteur d'échecs ici : n'importe quel calcul « 12345 = » serait compté comme une erreur
-///   et 10 calculs anodins effaceraient tout. Le coût PBKDF2 (120 000 itérations) freine la force brute.
+/// - Compteur d'échecs : SEULE une saisie ayant la FORME d'un code (4 à 8 chiffres, sans aucun
+///   opérateur — `_pinShape`, voir `_equals()`) est même transmise à [AppLock] ; un vrai calcul
+///   (« 12+34= », par ex.) n'y arrive jamais et ne consomme donc jamais de tentative. Trouvé en
+///   audit interne (revue indépendante) : une saisie de cette forme était auparavant comparée via
+///   [AppLock.classify], qui ne compte JAMAIS d'échec — un choix défendable tant que l'icône et le
+///   nom affichés de l'appli se faisaient eux-mêmes passer pour une calculatrice (un tiers tombant
+///   dessus n'avait aucune raison de soupçonner un verrou, donc aucune raison d'essayer des codes
+///   à répétition). Ce n'est plus le cas (voir docs/UPDATES.md) : l'icône et le nom affichés
+///   restent toujours honnêtement « Murmure », donc quiconque voit une calculatrice s'ouvrir sous
+///   ce nom comprend immédiatement qu'il s'agit d'un verrou déguisé — ce qui transformait le
+///   compteur désactivé en brute force illimitée sur un PIN à 4 chiffres (10 000 combinaisons),
+///   le coût PBKDF2 seul (120 000 itérations, de l'ordre de la milliseconde sur un téléphone)
+///   n'étant pas un frein suffisant à lui seul. Utilise maintenant [AppLock.check] (même méthode,
+///   même compteur `pin_fails`, que l'écran de verrou classique), donc le même effacement après
+///   [AppLock.maxFailures] échecs s'applique ici aussi.
 /// - Le résultat du calcul s'affiche immédiatement ; la vérification du code tourne en arrière-plan,
 ///   donc aucun délai visible ne trahit qu'un code est testé.
 class CalculatorLockScreen extends StatefulWidget {
@@ -105,7 +118,8 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
     if (_checking) return;
     _checking = true;
     try {
-      final r = await AppLock.classify(pin); // ne compte pas d'échec (voir doc de classe)
+      // AppLock.check (pas classify) : compte cette tentative, voir le commentaire de classe.
+      final r = await AppLock.check(pin);
       if (!mounted) return;
       switch (r) {
         case PinResult.ok:
@@ -114,9 +128,11 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
         case PinResult.duress:
           _set('', '0');
           await widget.onWipe();
-        case PinResult.wrong:
         case PinResult.exhausted:
-          break; // rien : c'était un calcul comme un autre
+          _set('', '0');
+          await widget.onWipe();
+        case PinResult.wrong:
+          break; // rien : reste affiché comme un calcul normal, pas d'indice visuel d'échec
       }
     } catch (_) {
       // Keystore indisponible, etc. : la calculatrice reste une calculatrice.

@@ -64,10 +64,37 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
     } else if (state == AppLifecycleState.resumed) {
       final since = _backgroundedAt;
       if (since != null && DateTime.now().difference(since) > kRelockAfter) {
-        setState(() => _unlocked = false);
-        AppLock.isUnlocked = false;
+        unawaited(_relock());
       }
     }
+  }
+
+  /// Trouvé en audit interne (revue indépendante), deux bugs réels dans l'ancien code inline :
+  ///
+  /// 1. [LockGate] n'est que le `home:` de `MaterialApp` — PAS une frontière de navigation (voir
+  ///    le commentaire de classe de [AppLock.isUnlocked] dans `lock.dart`). Une conversation, les
+  ///    réglages ou le profil ouverts via `Navigator.of(context).push` depuis [RoomsScreen]
+  ///    s'empilent sur le MÊME navigateur racine, PAR-DESSUS la route de [LockGate]. L'ancien code
+  ///    se contentait de `setState(() => _unlocked = false)` : cela changeait bien l'état interne,
+  ///    mais [LockGate] restait enterré sous la route ouverte, dont le contenu continuait de
+  ///    s'afficher normalement — téléphone saisi en veille puis rallumé, conversation lisible,
+  ///    l'écran PIN existant seulement en dessous, invisible. `popUntil((route) => route.isFirst)`
+  ///    referme explicitement tout ce qui a été empilé par-dessus avant de reverrouiller, pour que
+  ///    la route la plus basse (celle de [LockGate] lui-même) redevienne effectivement visible.
+  /// 2. Le relock s'appliquait même quand [AppLock.enabled] est faux (aucun code PIN défini) :
+  ///    `_unlocked` repassait à `false` sans condition, et [build] affiche alors un [PinScreen]
+  ///    qu'aucun code ne peut jamais déverrouiller ([AppLock.check] reçoit `pinHash == null`, donc
+  ///    CHAQUE tentative compte comme un échec) — jusqu'à [PinResult.exhausted] et un effacement
+  ///    total non voulu par un utilisateur qui n'avait simplement jamais activé de verrou. On
+  ///    revérifie donc [AppLock.enabled] ici, pas seulement dans [_init], avant de reverrouiller.
+  Future<void> _relock() async {
+    final enabled = await AppLock.enabled();
+    if (!mounted || !enabled) return;
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+    setState(() => _unlocked = false);
+    AppLock.isUnlocked = false;
   }
 
   Future<void> _wipe() async {

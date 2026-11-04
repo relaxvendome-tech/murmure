@@ -28,6 +28,14 @@
 
 	# Journaux minimaux : adresse IP masquée, pas d'enregistrement du corps des requêtes
 	# (qui contiendrait des événements Matrix chiffrés — aucune raison de les journaliser).
+	#
+	# Trouvé en audit interne (revue indépendante) : `request>remote_ip` seul ne suffit plus
+	# depuis Caddy 2.7 (l'image `caddy:2-alpine` suit la dernière version stable) — le champ
+	# structuré du log s'est enrichi d'un `request>client_ip` distinct (résolu via
+	# `trusted_proxies`/en-têtes `X-Forwarded-For` le cas échéant, sinon identique à `remote_ip`),
+	# non couvert par le filtre précédent. Sans cette ligne, l'IP de chaque client était quand
+	# même écrite en clair dans access.log, à l'inverse exact de ce que ce commentaire annonçait —
+	# grave vu le modèle de menace visé (saisie du serveur, pas seulement du téléphone).
 	log {
 		output file /data/access.log {
 			roll_size 10mb
@@ -37,6 +45,7 @@
 			wrap json
 			fields {
 				request>remote_ip delete
+				request>client_ip delete
 				request>headers delete
 			}
 		}

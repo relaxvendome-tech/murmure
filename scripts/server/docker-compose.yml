@@ -32,6 +32,20 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # Trouvé en audit interne (revue indépendante) : sans ce bloc, la variable `MURMURE_DOMAIN`
+    # exportée par deploy.sh (ou à la main selon le README) reste une variable du SHELL hôte —
+    # Docker Compose ne la propage PAS automatiquement à l'intérieur du conteneur. Le Caddyfile
+    # commence alors par `{$MURMURE_DOMAIN}`, résolu en chaîne vide côté conteneur : Caddy lit le
+    # `{` isolé qui suit comme le début d'un bloc d'options globales (pas un nom de domaine), y
+    # trouve `route { ... }` qu'il ne reconnaît pas comme option globale valide, et échoue au
+    # démarrage avec « unrecognized global option: route » — en boucle de redémarrage
+    # (`restart: unless-stopped`), le serveur n'étant alors jamais joignable. `${MURMURE_DOMAIN}`
+    # (interpolation Compose, shell hôte) propage explicitement la valeur dans l'environnement du
+    # conteneur ; `${MURMURE_DOMAIN:?...}` fait aussi échouer `docker compose up` tout de suite,
+    # avec un message clair, si la variable n'est pas exportée avant l'appel — plutôt que de
+    # démarrer un conteneur cassé qui boucle silencieusement.
+    environment:
+      MURMURE_DOMAIN: "${MURMURE_DOMAIN:?MURMURE_DOMAIN doit être exportée avant 'docker compose up' (voir scripts/server/deploy.sh ou le README)}"
     ports:
       - "443:443"
       - "80:80"
