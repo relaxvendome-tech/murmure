@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
@@ -74,10 +75,23 @@ class UpdateChecker {
     }
   }
 
+  /// Taille maximale acceptée pour un APK téléchargé (300 Mo, largement au-dessus de ce qu'une
+  /// appli comme Murmure peut raisonnablement produire). Trouvé en audit interne : rien ne bornait
+  /// avant ce correctif la taille du corps de réponse lu dans la boucle ci-dessous — un serveur de
+  /// mise à jour mal configuré, compromis, ou un manifeste pointant par erreur vers une URL qui ne
+  /// sert pas un APK (ex. redirigée vers une page ou un flux sans fin) aurait fait grossir le
+  /// tampon en mémoire sans limite jusqu'à épuisement de la RAM — un modèle de menace pertinent ici
+  /// (téléphones d'occasion ou d'entrée de gamme, voir le reste du threat model du projet), pas
+  /// seulement une négligence académique. Vérifiée à chaque fragment reçu (pas seulement sur
+  /// `Content-Length`, qu'un serveur peut omettre ou mentir) : fail closed, comme le reste de ce
+  /// mécanisme (voir la vérification SHA-256 plus bas).
+  static const _maxApkBytes = 300 * 1024 * 1024;
+
   /// Télécharge l'APK annoncé par [manifest] (via le même client réseau que [check]), vérifie son
-  /// empreinte SHA-256, puis seulement si elle correspond, écrit le fichier à son emplacement
-  /// final et le retourne. En cas d'empreinte différente, le fichier temporaire est supprimé et
-  /// [UpdateError] est levée — ne laisse jamais un APK non vérifié en place, même pour inspection.
+  /// empreinte SHA-256 EN MÉMOIRE, puis seulement si elle correspond, écrit le fichier à son
+  /// emplacement final et le retourne. En cas d'empreinte différente, [UpdateError] est levée sans
+  /// qu'aucun octet n'ait jamais été écrit sur le disque — rien à supprimer, rien à nettoyer : un
+  /// APK non vérifié n'existe à aucun moment ailleurs qu'en mémoire, pas même temporairement.
   static Future<File> download(UpdateManifest manifest, {void Function(double progress)? onProgress}) async {
     final net = await NetConfig.load();
     final client = await net.httpClient();
@@ -88,16 +102,29 @@ class UpdateChecker {
         throw UpdateError('Téléchargement de la mise à jour échoué (${streamed.statusCode})');
       }
       final total = streamed.contentLength;
-      final received = <int>[];
+      // `BytesBuilder` (pas `List<int>` + `addAll`, utilisé avant ce correctif) : un `List<int>`
+      // construit ainsi garde chaque octet comme un élément de tableau de la taille d'un mot
+      // machine (8 octets sur la quasi-totalité des téléphones Android actuels, 64 bits) au lieu
+      // d'un seul octet réellement nécessaire — un APK de 50 Mo (taille courante pour ce genre
+      // d'appli) aurait donc fait gonfler ce tampon jusqu'à environ 400 Mo en mémoire, bien avant
+      // tout calcul de SHA-256. `BytesBuilder` garde un `Uint8List` interne, un octet par octet.
+      final received = BytesBuilder(copy: false);
       var sum = 0;
       await for (final chunk in streamed.stream) {
-        received.addAll(chunk);
         sum += chunk.length;
+        if (sum > _maxApkBytes) {
+          throw UpdateError(
+            'Téléchargement de la mise à jour interrompu : taille reçue au-delà du plafond de '
+            '${_maxApkBytes ~/ (1024 * 1024)} Mo. Serveur de mise à jour mal configuré ou URL '
+            'incorrecte dans le manifeste — installation refusée.',
+          );
+        }
+        received.add(chunk);
         if (total != null && total > 0 && onProgress != null) {
           onProgress(sum / total);
         }
       }
-      final bytes = received;
+      final bytes = received.toBytes();
       final digest = await Sha256().hash(bytes);
       final hex = digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
       if (hex != manifest.sha256) {
