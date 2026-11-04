@@ -106,6 +106,7 @@ class RoomsScreen extends StatelessWidget {
             tooltip: 'Réglages',
             onPressed: () => Navigator.of(context).push(MaterialPageRoute(
               builder: (_) => LockSettingsScreen(
+                client: client,
                 // Comme pour l'effacement d'urgence (Account.panic), on ferme l'appli juste
                 // après : plus simple et plus sûr que de reconstruire l'état en mémoire d'un
                 // client Matrix dont la base locale vient d'être supprimée sous ses pieds.

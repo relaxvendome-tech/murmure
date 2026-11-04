@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import '../calls/services/call_manager.dart';
@@ -9,6 +10,7 @@ import '../calls/services/call_opsec_notifier.dart';
 import '../config.dart';
 import '../lock.dart';
 import 'calculator_lock_screen.dart';
+import 'network_settings_screen.dart';
 import 'update_screen.dart';
 
 /// Porte d'entrée de l'appli : affiche l'écran de verrou adapté (classique ou calculatrice selon
@@ -457,13 +459,19 @@ class _Key extends StatelessWidget {
 /// lancement n'est fait : Google Play interdit qu'une appli change son icône/nom affichés pour se
 /// faire passer pour une autre, voir la policy « Impersonation »).
 class LockSettingsScreen extends StatefulWidget {
-  const LockSettingsScreen({super.key, this.onDeleteAccount});
+  const LockSettingsScreen({super.key, this.onDeleteAccount, this.client});
 
   /// Supprime le compte sur le serveur puis efface tout du téléphone (voir
   /// [Account.deleteEverything]). Null si aucun compte n'est connecté (ne devrait pas arriver
   /// depuis RoomsScreen, mais LockSettingsScreen reste utilisable sans compte Matrix, en mode
   /// Bluetooth seul).
   final Future<void> Function()? onDeleteAccount;
+
+  /// Trouvé en audit interne : sans ce paramètre, rien dans l'appli (une fois le compte créé)
+  /// ne permettait plus jamais de changer de mode réseau (direct/Tor/proxy) — voir le commentaire
+  /// de [NetworkSettingsScreen]. Null dans les mêmes cas que [onDeleteAccount] (pas de compte
+  /// Matrix connecté) : le réglage réseau reste alors accessible uniquement depuis l'onboarding.
+  final Client? client;
 
   @override
   State<LockSettingsScreen> createState() => _LockSettingsScreenState();
@@ -565,6 +573,17 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                 await Account.write('calc_mode', v ? '1' : '0');
                 await _load();
               },
+            ),
+          ],
+          if (widget.client != null) ...[
+            const Divider(height: 32),
+            ListTile(
+              leading: const Icon(Icons.wifi_outlined),
+              title: const Text('Réseau'),
+              subtitle: const Text('Serveur, mode direct/Tor/proxy'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => NetworkSettingsScreen(client: widget.client!)),
+              ),
             ),
           ],
           const Divider(height: 32),
