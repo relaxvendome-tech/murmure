@@ -9,6 +9,7 @@ import 'calls/services/call_manager.dart';
 import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
 import 'media.dart';
+import 'mesh/mesh_opsec_notifier.dart';
 import 'network.dart';
 import 'ui/lock_screens.dart';
 import 'ui/onboarding_screen.dart';
@@ -51,6 +52,11 @@ Future<void> main() async {
   // l'aveugle, sans compilateur Flutter local pour les valider un par un.
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
   await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
+  // Trouvé en audit interne (revue multi-IA croisée) : sans cet appel, un message reçu en mode
+  // maillé Bluetooth (voir mesh/mesh.dart) n'était signalé que si `MeshScreen` était déjà ouvert
+  // (seul abonné précédent à `Mesh.instance.events`). S'abonne ici une fois, pour toute la durée
+  // de vie de l'appli, indépendamment de l'écran affiché — voir mesh/mesh_opsec_notifier.dart.
+  await MeshOpsecNotifier.init(); // best-effort, même principe que CallOpsecNotifier
   runApp(const MurmureApp());
 }
 

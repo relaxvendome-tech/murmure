@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
+import '../mesh/mesh_opsec_notifier.dart';
 import 'qr_screens.dart';
 import 'theme.dart';
 
@@ -43,6 +44,9 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void initState() {
     super.initState();
+    // L'utilisateur ouvre cet écran : toute notification « nouveau message mesh » en attente
+    // (voir mesh/mesh_opsec_notifier.dart) a rempli son rôle, il va lire l'inbox juste après.
+    unawaited(MeshOpsecNotifier.clear());
     // Trouvé en audit interne : avant cette correction, ce journal n'affichait QUE les messages
     // reçus pendant que cet écran était ouvert (liste en mémoire, jamais relue depuis la base) —
     // alors que `Mesh._handleIncomingLocked` les enregistre bel et bien dans la table `inbox` de
