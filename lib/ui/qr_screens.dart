@@ -44,6 +44,36 @@ class MyQrScreen extends StatelessWidget {
   const MyQrScreen({super.key, required this.shareableId});
   final String shareableId;
 
+  // Trouvé en audit interne (revue indépendante), confirmé contre le code source réel de
+  // flutter_zxing : `WriterWidget` n'affiche JAMAIS l'image du code généré — son `build()` ne
+  // rend qu'un formulaire (champ de texte, menus format/ECC, champs largeur/hauteur/marge,
+  // bouton « Créer ») ; l'image (bytes PNG) n'est livrée QUE via son callback `onSuccess`,
+  // déclenché seulement quand on presse ce bouton. Cet écran ne branchait pas `onSuccess` : «
+  // Mon code » n'affichait donc jamais de QR code à faire scanner — seulement un formulaire
+  // d'édition de l'identifiant, avec l'ID par erreur modifiable dans un champ de texte. On
+  // appelle directement l'API bas niveau que `WriterWidget.createBarcode()` utilise en interne
+  // (`zx.encodeBarcode` + `pngFromBytes`, toutes les deux exportées par le paquet) pour générer
+  // l'image une fois, statiquement, sans formulaire ni bouton — il n'y a rien à choisir ici,
+  // l'identifiant affiché ne doit pas être modifiable.
+  Widget _buildQrImage() {
+    const size = 260;
+    final result = zx.encodeBarcode(
+      contents: shareableId,
+      params: EncodeParams(
+        format: Format.qrCode,
+        width: size,
+        height: size,
+        margin: 0,
+        eccLevel: EccLevel.medium,
+      ),
+    );
+    if (!result.isValid || result.data == null) {
+      return const Text('Impossible de générer le code QR.');
+    }
+    final bytes = pngFromBytes(result.data!, result.width ?? size, result.height ?? size);
+    return Image.memory(bytes, width: size.toDouble(), height: size.toDouble());
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -67,13 +97,7 @@ class MyQrScreen extends StatelessWidget {
                 ),
                 child: Padding(
                   padding: const EdgeInsets.all(16),
-                  child: WriterWidget(
-                    text: shareableId,
-                    format: Format.qrCode,
-                    height: 260,
-                    margin: 0,
-                    eccLevel: EccLevel.medium,
-                  ),
+                  child: _buildQrImage(),
                 ),
               ),
               const SizedBox(height: 16),

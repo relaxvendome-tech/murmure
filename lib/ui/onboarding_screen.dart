@@ -266,7 +266,13 @@ class _CreateAccountScreenState extends State<_CreateAccountScreen> {
     });
     try {
       await Account.register(widget.client, name);
-      // Rien d'autre à faire : MurmureApp réagit à client.isLogged() et affiche RoomsScreen.
+      // Trouvé en audit interne : ce commentaire affirmait que MurmureApp (`_Home` dans
+      // main.dart) réagissait seul à ce changement — c'était faux, rien ne l'abonnait à
+      // `client.onLoginStateChanged` avant la correction de ce bug dans main.dart. C'est
+      // maintenant réellement le cas (StreamBuilder sur `client.onLoginStateChanged.stream`) :
+      // rien d'autre à faire ici, `_Home` recevra l'événement émis par `Account.register()`
+      // (via `client.init()` -> `onLoginStateChanged.add(LoginState.loggedIn)`) et basculera sur
+      // RoomsScreen de lui-même, sans navigation explicite nécessaire depuis cet écran.
     } catch (e) {
       if (!mounted) return;
       setState(() {

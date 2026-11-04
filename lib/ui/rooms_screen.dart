@@ -47,8 +47,12 @@ String _roomsSignature(Client client) {
   final rooms = client.rooms.where((r) => !r.isSpace);
   final parts = rooms.map((r) {
     final last = r.lastEvent;
+    // Trouvé en audit interne : `membership` doit faire partie de la signature, sinon accepter ou
+    // refuser une invitation (Room.join()/Room.leave(), voir plus bas) ne faisait pas réafficher
+    // la liste — l'id, le nom et le dernier événement du salon ne changent pas forcément à cette
+    // occasion, seule son statut d'adhésion change.
     return '${r.id}\u0000${r.getLocalizedDisplayname()}\u0000${last?.eventId ?? ''}\u0000'
-        '${last?.originServerTs.millisecondsSinceEpoch ?? 0}';
+        '${last?.originServerTs.millisecondsSinceEpoch ?? 0}\u0000${r.membership}';
   });
   return parts.join('\u0001');
 }
@@ -119,10 +123,25 @@ class RoomsScreen extends StatelessWidget {
         stream: client.onSync.stream.map((_) => _roomsSignature(client)).distinct(),
         initialData: _roomsSignature(client),
         builder: (context, _) {
-          final rooms = client.rooms.where((r) => !r.isSpace).toList()
+          // Trouvé en audit interne (revue indépendante), confirmé contre le code réel du SDK
+          // (tag v0.29.13) : `client.rooms` inclut aussi bien les salons rejoints que les
+          // invitations en attente (`Membership.invite`) — sans distinction ici, une invitation
+          // (premier contact qui vous ajoute, ou invitation à un groupe) s'affichait exactement
+          // comme une conversation normale, mais taper dessus ouvrait un `ChatScreen` où
+          // envoyer un message échouait silencieusement : rien dans ce dépôt n'appelait jamais
+          // `Room.join()`, qui existe pourtant bel et bien dans le SDK (`room.dart`). Un contact
+          // invité n'avait donc tout simplement AUCUN moyen de répondre, ni via cette liste ni
+          // ailleurs — seul l'auteur de `startDirectChat`/l'invitation (qui rejoint lui-même
+          // automatiquement) pouvait écrire. On sépare donc les invitations, affichées avec
+          // Accepter/Refuser (`Room.join()` / `Room.leave()`), des conversations déjà actives.
+          final allRooms = client.rooms.where((r) => !r.isSpace).toList();
+          final invites = allRooms.where((r) => r.membership == Membership.invite).toList()
             ..sort((a, b) => (b.lastEvent?.originServerTs ?? DateTime(0))
                 .compareTo(a.lastEvent?.originServerTs ?? DateTime(0)));
-          if (rooms.isEmpty) {
+          final rooms = allRooms.where((r) => r.membership != Membership.invite).toList()
+            ..sort((a, b) => (b.lastEvent?.originServerTs ?? DateTime(0))
+                .compareTo(a.lastEvent?.originServerTs ?? DateTime(0)));
+          if (rooms.isEmpty && invites.isEmpty) {
             return Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
@@ -155,9 +174,12 @@ class RoomsScreen extends StatelessWidget {
           }
           return ListView.builder(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            itemCount: rooms.length,
+            itemCount: invites.length + rooms.length,
             itemBuilder: (context, i) {
-              final room = rooms[i];
+              if (i < invites.length) {
+                return _InviteTile(room: invites[i]);
+              }
+              final room = rooms[i - invites.length];
               final name = room.getLocalizedDisplayname();
               final lastTs = room.lastEvent?.originServerTs;
               return ListTile(
@@ -239,6 +261,72 @@ class RoomsScreen extends StatelessWidget {
 }
 
 enum _NewConversationKind { contact, group }
+
+/// Ligne d'invitation en attente (contact ou groupe) : `Room.join()`/`Room.leave()` sont les
+/// deux seuls appels qui existaient déjà dans le SDK pour ça — voir le commentaire au-dessus de
+/// `allRooms`/`invites` dans [RoomsScreen.build].
+class _InviteTile extends StatefulWidget {
+  const _InviteTile({required this.room});
+  final Room room;
+
+  @override
+  State<_InviteTile> createState() => _InviteTileState();
+}
+
+class _InviteTileState extends State<_InviteTile> {
+  bool _busy = false;
+
+  Future<void> _respond(bool accept) async {
+    setState(() => _busy = true);
+    try {
+      if (accept) {
+        await widget.room.join();
+      } else {
+        await widget.room.leave();
+      }
+      // Pas de setState ici : `Room.join()`/`leave()` déclenchent une synchro dont le résultat
+      // met déjà à jour `client.rooms` — c'est `_roomsSignature` (voir plus haut, qui inclut
+      // désormais `membership`) qui fera disparaître cette ligne au prochain `onSync`.
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Échec : $e')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = widget.room.getLocalizedDisplayname();
+    return ListTile(
+      leading: CircleAvatar(
+        backgroundColor: murmureAvatarColor(widget.room.id),
+        foregroundColor: Colors.white,
+        child: Text(name.isEmpty ? '?' : name[0].toUpperCase()),
+      ),
+      title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: const Text('Vous a invité·e à discuter'),
+      trailing: _busy
+          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Refuser',
+                  onPressed: () => _respond(false),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.check),
+                  tooltip: 'Accepter',
+                  onPressed: () => _respond(true),
+                ),
+              ],
+            ),
+    );
+  }
+}
 
 /// Ajout d'un contact par identifiant Matrix (collé ou scanné par QR) ; ouvre ou crée la
 /// conversation directe chiffrée (Megolm) avec lui.
@@ -351,7 +439,8 @@ class _AddContactScreenState extends State<AddContactScreen> {
   }
 }
 
-/// Conversation chiffrée (Olm/Megolm via vodozemac, géré en interne par le SDK Matrix).
+/// Conversation chiffrée (Olm/Megolm via libolm, géré en interne par le SDK Matrix — voir le
+/// commentaire détaillé dans main.dart sur le choix libolm/flutter_olm à cette version du SDK).
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.room, required this.callManager});
   final Room room;

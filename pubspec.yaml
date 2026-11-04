@@ -10,7 +10,17 @@ dependencies:
   flutter:
     sdk: flutter
   matrix: ^0.29.0
-  flutter_vodozemac: ^0.5.0
+  # Trouvé en audit interne (revue indépendante) : `matrix` résout ici en 0.29.13 (log de CI), une
+  # version qui utilise encore `package:olm` (libolm) en interne pour TOUT le chiffrement —
+  # vodozemac n'existe dans matrix-dart-sdk qu'à partir du tag v1.0.0. `flutter_vodozemac` était
+  # donc une dépendance morte (voir le commentaire dans lib/main.dart) ; `flutter_olm` fournit la
+  # bibliothèque native (`libolm.so`) dont `package:olm` a réellement besoin sur Android — pairing
+  # documenté par le paquet `olm` lui-même ("On Flutter for Android and iOS, depend on
+  # flutter_olm."). Non maintenu depuis ~2 ans (libolm est déprécié en amont au profit de
+  # vodozemac) : stopgap délibéré pour obtenir un chiffrement qui fonctionne réellement
+  # maintenant ; une migration vers une version de `matrix` >= v6.1.0 (vodozemac) reste
+  # recommandée comme chantier séparé, voir le commentaire détaillé dans lib/main.dart.
+  flutter_olm: ^2.0.0
   sqflite_sqlcipher: ^3.1.0
   flutter_secure_storage: ^9.2.2
   path_provider: ^2.1.3

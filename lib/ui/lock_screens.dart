@@ -57,9 +57,22 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   /// déjà utiliser cette constante. Les deux valaient 30 s, donc le comportement observé était
   /// correct par coïncidence ; changer `kRelockAfter` dans `config.dart` n'aurait silencieusement
   /// rien changé ici. Utilise maintenant [kRelockAfter] directement, source unique de vérité.
+  // Trouvé en audit interne (revue indépendante), confirmé contre la documentation officielle de
+  // `AppLifecycleState` (règle de synthèse des états) : au retour au premier plan, Flutter
+  // traverse `paused -> hidden -> inactive -> resumed` — `inactive` est donc aussi émis À LA
+  // REMONTÉE, juste avant `resumed`, pas seulement en descendant vers l'arrière-plan. En
+  // écoutant `inactive` ici pour horodater la mise en arrière-plan, ce code écrasait
+  // systématiquement `_backgroundedAt` avec « maintenant » juste avant que la branche `resumed`
+  // ne calcule l'écart — rendant le relock automatique après [kRelockAfter] inopérant en
+  // pratique dans le cas courant (l'app revient au premier plan normalement, pas tuée puis
+  // relancée) : l'écart mesuré était quasiment toujours ~0, jamais supérieur à [kRelockAfter].
+  // `paused` seul (Android : `Activity.onStop`, l'appli n'est plus du tout visible — pas la perte
+  // de focus transitoire d'un volet de notifications ou d'un appel entrant que couvre `inactive`)
+  // est le signal fiable d'un VRAI passage en arrière-plan : il n'est, lui, traversé qu'en
+  // descendant, jamais en remontant vers `resumed`.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused) {
       _backgroundedAt = DateTime.now();
     } else if (state == AppLifecycleState.resumed) {
       final since = _backgroundedAt;

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_vodozemac/flutter_vodozemac.dart' as vod;
 import 'package:matrix/matrix.dart';
 // `KeyVerificationMethod` vit dans le barrel séparé `package:matrix/encryption.dart`, pas dans
 // `package:matrix/matrix.dart` (voir le même commentaire dans verification_manager.dart).
@@ -24,20 +23,32 @@ final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Trouvé en audit interne, et sérieux : `flutter_vodozemac` est bien déclaré dans pubspec.yaml
-  // et cité dans plusieurs commentaires de ce dépôt comme le moteur Olm/Megolm réellement utilisé,
-  // mais rien n'appelait jamais son `init()` — qui charge la bibliothèque native (Rust via
-  // flutter_rust_bridge) sur laquelle reposent TOUTES les opérations de chiffrement du SDK Matrix,
-  // y compris la création même du compte et la connexion. Vérifié contre l'implémentation de
-  // référence du même éditeur (Famedly) que matrix-dart-sdk, FluffyChat, dont `main()` appelle
-  // explicitement `vod.init(...)` avant tout usage du SDK — jamais en interne par le SDK lui-même.
-  // Sans cet appel, soit `Client(...).init()` plus bas lève une exception (l'écran d'erreur de
-  // démarrage s'affiche, au moins visible), soit — plus grave, non exclu sans test sur appareil
-  // réel — une tentative plus tardive d'opération cryptographique échoue silencieusement ailleurs
-  // dans l'appli. `wasmPath` (utilisé par FluffyChat) ne s'applique qu'aux builds web ; Murmure est
-  // Android uniquement, donc aucun argument n'est nécessaire ici (la bibliothèque native est
-  // chargée depuis l'emplacement par défaut du plugin).
-  await vod.init();
+  // Trouvé en audit interne (revue indépendante, croisée avec le code source réel de
+  // matrix-dart-sdk au tag v0.29.13 — version que `matrix: ^0.29.0` résout effectivement ici,
+  // confirmé par le log de CI — et avec FluffyChat, l'app de référence du même éditeur) :
+  // `flutter_vodozemac`/`vod.init()` (précédemment appelé ici) ne servait à RIEN pour cette
+  // version du SDK. `vodozemac` n'a été introduit dans matrix-dart-sdk qu'à partir du tag v1.0.0
+  // (migration majeure, juin 2025) ; à v0.29.13, `cross_signing.dart`, `encryption.dart`,
+  // `key_manager.dart` et `olm_manager.dart` importent tous `package:olm/olm.dart` (libolm, pas
+  // vodozemac) et c'est OlmManager qui appelle lui-même `olm.init()` en interne, à l'intérieur de
+  // `Client.init()` (voir `Encryption.init()` au tag v0.29.13) — jamais l'appli elle-même.
+  // Appeler `vod.init()` ici initialisait donc une bibliothèque (vodozemac) que le SDK ne regarde
+  // jamais à cette version, pendant que celle qu'il utilise réellement (`olm`, via
+  // `DynamicLibrary.open('libolm.so')` sur Android, voir `ffi_base.dart` du paquet `olm`) n'avait
+  // aucun `.so` fourni dans l'APK : aucun paquet de ce dépôt ne livrait `libolm.so` (`flutter_olm`
+  // n'était pas déclaré). Résultat réel, non testé sur appareil faute de toolchain Flutter dans ce
+  // bac à sable mais déduit du code source des deux paquets : `DynamicLibrary.open` échoue dès le
+  // premier accès aux bindings `olm`, donc dès `client.init()` plus bas, pour CHAQUE lancement —
+  // chiffrement de bout en bout indisponible, pas seulement affaibli. Corrigé en ajoutant
+  // `flutter_olm` à pubspec.yaml (fournit `libolm.so` pour Android/iOS, le pairing documenté par
+  // le paquet `olm` lui-même) et en retirant `flutter_vodozemac`, dépendance morte à cette version
+  // du SDK. LIMITE HONNÊTE, et ouverte comme chantier séparé : `libolm`/`flutter_olm` sont tous
+  // deux dépréciés en amont (flutter_olm sans publication depuis ~2 ans) au profit de vodozemac ;
+  // une migration délibérée vers une version de matrix-dart-sdk >= v6.1.0 (la plus ancienne dont
+  // la contrainte `vodozemac` reste compatible avec `flutter_vodozemac: ^0.5.0`) serait la
+  // correction propre à terme, mais implique des changements d'API cassants cumulés sur les appels
+  // WebRTC (migrations VoIP des versions 2.0.0 à 6.1.0) qu'il serait irresponsable de faire à
+  // l'aveugle, sans compilateur Flutter local pour les valider un par un.
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
   await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
   runApp(const MurmureApp());
@@ -115,7 +126,22 @@ class _MurmureAppState extends State<MurmureApp> {
       // pour l'OPSEC.
       final client = Client(
         'Murmure',
-        databaseBuilder: (_) async => MatrixSdkDatabase('murmure', database: db),
+        // Trouvé en audit interne (revue indépendante), confirmé contre le code source réel de
+        // matrix-dart-sdk (tag v0.29.13, `matrix_sdk_database.dart`) : le constructeur de
+        // `MatrixSdkDatabase` ne fait qu'enregistrer ses paramètres — `_collection` (champ `late`)
+        // n'est affecté que dans `open()`, une méthode SÉPARÉE que `Client.init()` n'appelle
+        // JAMAIS lui-même pour vous (vérifié : aucun `.open()` dans `client.dart`). C'est l'appli
+        // qui doit le faire, exactement comme le fait l'exemple officiel du SDK
+        // (`example/main.dart`) et sa propre suite de tests (`test/fake_database.dart`) — les deux
+        // appellent `await db.open()` juste après l'avoir construite. Sans cet appel, le premier
+        // accès à la base par `Client.init()` (`database?.getClient(...)`) levait une
+        // `LateInitializationError` sur `_collection` — crash au tout premier lancement, avant même
+        // l'écran d'onboarding, à chaque fois.
+        databaseBuilder: (_) async {
+          final database = MatrixSdkDatabase('murmure', database: db);
+          await database.open();
+          return database;
+        },
         logLevel: Level.wtf,
         httpClient: await net.httpClient(),
         // Trouvé en audit interne (revue indépendante) : sans ce paramètre, `Client` retombe sur
@@ -211,10 +237,31 @@ class _Home extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!client.isLogged()) {
-      return OnboardingScreen(client: client);
-    }
-    return RoomsScreen(client: client, callManager: callManager);
+    // Trouvé en audit interne (revue indépendante), confirmé contre le code réel : ce widget
+    // était un simple `StatelessWidget` qui ne lisait `client.isLogged()` qu'au moment de son
+    // propre `build()`, sans jamais s'abonner à `client.onLoginStateChanged` — alors que
+    // `onboarding_screen.dart` affirmait dans un commentaire (« Rien d'autre à faire : MurmureApp
+    // réagit à client.isLogged() ») que la réussite de `Account.register()`/connexion suffisait à
+    // faire réapparaître ce widget avec `RoomsScreen`. Faux : rien ne déclenchait jamais de
+    // nouveau `build()` après la création du compte — `_MurmureAppState._boot()` ne s'exécute
+    // qu'une fois, à `initState()`. L'écran d'onboarding restait donc affiché indéfiniment après
+    // une inscription pourtant réussie côté serveur, sans aucun message d'erreur (le compte
+    // existe, seule l'UI ne le sait pas) : il fallait fermer et relancer l'appli pour voir enfin
+    // la messagerie. `onLoginStateChanged` (`CachedStreamController`, même famille que
+    // `client.onSync` déjà utilisé dans rooms_screen.dart) a `.value` ET `.stream`, donc
+    // `StreamBuilder` avec `initialData` évite tout flash de l'écran d'onboarding au premier
+    // rendu d'une session déjà connectée.
+    return StreamBuilder<LoginState>(
+      stream: client.onLoginStateChanged.stream,
+      initialData: client.onLoginStateChanged.value,
+      builder: (context, snapshot) {
+        final loggedIn = snapshot.data == LoginState.loggedIn;
+        if (!loggedIn) {
+          return OnboardingScreen(client: client);
+        }
+        return RoomsScreen(client: client, callManager: callManager);
+      },
+    );
   }
 }
 
