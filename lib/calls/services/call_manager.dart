@@ -61,6 +61,49 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   CallSession? _active;
   StreamSubscription<CallState>? _activeStateSub;
+  DateTime? _activeSince;
+
+  /// Trouvé en audit interne (revue croisée à 5 IA, point de vigilance soulevé indépendamment
+  /// par ChatGPT et Qwen sur le correctif [activeCallNotifier] ci-dessous, demande explicite de
+  /// l'utilisateur d'implémenter un garde-fou) : si `matrix-dart-sdk` ne signale JAMAIS
+  /// `CallState.kEnded` pour une session donnée — coupure réseau silencieuse côté correspondant,
+  /// bug du SDK, événement `m.call.hangup` perdu — ni [_watchActive] ni [handleCallEnded]/
+  /// [handleMissedCall] ne libéreront jamais [_active]. [LockGate] (voir `ui/lock_screens.dart`)
+  /// différerait alors le reverrouillage automatique INDÉFINIMENT, jusqu'au prochain redémarrage
+  /// de l'appli — un échec OUVERT (fail-open) sur la fonctionnalité de sécurité que ce correctif
+  /// vient justement ajouter. Deux filets de sûreté périodiques, aucun des deux ne touchant
+  /// jamais à la session WebRTC elle-même (on ne raccroche RIEN ici, on ne fait que relâcher
+  /// notre propre drapeau si l'état qu'il reflète semble obsolète) :
+  /// 1. Re-synchronisation : si [_active] existe déjà mais que `.state` vaut `kEnded` (le flux
+  ///    [_activeStateSub] a pu se fermer sans émettre cette valeur, ou l'abonnement a pu rater
+  ///    l'événement), on libère immédiatement — défensif, redondant avec [_watchActive] en
+  ///    fonctionnement normal.
+  /// 2. Durée maximale : si [_active] reste non-null en continu depuis plus de
+  ///    [_maxActiveCallAge] (6 h, volontairement bien au-delà de tout appel réel), on considère
+  ///    l'état comme obsolète et on le libère quand même. Un vrai appel de plus de 6 h perdrait
+  ///    alors sa protection contre le relock — un compromis délibéré : le risque qu'un SDK
+  ///    défaillant désactive le verrou de sécurité PERMANENTE pour le reste de la session de
+  ///    l'appli est pire que celui, extrêmement rare, de reverrouiller pendant un appel
+  ///    anormalement long.
+  static const _maxActiveCallAge = Duration(hours: 6);
+  Timer? _watchdogTimer;
+
+  void _startWatchdog() {
+    _watchdogTimer ??= Timer.periodic(const Duration(minutes: 5), (_) {
+      final active = _active;
+      final since = _activeSince;
+      if (active == null) return;
+      final stale = active.state == CallState.kEnded ||
+          (since != null && DateTime.now().difference(since) > _maxActiveCallAge);
+      if (stale) {
+        _active = null;
+        _activeSince = null;
+        activeCallNotifier.value = false;
+        _activeStateSub?.cancel();
+        _activeStateSub = null;
+      }
+    });
+  }
 
   @override
   bool get canHandleNewCall => _active == null;
@@ -85,11 +128,14 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// dès `CallState.kEnded`, quoi qu'il arrive par ailleurs côté SDK.
   void _watchActive(CallSession session) {
     _active = session;
+    _activeSince = DateTime.now();
     activeCallNotifier.value = true;
+    _startWatchdog();
     _activeStateSub?.cancel();
     _activeStateSub = session.onCallStateChanged.stream.listen((state) {
       if (state == CallState.kEnded && _active == session) {
         _active = null;
+        _activeSince = null;
         activeCallNotifier.value = false;
         _activeStateSub?.cancel();
         _activeStateSub = null;
@@ -175,6 +221,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   Future<void> handleCallEnded(CallSession session) async {
     if (_active == session) {
       _active = null;
+      _activeSince = null;
       activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;
@@ -185,6 +232,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   Future<void> handleMissedCall(CallSession session) async {
     if (_active == session) {
       _active = null;
+      _activeSince = null;
       activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;
