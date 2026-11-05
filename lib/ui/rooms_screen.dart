@@ -774,9 +774,18 @@ class _ChatScreenState extends State<ChatScreen> {
       // d'appareil) lors de sa recompression : exactement la donnée que
       // [stripExifAndReencode] existe pour retirer avant tout envoi pouvait donc rester en
       // clair sur le disque, hors de toute garantie d'effacement d'urgence documentée
-      // ailleurs dans ce dépôt. Best-effort : ne bloque jamais l'envoi sur ce nettoyage.
+      // ailleurs dans ce dépôt.
+      //
+      // Un simple `delete()` ne fait que désindexer le fichier : les données restent lisibles
+      // sur la mémoire flash jusqu'à réécriture par le système (même threat model que documenté
+      // dans `MediaCache` — vol/saisie de l'appareil juste après l'envoi d'une photo prise à
+      // l'instant, GPS/horodatage inclus). [MediaCache.wipe] applique ici le même traitement
+      // (écrasement à zéro puis suppression) que pour les médias reçus, bien que ce fichier ne
+      // vive pas dans le répertoire `murmure_media` — [MediaCache.wipe] opère sur un [File]
+      // quelconque, peu importe son emplacement. Toujours best-effort : ne bloque jamais l'envoi
+      // sur ce nettoyage.
       try {
-        await File(picked.path).delete();
+        await MediaCache.wipe(File(picked.path));
       } catch (_) {}
       if (mounted) setState(() => _sendingMedia = false);
     }
