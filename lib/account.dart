@@ -169,6 +169,28 @@ class Account {
     // `CallOpsecStore.wipe()` pour le détail.
     await CallOpsecStore.wipe();
     final dir = await getApplicationSupportDirectory();
+    // Trouvé en audit interne (pas une proposition externe) : `UpdateChecker.download()` (voir
+    // lib/update/update_checker.dart) écrit l'APK vérifié dans
+    // `<support>/updates/murmure-<versionCode>.apk` — un répertoire créé APRÈS l'écriture de cette
+    // méthode, que la boucle ci-dessous ne connaissait donc pas, exactement le même défaut déjà
+    // trouvé et corrigé deux fois dans ce fichier pour `murmure_calls.db` (voir
+    // `CallOpsecStore.wipe`) et pour les fragments WAL/SHM des bases SQLCipher juste en dessous.
+    // Conséquence concrète : après un essuyage de panique ou une suppression de compte, un APK
+    // déjà téléchargé (donc la preuve qu'une mise à jour — avec son numéro de version et son
+    // horodatage de fichier — a été récupérée sur ce téléphone, à un instant donné) survivait
+    // intact à un geste dont la documentation ci-dessus promet qu'il « détruit tout ce que Murmure
+    // stocke sur ce téléphone ». Un APK n'est pas un secret déchiffrable (aucune clé n'en dépend),
+    // mais sa seule présence est exactement le type de trace forensique que ce fichier existe pour
+    // éliminer — recherché lors d'un examen du téléphone après la saisie qu'il est censé anticiper.
+    // Best-effort, comme le reste de cette méthode : rien ici ne doit jamais faire échouer
+    // l'essuyage dans son ensemble à cause d'un sous-répertoire optionnel qui peut très bien
+    // n'avoir jamais existé (aucune mise à jour n'a jamais été téléchargée).
+    try {
+      final updatesDir = Directory(p.join(dir.path, 'updates'));
+      if (await updatesDir.exists()) {
+        await updatesDir.delete(recursive: true);
+      }
+    } catch (_) {}
     for (final name in [_dbName, kMeshDbName]) {
       final path = p.join(dir.path, name);
       try {

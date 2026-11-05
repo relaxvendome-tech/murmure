@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -746,6 +747,22 @@ class Mesh {
     try {
       await sqlcipher.deleteDatabase(path);
     } catch (_) {}
+    // Trouvé en audit interne (pas une proposition externe) : cette méthode reproduisait le même
+    // défaut déjà corrigé ailleurs dans ce dépôt pour les deux autres bases SQLCipher (voir
+    // `Account.wipeLocal` et `CallOpsecStore.wipe`) — les fragments `-wal`/`-shm`/`-journal` ne
+    // sont pas nettoyés par `deleteDatabase` quand le fichier principal a déjà disparu. Aujourd'hui
+    // sans conséquence pratique : le seul appelant de [reset], `Account.wipeLocal`, nettoie déjà
+    // ces fragments pour `kMeshDbName` dans sa propre boucle, juste après cet appel. Mais [reset]
+    // se présente comme une remise à zéro complète et autonome de la base maillée (identité,
+    // cliquets, messages) — tout futur appel direct (ex. un bouton « réinitialiser le mode
+    // maillé » sans passer par un essuyage complet du compte) hériterait silencieusement du même
+    // défaut que ces deux autres correctifs visaient justement à éliminer. Corrigé ici aussi, pour
+    // que cette garantie ne dépende pas de l'ordre des appels dans `wipeLocal`.
+    for (final suffix in ['-wal', '-shm', '-journal']) {
+      try {
+        await File('$path$suffix').delete();
+      } catch (_) {}
+    }
   }
 }
 
