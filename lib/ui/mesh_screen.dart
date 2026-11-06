@@ -229,7 +229,21 @@ class _MeshScreenState extends State<MeshScreen> {
     final text = textCtrl.text.trim();
     textCtrl.dispose();
     if (sent != true || text.isEmpty) return;
-    await Mesh.instance.queueMessage(recipientPublicKey: contact.peer, text: text);
+    try {
+      await Mesh.instance.queueMessage(recipientPublicKey: contact.peer, text: text);
+    } on MeshMessageTooLongException catch (e) {
+      // Trouvé en audit interne, voir le commentaire de meshMaxPlaintextBytes dans
+      // mesh_crypto.dart : sans ce rattrapage, un message trop long pour une enveloppe mesh était
+      // mis en file sans erreur, puis silencieusement ignoré pour toujours au moment du relais —
+      // l'utilisateur croyait son message parti alors qu'il ne le serait jamais.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            'Message trop long pour le mode Bluetooth (${e.actualBytes} octets, max ${e.maxBytes}) '
+            '— raccourcissez-le.'),
+      ));
+      return;
+    }
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(

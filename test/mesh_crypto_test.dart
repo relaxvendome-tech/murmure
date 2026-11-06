@@ -7,10 +7,14 @@
 // celles dont dépend le threat model documenté en tête de mesh_crypto.dart : confidentialité
 // persistante du cliquet, intégrité de l'enveloppe via l'AAD du GCM, et round-trip chiffrement/
 // déchiffrement.
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:murmure/mesh/mesh_crypto.dart';
+
+/// Dart n'a pas d'opérateur `*` sur String (contrairement à Python) : on répète via `List.filled`.
+String _repeat(String s, int n) => List.filled(n, s).join();
 
 void main() {
   group('meshB64 / meshUnB64', () {
@@ -317,6 +321,50 @@ void main() {
 
       final decrypted = await meshDecryptWithKey(messageKey: messageKey, envelope: relayedTwice);
       expect(decrypted, plaintext);
+    });
+  });
+
+  group('meshMaxPlaintextBytes / meshPlaintextFits', () {
+    test('une enveloppe chiffrant exactement meshMaxPlaintextBytes tient dans '
+        'meshMaxEnvelopeBytes une fois sérialisée', () async {
+      final plaintext = _repeat('a', meshMaxPlaintextBytes);
+      expect(utf8.encode(plaintext).length, meshMaxPlaintextBytes);
+      expect(meshPlaintextFits(plaintext), isTrue);
+
+      final envelope = await meshEncryptWithKey(
+        messageKey: randomBytes(32),
+        chainCounter: 0,
+        senderPublicKey: randomBytes(32),
+        recipientHint: randomBytes(32),
+        plaintext: plaintext,
+      );
+      expect(envelope.serialize().length, meshMaxEnvelopeBytes);
+    });
+
+    test('un seul octet de plus dépasse meshMaxEnvelopeBytes une fois sérialisée — exactement '
+        'le cas que Mesh._tryExchange ignore silencieusement pour toujours (voir mesh.dart), '
+        'd\'où la validation anticipée dans Mesh.queueMessage', () async {
+      final plaintext = _repeat('a', meshMaxPlaintextBytes + 1);
+      expect(meshPlaintextFits(plaintext), isFalse);
+
+      final envelope = await meshEncryptWithKey(
+        messageKey: randomBytes(32),
+        chainCounter: 0,
+        senderPublicKey: randomBytes(32),
+        recipientHint: randomBytes(32),
+        plaintext: plaintext,
+      );
+      expect(envelope.serialize().length, meshMaxEnvelopeBytes + 1);
+    });
+
+    test('compte les octets UTF-8, pas les caractères : un emoji multi-octets peut faire '
+        'dépasser la limite avant même d\'atteindre meshMaxPlaintextBytes caractères', () {
+      // '😀' (U+1F600) encode sur 4 octets en UTF-8 mais compte pour 2 "code units" UTF-16 /
+      // caractères Dart — un comptage par caractère sous-estimerait la taille réelle transportée.
+      final emojiOnly = _repeat('😀', meshMaxPlaintextBytes ~/ 4);
+      expect(emojiOnly.length, lessThan(utf8.encode(emojiOnly).length));
+      expect(meshPlaintextFits(emojiOnly), isTrue);
+      expect(meshPlaintextFits('$emojiOnly😀😀😀😀'), isFalse);
     });
   });
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -516,8 +517,18 @@ class Mesh {
   }
 
   /// Met un message en file pour un contact, à relayer dès qu'un appareil Murmure est croisé.
-  Future<void> queueMessage({required Uint8List recipientPublicKey, required String text}) =>
-      _serialized(() => _queueMessageLocked(recipientPublicKey: recipientPublicKey, text: text));
+  ///
+  /// Lève [MeshMessageTooLongException] si [text] ne tient pas dans une seule enveloppe mesh (voir
+  /// [meshMaxPlaintextBytes]) — vérifié ICI, avant d'entrer dans la section sérialisée qui avance
+  /// le cliquet d'envoi, pour ne jamais consommer un rang de cliquet pour un message qui ne pourra
+  /// de toute façon jamais être relayé (voir le commentaire de [meshMaxPlaintextBytes]).
+  Future<void> queueMessage({required Uint8List recipientPublicKey, required String text}) {
+    final bytes = utf8.encode(text).length;
+    if (bytes > meshMaxPlaintextBytes) {
+      throw MeshMessageTooLongException(meshMaxPlaintextBytes, bytes);
+    }
+    return _serialized(() => _queueMessageLocked(recipientPublicKey: recipientPublicKey, text: text));
+  }
 
   Future<void> _queueMessageLocked({required Uint8List recipientPublicKey, required String text}) async {
     final me = await identity();

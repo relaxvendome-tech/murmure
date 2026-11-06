@@ -256,6 +256,51 @@ class MeshEnvelope {
       ttl <= 0 || DateTime.now().difference(createdAt).inHours > maxAgeHours;
 }
 
+/// Octets fixes d'une enveloppe sérialisée (voir [MeshEnvelope.serialize]), hors texte chiffré :
+/// id (16) + clé publique expéditeur (32) + indice destinataire (32) + compteur de cliquet (4) +
+/// nonce (12) + longueur du texte chiffré (2) + MAC (16) + ttl (1) + horodatage (4).
+const int meshEnvelopeFixedOverheadBytes = 16 + 32 + 32 + 4 + 12 + 2 + 16 + 1 + 4; // = 119
+
+/// Taille maximale d'une enveloppe sérialisée tolérée au moment du relais (voir
+/// `Mesh._tryExchange` dans mesh.dart : `if (bytes.length > 512) continue;`), au-delà du MTU
+/// négocié (517, soit 514 octets utiles, voir le commentaire de `_tryExchange`).
+const int meshMaxEnvelopeBytes = 512;
+
+/// Taille maximale, en octets APRÈS encodage UTF-8 (pas en nombre de caractères — un emoji ou un
+/// accent composé peut occuper plusieurs octets), d'un texte en clair qui tient dans une seule
+/// enveloppe mesh. Le chiffrement AES-GCM ne change pas la longueur (texte chiffré et texte en
+/// clair font le même nombre d'octets ; seul le MAC, déjà compté dans [meshEnvelopeFixedOverheadBytes],
+/// s'ajoute à part) : `meshMaxEnvelopeBytes - meshEnvelopeFixedOverheadBytes`.
+///
+/// Trouvé en audit interne : rien ne vérifiait cette limite avant la mise en file d'un message
+/// (voir `Mesh.queueMessage` dans mesh.dart). Un texte plus long franchissait silencieusement
+/// toutes les étapes jusqu'au relais, où `Mesh._tryExchange` l'ignorait (`continue`) À CHAQUE
+/// tentative, pour toujours — un message que l'interface annonçait « mis en file » ne partait en
+/// réalité jamais, sans qu'aucune erreur ne remonte à l'utilisateur. Pire : avant ce correctif,
+/// `_queueMessageLocked` faisait déjà avancer le cliquet d'envoi (consommant un rang pour de bon,
+/// voir mesh.dart:_nextSendKey) avant de découvrir que l'enveloppe ne pourrait jamais être
+/// relayée — un rang de cliquet gaspillé pour un message mort-né. Validé maintenant AVANT toute
+/// consommation de cliquet (voir `Mesh.queueMessage`), via [MeshMessageTooLongException].
+const int meshMaxPlaintextBytes = meshMaxEnvelopeBytes - meshEnvelopeFixedOverheadBytes; // 393
+
+/// Vrai si [plaintext], une fois encodé en UTF-8, tient dans une seule enveloppe mesh — voir
+/// [meshMaxPlaintextBytes].
+bool meshPlaintextFits(String plaintext) => utf8.encode(plaintext).length <= meshMaxPlaintextBytes;
+
+/// Levée par `Mesh.queueMessage` (mesh.dart) quand [meshPlaintextFits] est faux pour le texte
+/// fourni — l'appelant (voir ui/mesh_screen.dart) doit la montrer clairement à l'utilisateur
+/// plutôt que de mettre en file un message qui ne sera jamais relayé (voir le commentaire de
+/// [meshMaxPlaintextBytes]).
+class MeshMessageTooLongException implements Exception {
+  const MeshMessageTooLongException(this.maxBytes, this.actualBytes);
+  final int maxBytes;
+  final int actualBytes;
+
+  @override
+  String toString() =>
+      'MeshMessageTooLongException: $actualBytes octets > $maxBytes octets max par enveloppe mesh';
+}
+
 /// Trouvé en audit interne : seul le TEXTE du message passait par l'AES-GCM — l'identifiant,
 /// l'expéditeur, le [recipientHint], le rang de cliquet et l'horodatage voyageaient à côté, en
 /// clair et SANS AUCUNE protection d'intégrité (le tag GCM n'authentifie que ce qu'on lui donne à
