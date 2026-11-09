@@ -116,6 +116,15 @@ jamais configurer d'adresse du tout si ce canal de trafic supplémentaire ne l'i
 
 ## Ce qui reste un TODO honnête
 
+Vérifié contre le code : le flux décrit plus haut (https obligatoire, SHA-256 avant installation,
+`minSupportedVersionCode` → mise à jour « nécessaire » sans rien forcer, aucune vérification
+automatique) correspond à `lib/update/update_checker.dart` et `lib/ui/update_screen.dart`, et le
+script `scripts/release/publish_update.sh` existe. Ce qui n'existe PAS : aucune signature du
+manifeste ni de l'APK par une clé administrateur (voir `docs/ADMIN_KEY.md`, conception seulement) ;
+le manifeste et l'APK ne sont protégés que par HTTPS + SHA-256 (même serveur) et par la
+vérification de signature d'Android à l'installation. Le test de bout en bout sur un appareil réel
+n'est pas documenté.
+
 1. ~~`scripts/release/publish_update.sh` n'échappe pas les guillemets dans `notes`~~ — corrigé en
    audit interne : le script échappe désormais barre oblique inversée, guillemets, retours à la
    ligne/chariot et tabulations dans `versionName`, `apkUrl` et `notes` avant de les écrire dans

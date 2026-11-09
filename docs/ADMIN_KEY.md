@@ -1,12 +1,18 @@
 # Clé maîtresse (administrateur) — ce qu'elle est, ce qu'elle n'est pas
 
+> **État réel : conception uniquement.** Aucune clé publique n'est intégrée dans `lib/config.dart`,
+> aucun code de `lib/` ne vérifie de signature (ni pour les alertes, ni pour les mises à jour) et
+> aucun mécanisme d'alerte diffusée n'existe. Le tableau ci-dessous décrit ce qui est prévu, pas ce
+> qui fonctionne. Seule la vérification SHA-256 de l'APK (`lib/update/update_checker.dart`) existe
+> aujourd'hui, voir `docs/UPDATES.md`.
+
 Ce document fixe par écrit ce qui a été convenu : une seule personne (vous) détient cette clé, et
 elle ne donne **jamais** accès au contenu d'un message. Il explique pourquoi, et comment la créer,
 sauvegarder et utiliser en pratique.
 
 ## Pourquoi cette limite existe
 
-Murmure chiffre chaque message de bout en bout (Olm/Megolm, via vodozemac) : seul le téléphone du
+Murmure chiffre chaque message de bout en bout (Olm/Megolm, via libolm/`flutter_olm` avec `matrix` 0.29.x ; vodozemac n'est pas encore utilisé) : seul le téléphone du
 destinataire peut le déchiffrer. Une « clé maîtresse » capable de lire les messages de n'importe
 qui serait, techniquement, une porte dérobée — et une porte dérobée s'ouvre pour n'importe qui qui
 met la main sur la clé, pas seulement vous : vol du téléphone, saisie judiciaire, piratage du
@@ -14,7 +20,7 @@ serveur de build, erreur humaine. Dans le contexte d'usage visé par cette appli
 c'est exactement le scénario à exclure. Aucune clé de ce type n'existe dans Murmure 3.0, et aucune
 n'en sera ajoutée.
 
-## Ce que la clé maîtresse couvre réellement
+## Ce que la clé maîtresse couvrira (prévu, non implémenté)
 
 | Pouvoir | Comment |
 |---|---|
@@ -62,9 +68,10 @@ ssss-combine -t 2
 
 ## Ce qui reste à faire dans ce dépôt
 
-- [ ] Générer la paire de clés (vous, hors ligne) et fournir uniquement `admin_master.pub` pour
+- [ ] (action de votre part, non vérifiable depuis le dépôt : `lib/config.dart` ne contient aucune clé) Générer la paire de clés (vous, hors ligne) et fournir uniquement `admin_master.pub` pour
       qu'elle soit intégrée dans `lib/config.dart`
-- [ ] Implémenter la vérification de signature côté appli pour les alertes diffusées
-- [ ] Mettre en place l'outil de signature des artefacts de build (script séparé, jamais exécuté
+- [ ] Implémenter la vérification de signature côté appli pour les alertes diffusées (non fait : aucune
+      occurrence de signature/alerte dans `lib/`, ni canal de diffusion, y compris sur le maillage)
+- [ ] Mettre en place l'outil (non fait : `scripts/release/` ne contient que `publish_update.sh`, qui calcule un SHA-256 mais ne signe rien) de signature des artefacts de build (script séparé, jamais exécuté
       automatiquement par GitHub Actions avec la clé privée — la signature des releases reste un
       geste manuel de votre part, hors CI)

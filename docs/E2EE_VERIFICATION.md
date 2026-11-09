@@ -1,8 +1,20 @@
 # Vérification des appareils (clés E2EE)
 
-## État actuel (mise à jour : vérification manuelle d'empreinte implémentée)
+## État actuel (vérifié contre `lib/`)
 
-Depuis cette passe, Murmure implémente la partie la plus immédiate du constat ci-dessous :
+| Capacité | État | Preuve |
+|---|---|---|
+| Liste des appareils d'un contact + empreinte Ed25519 en clair, marquage manuel « vérifié » après comparaison hors bande | Fait (conversations directes seulement) | `lib/ui/device_verification_screen.dart` |
+| Indicateur vérifié / non vérifié dans la conversation (bouclier vert/orange) | Fait pour les conversations directes ; rien pour les groupes (`null`) | `lib/ui/rooms_screen.dart` (`_deviceVerificationStatus`) |
+| Vérification interactive SAS par emojis (initiateur et destinataire) | Fait, **jamais testée entre deux appareils réels** | `lib/ui/sas_verification_screen.dart`, `lib/verification/verification_manager.dart` (demande entrante), bouton dans `device_verification_screen.dart` (`_startSas`) |
+| Méthode annoncée au SDK : `emoji` uniquement (sans cela le SDK annulait toute demande) | Fait | `lib/main.dart` (`verificationMethods`) |
+| Variante QR (`qrShow`/`qrScan`/`reciprocate`) | Non faite : l'écran SAS annule proprement si cet état survient | `lib/ui/sas_verification_screen.dart` |
+| Bootstrap cross-signing + SSSS + sauvegarde de clés | Non fait : aucun appel à `bootstrap`/`ssss` dans `lib/` ; chaque appareil se vérifie individuellement | grep `lib/` |
+| Vérification pour les conversations de groupe | Non fait | `rooms_screen.dart` |
+| Refuser d'envoyer à un appareil non vérifié | Non fait, volontairement : afficher l'état ne bloque rien | `device_verification_screen.dart` (texte d'avertissement) |
+| Avertissement dans l'UI que les appareils non vérifiés restent acceptés | Fait | `device_verification_screen.dart` |
+
+Détail de ce qui est fait côté UI :
 - `lib/ui/device_verification_screen.dart` liste les appareils connus d'un contact (conversation
   directe uniquement pour l'instant), affiche l'empreinte Ed25519 de chacun en clair (groupée par
   blocs de 4 caractères pour une comparaison visuelle), et un bouton « Vérifier » qui, après
@@ -12,14 +24,19 @@ Depuis cette passe, Murmure implémente la partie la plus immédiate du constat 
   (bouclier vert si tous les appareils connus du contact sont vérifiés, bouclier orange sinon)
   qui ouvre cet écran.
 
-Ce n'est **pas** une vérification SAS interactive (comparaison d'emojis entre les deux appareils,
-qui authentifie aussi l'absence d'un adversaire actif pendant la vérification elle-même). C'est
-une comparaison manuelle d'empreinte, qui dépend entièrement de la rigueur de l'utilisateur et
-d'un canal hors bande fiable (voir la limite SAS ci-dessous, toujours non résolue).
+- `lib/ui/sas_verification_screen.dart` + `lib/verification/verification_manager.dart` : vérification
+  SAS interactive par comparaison d'emojis (demande sortante via `startVerification()`, demande
+  entrante via `onKeyVerificationRequest`, refus par `rejectSas()`/`cancel()` en cas de différence).
+  Elle n'a été vérifiée que par lecture du SDK et compilation, pas par un échange réel entre deux
+  téléphones.
+
+La comparaison manuelle d'empreinte reste disponible en parallèle : elle dépend entièrement de la
+rigueur de l'utilisateur et d'un canal hors bande fiable. Aucune de ces vérifications n'empêche
+l'envoi à un appareil non vérifié (voir la fin de ce document).
 
 **Mise à jour (vérification croisée contre le vrai code source, pas la documentation publiée) :**
-les sections ci-dessous (« Pourquoi ce n'est pas corrigé » et « Ce qu'il reste à faire »)
-dataient d'une passe où la seule source disponible était la documentation pub.dev, jugée non
+les sections historiques ci-dessous (« Constat d'audit initial », « Pourquoi ce n'est pas corrigé » et
+« Ce qu'il reste à faire », conservées pour mémoire) dataient d'une passe où la seule source disponible était la documentation pub.dev, jugée non
 fiable pour la version exacte épinglée (voir le constat sur la redirection silencieuse vers
 11.0.0). Cette passe a pu lire directement le code source de `matrix-dart-sdk` au tag `v0.29.0`
 (dépôt cloné localement, licence AGPL-3.0 — voir `LICENSE-NOTICE.md` pour ce que cela implique
@@ -94,19 +111,19 @@ l'état `error` plutôt qu'un flux silencieusement cassé.
 
 **Ce qui reste un TODO honnête et précis, pas vague :**
 1. Décider si la variante QR est utile pour Murmure (elle suppose de pouvoir scanner l'écran d'un
-   autre appareil physiquement — plausible dans le contexte visé de manifestants qui se croisent,
-   mais demande une caméra/un scanner QR dans l'UI, pas encore présent dans ce dépôt) ou si seule
-   la comparaison emoji/chiffres (plus simple à construire, fonctionne par lecture à voix haute)
-   est implémentée dans un premier temps.
-2. Implémenter l'écran de vérification SAS (emojis + confirmation) en réutilisant l'écran
-   d'empreinte existant comme base, avec les noms d'API ci-dessus — aucune supposition restante
-   sur les noms de méthodes/états pour la variante emoji/chiffres.
-3. Implémenter le bootstrap cross-signing + SSSS + sauvegarde de clés avec l'API ci-dessus —
+   autre appareil physiquement — plausible dans le contexte visé de manifestants qui se croisent).
+   Un scanner QR existe désormais dans le dépôt (`flutter_zxing`, `lib/ui/qr_screens.dart`, utilisé
+   pour l'ajout de contacts) mais il n'est PAS branché sur la vérification : seul `emoji` est annoncé
+   au SDK. **Non fait.**
+2. ~~Implémenter l'écran de vérification SAS (emojis + confirmation)~~ — **fait** :
+   `lib/ui/sas_verification_screen.dart`, `lib/verification/verification_manager.dart`. Reste à
+   tester sur deux appareils réels.
+3. **Non fait** — implémenter le bootstrap cross-signing + SSSS + sauvegarde de clés avec l'API ci-dessus —
    nécessaire pour que la vérification SAS soit utile au-delà d'un seul appareil (sans
    cross-signing, chaque nouvel appareil doit être revérifié individuellement).
-4. Étendre la vérification (empreinte, puis SAS) aux conversations de groupe — cette passe ne
-   couvre que les conversations directes (`Room.directChatMatrixID`), le cas le plus simple et le
-   plus immédiatement utile vu l'absence totale d'écran de membres de groupe dans ce dépôt.
+4. **Non fait** — étendre la vérification (empreinte, puis SAS) aux conversations de groupe : seules
+   les conversations directes (`Room.directChatMatrixID`) sont couvertes. Un écran d'infos de groupe
+   existe désormais (`lib/ui/group_info_screen.dart`) mais n'affiche aucun état de vérification.
 5. La liste des appareils affichée reflète ce que le client a déjà appris (`Client.userDeviceKeys`,
    rempli par la synchronisation et par l'échange de clés fait au moment de chiffrer vers ce
    contact) — il n'y a pas de requête serveur forcée (« rafraîchir ») dans cet écran. Un appareil
@@ -115,17 +132,21 @@ l'état `error` plutôt qu'un flux silencieusement cassé.
    continue d'accepter tout appareil annoncé par le serveur, vérifié ou pas. Afficher l'état ne
    bloque rien — voir la section suivante, qui reste vraie en l'état.
 
-## Constat d'audit initial (ce qui a motivé ce qui précède)
+## Constat d'audit initial (historique : ce qui a motivé ce qui précède)
+
+> Cette section décrit l'état AVANT l'implémentation de l'écran d'empreinte et du SAS ; voir le
+> tableau « État actuel » en tête pour la situation réelle.
 
 ## Ce qui a été trouvé
 
 Murmure chiffre de bout en bout toutes les conversations via Megolm/Olm (par
-`flutter_vodozemac`, piloté par `matrix-dart-sdk`), comme documenté ailleurs dans ce dépôt. Mais
+`flutter_olm`/libolm — `matrix` 0.29.13 n'utilise pas vodozemac —, piloté par `matrix-dart-sdk`), comme documenté ailleurs dans ce dépôt. Mais
 aucun écran, aucun code de ce dépôt ne permet à deux correspondants de **vérifier** que la clé
 Olm/Ed25519 présentée pour un appareil est bien celle de la personne attendue, plutôt que celle
 d'un appareil ajouté par quelqu'un d'autre.
 
-Concrètement, aucune des capacités suivantes n'existe dans Murmure à ce jour :
+À l'époque de ce constat, aucune des capacités suivantes n'existait (les trois premières existent
+désormais pour les conversations directes ; la dernière n'existe toujours pas) :
 - afficher l'empreinte (clé Ed25519) d'un appareil pour comparaison manuelle hors bande ;
 - une vérification interactive type SAS (comparaison d'emojis/chiffres entre deux appareils) ;
 - un indicateur visuel distinguant, dans une conversation, un appareil vérifié d'un appareil
@@ -164,7 +185,11 @@ version de bibliothèque mal supposée a fait échouer la CI). Une implémentati
 vérifier des clés sans que l'appel d'API sous-jacent soit confirmé serait pire que l'absence de
 fonctionnalité : une fausse assurance de sécurité.
 
-## Ce qu'il reste à faire
+## Ce qu'il reste à faire (liste historique d'origine)
+
+État réel : points 1 à 4 faits pour les conversations directes (API confirmée, écran d'empreinte,
+SAS, indicateur dans la conversation) ; point 5 fait pour l'écran de vérification
+(`device_verification_screen.dart`), pas dans la conversation elle-même.
 
 1. Confirmer, en consultant la documentation de la version exacte épinglée (ou en l'élevant vers
    une version dont la documentation est accessible et dont le changelog a été lu), les noms
@@ -182,6 +207,6 @@ fonctionnalité : une fausse assurance de sécurité.
    restent envoyés aux appareils non vérifiés tant que ce qui précède n'est pas fait : ne jamais
    laisser l'absence d'avertissement dans l'appli faire croire que c'est déjà couvert.
 
-Tant que ces points ne sont pas faits, le chiffrement de bout en bout de Murmure protège contre
+Tant que les appareils non vérifiés restent acceptés sans blocage (toujours le cas), le chiffrement de bout en bout de Murmure protège contre
 un indiscret passif sur le réseau ou sur l'infrastructure serveur, mais pas contre un appareil
 supplémentaire injecté sur le compte d'un correspondant — à ne jamais présenter autrement.

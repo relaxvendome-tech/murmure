@@ -1,0 +1,162 @@
+# Fiche Google Play — Murmure (test ouvert)
+
+Textes rédigés à partir du code réel de `lib/`, `android/app/src/main/AndroidManifest.xml` et `scripts/server/`.
+Fonctions volontairement ABSENTES (vérifiées par grep, ne pas les annoncer) : messages éphémères / à
+disparition, déverrouillage biométrique (aucun `local_auth`), notifications de messages en arrière-plan (seule
+la notification d'appel manqué existe), changement d'icône de lancement (retiré, voir `UPDATES.md`).
+
+Vocabulaire interdit : « inviolable », « 100 % sécurisé », « intraçable », « validé par l'ANSSI », « anonyme
+garanti ».
+
+## 1. Textes de la fiche
+
+### Nom (≤ 30 caractères)
+
+```
+Murmure : messagerie chiffrée
+```
+(29 caractères)
+
+### Description courte (≤ 80 caractères)
+
+```
+Messagerie chiffrée de bout en bout, sans numéro de téléphone ni e-mail.
+```
+(72 caractères)
+
+### Description complète (≤ 4000 caractères)
+
+```
+Murmure est une messagerie chiffrée de bout en bout, fondée sur le protocole ouvert Matrix. Elle se crée sans numéro de téléphone, sans adresse e-mail et sans accès à votre carnet d'adresses.
+
+VERSION DE TEST
+Murmure est en test ouvert. Des bugs sont possibles et vos retours sont précieux. Ne l'utilisez pas encore comme seul moyen de communication dans une situation critique.
+
+UN COMPTE SANS DONNÉES PERSONNELLES
+• Aucun numéro de téléphone, aucune adresse e-mail demandés.
+• L'identifiant est généré aléatoirement sur votre appareil ; vous choisissez seulement un nom affiché.
+• Aucune lecture de vos contacts, aucune localisation.
+• Murmure n'est lié à aucun serveur imposé : vous renseignez l'adresse du serveur Murmure auquel vous vous connectez (saisie, ou scan d'un QR code fourni par son administrateur). L'inscription demande un jeton d'invitation donné par l'administrateur du serveur.
+
+MESSAGES ET APPELS CHIFFRÉS
+• Conversations privées et groupes chiffrés de bout en bout (Matrix, Olm/Megolm).
+• Envoi de photos, chiffrées comme les messages.
+• Appels audio et vidéo.
+• Vérification des appareils par comparaison d'emojis (SAS) ou d'empreinte, pour confirmer que vous parlez bien à la bonne personne.
+• Ajout d'un contact par QR code.
+• Base de données locale chiffrée (SQLCipher), clé conservée dans l'Android Keystore.
+
+PROTECTION DE VOTRE APPAREIL
+• Verrou par code PIN, avec effacement après trop d'essais erronés.
+• Code de contrainte : s'il est saisi, Murmure efface localement clés, messages et médias, puis se ferme.
+• Écran de verrouillage « Calculatrice » optionnel, à l'intérieur de l'appli : le bon code ouvre Murmure. L'icône et le nom de l'appli sur votre écran d'accueil restent toujours « Murmure ».
+• Captures d'écran bloquées et aperçu masqué dans les applications récentes.
+• Aucune sauvegarde automatique Android des données de l'appli.
+
+RÉSEAU
+• Connexion directe, via Tor (avec l'application Orbot) ou via un proxy SOCKS5 personnalisé. En mode Tor ou proxy, Murmure refuse de se connecter en direct plutôt que de revenir silencieusement à votre IP réelle.
+• Mode Bluetooth maillé, expérimental : relais de messages chiffrés d'appareil à appareil quand le réseau mobile est indisponible. Portée limitée, fonction en développement, aucune garantie de remise. Un service de premier plan et une notification permanente sont affichés pendant son fonctionnement.
+
+MISES À JOUR
+Si l'administrateur de votre serveur en configure une, Murmure peut vérifier et télécharger une nouvelle version (empreinte SHA-256 contrôlée). L'installation est toujours confirmée par Android. Sur Google Play, les mises à jour passent par Google Play.
+
+CE QUE MURMURE NE FAIT PAS
+Murmure protège le contenu des messages mais pas toutes les métadonnées : le serveur voit notamment les identifiants, les salons, les horaires et les tailles des échanges. Aucune application ne supprime tout risque, notamment si votre téléphone est compromis ou si votre interlocuteur est piégé. Murmure est un projet indépendant, sans audit officiel ni certification.
+
+Politique de confidentialité : voir le lien de la fiche.
+```
+
+### Notes de version — première release de test (≤ 500 caractères)
+
+```
+Première version de test ouverte de Murmure 3.0.
+• Comptes sans téléphone ni e-mail
+• Messages, groupes, photos et appels audio/vidéo chiffrés de bout en bout (Matrix)
+• Vérification des appareils (SAS)
+• Verrou PIN, code de contrainte, écran Calculatrice
+• Modes Tor / proxy SOCKS5
+• Relais Bluetooth maillé (expérimental)
+Des bugs sont possibles. Signalez-les via le lien de contact de la fiche.
+```
+
+## 2. Formulaire « Sécurité des données »
+
+Principe : « collecté » = quitte l'appareil vers le serveur Murmure (exploité par le développeur). Les
+données chiffrées de bout en bout dont le serveur ne peut pas lire le contenu restent déclarées par prudence.
+
+| Question | Réponse |
+|---|---|
+| L'appli collecte ou partage-t-elle des données ? | Oui (collecte), aucun partage avec des tiers |
+| Données chiffrées en transit ? | Oui (HTTPS ; Caddy en frontal) |
+| Suppression à la demande ? | Oui : effacement local (PIN de contrainte / réglages) ; suppression du compte côté serveur sur demande à l'administrateur. **À aligner avec la politique de confidentialité et fournir une URL de demande de suppression (obligatoire pour les applis avec création de compte).** |
+| Infos personnelles : nom, e-mail, ID utilisateur | **Nom** : oui, nom affiché choisi (facultatif), fonctionnalité de l'appli, non partagé. **E-mail** : non. **ID utilisateur** : oui, identifiant Matrix aléatoire, fonctionnalité de l'appli + gestion du compte. Adresse/téléphone/autres : non |
+| Localisation | Non (ACCESS_FINE_LOCATION n'est déclarée que jusqu'à Android 11, pour le scan BLE ; jamais lue) |
+| Contacts, calendrier, appels, SMS | Non |
+| Messages (« Messages dans l'appli ») | Oui : messages et photos, **chiffrés de bout en bout** ; le serveur ne stocke que du chiffré. Fonctionnalité de l'appli. Non partagé |
+| Photos et vidéos | Oui : photos envoyées par l'utilisateur, chiffrées E2E. Fonctionnalité de l'appli. Non partagé |
+| Audio | Appels : flux WebRTC chiffré, non enregistré ni stocké. Déclarer « non collecté » (traitement éphémère) |
+| Fichiers/docs | Non |
+| Activité dans l'appli, historique web | Non (aucun analytique, aucune pub) |
+| Infos et performances de l'appli | Non (aucun SDK de plantage ni d'analytique) |
+| Identifiants de l'appareil ou autres | Non pour l'ID publicitaire. Le nom d'appareil Matrix (device) est un nom d'affichage de session, à citer dans la politique |
+| Adresse IP | Non journalisée : Caddy masque `remote_ip` / `client_ip`, Conduit en `log = "warn"`. L'IP est néanmoins vue techniquement par le serveur pour établir la connexion. Ne pas écrire « jamais vue ». **À vérifier : journaux de coturn (non configurés ici) et du pare-feu/hébergeur** |
+| Métadonnées Matrix | Oui, à décrire dans la politique : identifiants, salons, membres, horodatages, tailles, versions d'appareil |
+| Publicité, analytique, SDK tiers | Aucun |
+| Hébergement | Serveur en France (**à confirmer par l'hébergeur retenu avant publication**) |
+
+Déclarations de cohérence avec la politique de confidentialité (qui n'est pas dans le dépôt : à vérifier) :
+pas de numéro, e-mail, contacts, localisation ; ID aléatoire + nom affiché ; E2E ; métadonnées Matrix ;
+IP non journalisée ; serveur en France ; aucune fédération (`allow_federation = false`).
+
+## 3. Permissions du Manifest
+
+| Permission | Justification | Risque Play |
+|---|---|---|
+| INTERNET, ACCESS_NETWORK_STATE | Connexion au serveur Matrix, état du réseau | Faible |
+| REQUEST_INSTALL_PACKAGES | Installer une mise à jour téléchargée (`lib/update/`, FileProvider) | **ÉLEVÉ** |
+| BLUETOOTH_SCAN (`neverForLocation`), BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE | Relais maillé hors réseau (`lib/mesh`) | Moyen : demandées à l'exécution, fonction principale expliquée |
+| ACCESS_FINE_LOCATION (`maxSdkVersion=30`) | Scan BLE sur Android ≤ 11, jamais lue | Moyen : localisation, justifier dans le formulaire |
+| CAMERA | Scan de QR codes (contacts, serveur), appels vidéo | Faible |
+| RECORD_AUDIO, MODIFY_AUDIO_SETTINGS | Appels audio/vidéo | Faible |
+| POST_NOTIFICATIONS | Notification d'appel manqué, notification du service Bluetooth | Faible |
+| FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE | Service Bluetooth maillé en arrière-plan | **Moyen/élevé** : la déclaration du type `connectedDevice` demande une explication et une vidéo de démonstration |
+
+Points d'attention :
+1. **REQUEST_INSTALL_PACKAGES** : Google limite cette permission aux applis dont la fonction principale est
+   d'installer des paquets ; l'auto-mise à jour hors Play va à l'encontre de la politique « Device and Network
+   Abuse ». **Recommandation : retirer la permission, le FileProvider et `lib/update/` du build Play** (flavor
+   dédié) et garder la mise à jour auto-hébergée pour la version APK directe. Sinon refus probable.
+2. **Foreground service** : prévoir description + vidéo montrant l'activation du mode Bluetooth.
+3. **Notification « calculatrice » (mode discret)** : le code camoufle la notification d'appel manquée en
+   notification de calculatrice (`call_opsec_notifier.dart`). Risque de lecture « comportement trompeur » ;
+   à décrire honnêtement dans la fiche (c'est le cas : écran « Calculatrice » optionnel) et à envisager de
+   désactiver dans la version Play.
+4. Localisation Android ≤ 11 : le formulaire « Autorisations sensibles » peut demander pourquoi ; réponse :
+   exigence technique du scan BLE, aucune donnée de position lue.
+
+## 4. Déclarations Console à prévoir
+
+- **Public cible** : 18 ans et plus uniquement (pas d'attrait pour les enfants, pas de programme « Famille »).
+- **Classification du contenu (IARC)** : questionnaire « Messagerie / réseaux sociaux » ; contenu généré par
+  les utilisateurs : oui (messages privés) ; partage de localisation : non ; achats : non ; pas de violence
+  propre à l'appli. Attendre un PEGI 12 / Teen environ.
+- **Contenu généré par les utilisateurs** : prévoir une politique de signalement et de blocage ou l'expliquer
+  (serveur privé sur invitation, modération par l'administrateur). Vérifier qu'une fonction de blocage existe
+  (non trouvée dans `lib/` : à ajouter ou justifier, c'est exigé pour les applis de messagerie ouvertes).
+- **Publicités** : aucune. **Application gouvernementale / financière / santé** : non.
+- **Accès à l'appli pour l'examen** : l'appli exige l'adresse d'un serveur et un jeton d'inscription. Fournir
+  dans « Instructions d'accès » : URL du serveur, jeton d'inscription, QR code d'onboarding, deux comptes de test
+  si possible, et la manière de tester les appels. Sans cela : rejet d'office.
+- **Sécurité des données** : section 2. **Politique de confidentialité** : URL publique obligatoire, avec
+  section suppression de compte.
+- **Suppression de compte** : URL web de demande de suppression (obligatoire pour les comptes créés dans l'appli).
+- **Autorisations sensibles / services de premier plan** : formulaire + vidéo (section 3).
+- **Chiffrement / export** : mentionner l'usage de chiffrement standard (pas de crypto propriétaire) pour la
+  conformité export US ; en France, la fourniture d'un moyen de cryptologie relève de la LCEN (art. 30) et du décret
+  2007-663 : vérifier auprès de l'ANSSI si une déclaration est requise ou si une exemption s'applique.
+- **Cible API** : targetSdk 35 conforme ; fournir l'AAB signé (clé de release, `key.properties`).
+- **Test ouvert** : pays, quota, adresse e-mail/URL de retour des testeurs. Compte développeur personnel
+  créé après nov. 2023 : 12 testeurs pendant 14 jours en test fermé avant la production (non requis pour le
+  test ouvert seul).
+- **Usurpation d'identité** : le nom et l'icône restent « Murmure » ; ne rien écrire dans la fiche qui évoque
+  Signal, Telegram ou « calculatrice » en tant qu'identité de l'appli.

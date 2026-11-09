@@ -1,6 +1,6 @@
 # Murmure
 
-Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via vodozemac), pensée pour
+Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via libolm/`flutter_olm`, le SDK `matrix` 0.29.x n'utilisant pas encore vodozemac ; migration à prévoir), pensée pour
 rester utilisable quand le réseau mobile est coupé ou brouillé.
 
 ## État du projet (reconstruction 3.0)
@@ -26,7 +26,17 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
 ## Fonctionnalités
 
 - Comptes anonymes (pas de téléphone, pas d'e-mail)
-- Chiffrement de bout en bout (Matrix/Megolm)
+- Chiffrement de bout en bout (Matrix/Megolm) ; conversations directes et groupes chiffrés
+  (création/administration d'un groupe : `lib/ui/group_screen.dart`, `lib/ui/group_info_screen.dart`)
+- Vérification des appareils d'un contact (conversations directes) : empreinte à comparer hors
+  bande et SAS par emojis, voir `docs/E2EE_VERIFICATION.md`. Pas encore de cross-signing, pas de QR,
+  pas pour les groupes ; un appareil non vérifié reste accepté par le chiffrement. SAS non testé
+  entre deux appareils réels
+- Appels audio/vidéo WebRTC (TURN `turns:` uniquement, sans STUN), refusés hors mode direct tant
+  que l'absence de fuite n'est pas vérifiée par capture réseau ; pas d'appels de groupe, pas encore
+  testés sur deux appareils réels — voir `docs/CALLS_ARCHITECTURE.md`
+- Mises à jour APK auto-hébergées, déclenchées manuellement, avec contrôle SHA-256 — voir
+  `docs/UPDATES.md`
 - Verrou PIN + code de contrainte + mode discret calculatrice (écran de verrou uniquement, icône
   de l'appli toujours honnête — voir `docs/UPDATES.md`)
 - Connexion directe, via Tor (Orbot), ou via proxy SOCKS5 personnalisé — basculable sans recompiler
@@ -44,7 +54,7 @@ lib/            code Dart/Flutter
   ui/           écrans
 android/        projet Android natif (icônes, signature)
 scripts/server/ déploiement du serveur (Conduit + Caddy, Docker)
-docs/           documentation (dont ADMIN_KEY.md : architecture de la clé administrateur)
+docs/           documentation (dont ADMIN_KEY.md : architecture prévue de la clé administrateur, non implémentée)
 .github/workflows/ construction automatique de l'AAB/APK signés
 ```
 
@@ -66,7 +76,7 @@ exclu de git, soit dans les secrets chiffrés de ce dépôt GitHub.
 
 ## Sécurité
 
-Aucune clé — y compris la clé administrateur décrite dans `docs/ADMIN_KEY.md` — ne permet de
+Aucune clé — y compris la clé administrateur décrite dans `docs/ADMIN_KEY.md` (conception, pas encore implémentée dans le code) — ne permet de
 déchiffrer les messages d'un utilisateur. Voir ce document pour le détail de ce que cette clé
 couvre (signature des mises à jour, administration du serveur, alertes signées) et de ce qu'elle
 ne couvre jamais.
