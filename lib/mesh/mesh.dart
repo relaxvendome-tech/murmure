@@ -720,6 +720,32 @@ class Mesh {
     return db.query('inbox', orderBy: 'received_at DESC');
   }
 
+  /// Efface le texte en clair des messages Bluetooth déjà reçus (table `inbox`), à la demande
+  /// explicite de l'utilisateur — voir le bouton correspondant dans `ui/mesh_screen.dart`.
+  ///
+  /// Trouvé en audit interne (pas une proposition externe) : [_purgeExpired] purge par âge
+  /// `outbox` (file d'attente de relais), `seen` (cache de déduplication) et `ratchet_skipped`
+  /// (clés de rangs sautés, voir le commentaire de migration v2 -> v3 plus haut) — les trois
+  /// autres tables de cette base. `inbox` en était la seule exception silencieuse : une fois un
+  /// message déchiffré et affiché, son texte en clair restait en base SQLCipher SANS AUCUNE limite
+  /// d'âge ni moyen de l'effacer autrement qu'en essuyant tout le compte (`Account.wipeLocal`,
+  /// panique ou suppression de compte). Pour un canal pensé pour les coupures réseau en
+  /// manifestation, c'est précisément le type de trace qu'un appareil saisi peut exposer après coup
+  /// (le texte des messages déjà lus, potentiellement accumulés sur plusieurs sessions) — pas un
+  /// secret de chiffrement (la clé SQLCipher reste nécessaire pour le lire), mais une donnée que
+  /// l'utilisateur devrait pouvoir faire disparaître de ce téléphone sans tout réinitialiser.
+  ///
+  /// Délibérément PAS de purge automatique par âge ici, à la différence des trois autres tables :
+  /// contrairement à une file de relais ou un cache technique, l'inbox est un contenu que
+  /// l'utilisateur lit et consulte (voir le « Journal » de `MeshScreen`) — décider à sa place d'une
+  /// fenêtre après laquelle ses messages disparaissent serait une perte de données silencieuse et
+  /// surprenante, pas une amélioration d'OPSEC qu'il aurait demandée. Cette méthode lui laisse le
+  /// choix explicite, au moment qu'il choisit.
+  Future<void> clearInbox() async {
+    final db = await _database();
+    await db.delete('inbox');
+  }
+
   Future<void> _purgeExpired() async {
     final db = await _database();
     final cutoff = DateTime.now()

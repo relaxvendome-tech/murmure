@@ -199,6 +199,40 @@ class _MeshScreenState extends State<MeshScreen> {
     await _loadContacts();
   }
 
+  /// Efface le journal affiché ET la table `inbox` sur disque (voir [Mesh.clearInbox]) — jamais
+  /// l'un sans l'autre, sinon un message effacé à l'écran réapparaîtrait au prochain chargement de
+  /// cet écran (voir `initState`, qui recharge l'historique persistant depuis la base). Confirmation
+  /// requise : irréversible, même style que la suppression de compte (voir lock_screens.dart).
+  Future<void> _confirmClearLog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Effacer le journal Bluetooth ?'),
+        content: const Text(
+          'Les messages déjà reçus seront effacés de ce téléphone. Cette action est irréversible '
+          'et ne concerne que ce journal (les contacts et le reste du compte ne sont pas touchés).',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Effacer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await Mesh.instance.clearInbox();
+    if (!mounted) return;
+    setState(() => _log.removeWhere((l) => !l.isStatus));
+  }
+
   /// Compose et met en file un message pour [contact] (voir [Mesh.queueMessage]). Le message part
   /// réellement dès le prochain appareil Murmure croisé qui le relaie ou le lui remet directement
   /// — pas forcément tout de suite, c'est le principe même du store-and-forward hors-ligne.
@@ -410,7 +444,19 @@ class _MeshScreenState extends State<MeshScreen> {
                   ),
                 )),
           const SizedBox(height: 8),
-          Text('Journal', style: Theme.of(context).textTheme.titleMedium),
+          Row(
+            children: [
+              Expanded(
+                child: Text('Journal', style: Theme.of(context).textTheme.titleMedium),
+              ),
+              if (_log.any((l) => !l.isStatus))
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Effacer le journal',
+                  onPressed: _confirmClearLog,
+                ),
+            ],
+          ),
           const SizedBox(height: 4),
           if (_log.isEmpty)
             Padding(
