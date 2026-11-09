@@ -31,7 +31,6 @@ class NetConfig {
     required this.mode,
     this.proxyHost,
     this.proxyPort,
-    this.updateManifestUrl,
   });
 
   final Uri homeserver;
@@ -40,18 +39,11 @@ class NetConfig {
   final String? proxyHost;
   final int? proxyPort;
 
-  /// URL d'un manifeste JSON de mise à jour (voir lib/update/ et docs/UPDATES.md). Volontairement
-  /// non codée en dur (même raisonnement que pour [homeserver], voir le commentaire de classe) :
-  /// Murmure n'impose aucune infrastructure de distribution unique, chacun peut héberger la
-  /// sienne. `null`/vide : vérification des mises à jour désactivée, jamais de requête silencieuse.
-  final String? updateManifestUrl;
-
   static const _kHomeserver = 'net_homeserver';
   static const _kToken = 'net_token';
   static const _kMode = 'net_mode';
   static const _kProxyHost = 'net_proxy_host';
   static const _kProxyPort = 'net_proxy_port';
-  static const _kUpdateUrl = 'net_update_url';
 
   static Future<NetConfig> load() async {
     final url = await Account.read(_kHomeserver);
@@ -59,7 +51,6 @@ class NetConfig {
     final modeStr = await Account.read(_kMode);
     final host = await Account.read(_kProxyHost);
     final portStr = await Account.read(_kProxyPort);
-    final updateUrl = await Account.read(_kUpdateUrl);
     return NetConfig(
       homeserver: Uri.tryParse(url ?? '') ?? Uri.parse('https://invalid.invalid'),
       registrationToken: token,
@@ -69,7 +60,6 @@ class NetConfig {
       ),
       proxyHost: host,
       proxyPort: int.tryParse(portStr ?? ''),
-      updateManifestUrl: (updateUrl == null || updateUrl.isEmpty) ? null : updateUrl,
     );
   }
 
@@ -79,7 +69,6 @@ class NetConfig {
     await Account.write(_kMode, mode.name);
     if (proxyHost != null) await Account.write(_kProxyHost, proxyHost!);
     if (proxyPort != null) await Account.write(_kProxyPort, proxyPort.toString());
-    await Account.write(_kUpdateUrl, updateManifestUrl ?? '');
   }
 
   NetConfig copyWith({
@@ -88,7 +77,6 @@ class NetConfig {
     NetMode? mode,
     String? proxyHost,
     int? proxyPort,
-    String? updateManifestUrl,
   }) {
     return NetConfig(
       homeserver: homeserver ?? this.homeserver,
@@ -96,7 +84,6 @@ class NetConfig {
       mode: mode ?? this.mode,
       proxyHost: proxyHost ?? this.proxyHost,
       proxyPort: proxyPort ?? this.proxyPort,
-      updateManifestUrl: updateManifestUrl ?? this.updateManifestUrl,
     );
   }
 

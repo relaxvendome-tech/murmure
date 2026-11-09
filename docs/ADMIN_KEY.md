@@ -3,8 +3,8 @@
 > **État réel : conception uniquement.** Aucune clé publique n'est intégrée dans `lib/config.dart`,
 > aucun code de `lib/` ne vérifie de signature (ni pour les alertes, ni pour les mises à jour) et
 > aucun mécanisme d'alerte diffusée n'existe. Le tableau ci-dessous décrit ce qui est prévu, pas ce
-> qui fonctionne. Seule la vérification SHA-256 de l'APK (`lib/update/update_checker.dart`) existe
-> aujourd'hui, voir `docs/UPDATES.md`.
+> qui fonctionne. Les mises à jour de l'appli passent exclusivement par Google Play, voir
+> `docs/UPDATES.md`.
 
 Ce document fixe par écrit ce qui a été convenu : une seule personne (vous) détient cette clé, et
 elle ne donne **jamais** accès au contenu d'un message. Il explique pourquoi, et comment la créer,
@@ -72,6 +72,6 @@ ssss-combine -t 2
       qu'elle soit intégrée dans `lib/config.dart`
 - [ ] Implémenter la vérification de signature côté appli pour les alertes diffusées (non fait : aucune
       occurrence de signature/alerte dans `lib/`, ni canal de diffusion, y compris sur le maillage)
-- [ ] Mettre en place l'outil (non fait : `scripts/release/` ne contient que `publish_update.sh`, qui calcule un SHA-256 mais ne signe rien) de signature des artefacts de build (script séparé, jamais exécuté
+- [ ] Mettre en place l'outil (non fait : aucun script de signature n'existe dans `scripts/`) de signature des artefacts de build (script séparé, jamais exécuté
       automatiquement par GitHub Actions avec la clé privée — la signature des releases reste un
       geste manuel de votre part, hors CI)

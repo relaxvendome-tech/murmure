@@ -113,7 +113,6 @@ IP non journalisée ; serveur en France ; aucune fédération (`allow_federation
 | Permission | Justification | Risque Play |
 |---|---|---|
 | INTERNET, ACCESS_NETWORK_STATE | Connexion au serveur Matrix, état du réseau | Faible |
-| REQUEST_INSTALL_PACKAGES | Installer une mise à jour téléchargée (`lib/update/`, FileProvider) | **ÉLEVÉ** |
 | BLUETOOTH_SCAN (`neverForLocation`), BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE | Relais maillé hors réseau (`lib/mesh`) | Moyen : demandées à l'exécution, fonction principale expliquée |
 | ACCESS_FINE_LOCATION (`maxSdkVersion=30`) | Scan BLE sur Android ≤ 11, jamais lue | Moyen : localisation, justifier dans le formulaire |
 | CAMERA | Scan de QR codes (contacts, serveur), appels vidéo | Faible |
@@ -122,10 +121,8 @@ IP non journalisée ; serveur en France ; aucune fédération (`allow_federation
 | FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE | Service Bluetooth maillé en arrière-plan | **Moyen/élevé** : la déclaration du type `connectedDevice` demande une explication et une vidéo de démonstration |
 
 Points d'attention :
-1. **REQUEST_INSTALL_PACKAGES** : Google limite cette permission aux applis dont la fonction principale est
-   d'installer des paquets ; l'auto-mise à jour hors Play va à l'encontre de la politique « Device and Network
-   Abuse ». **Recommandation : retirer la permission, le FileProvider et `lib/update/` du build Play** (flavor
-   dédié) et garder la mise à jour auto-hébergée pour la version APK directe. Sinon refus probable.
+1. **REQUEST_INSTALL_PACKAGES** : retirée (Murmure n'est distribuée que sur Google Play ; la CI échoue
+   si elle réapparaît dans le manifeste fusionné). Plus de risque de refus sur ce point.
 2. **Foreground service** : prévoir description + vidéo montrant l'activation du mode Bluetooth.
 3. **Notification « calculatrice » (mode discret)** : le code camoufle la notification d'appel manquée en
    notification de calculatrice (`call_opsec_notifier.dart`). Risque de lecture « comportement trompeur » ;
@@ -150,6 +147,7 @@ Points d'attention :
 - **Sécurité des données** : section 2. **Politique de confidentialité** : URL publique obligatoire, avec
   section suppression de compte.
 - **Suppression de compte** : URL web de demande de suppression (obligatoire pour les comptes créés dans l'appli).
+  URL à déclarer : https://github.com/relaxvendome-tech/murmure/blob/main/docs/SUPPRESSION_COMPTE.md
 - **Autorisations sensibles / services de premier plan** : formulaire + vidéo (section 3).
 - **Chiffrement / export** : mentionner l'usage de chiffrement standard (pas de crypto propriétaire) pour la
   conformité export US ; en France, la fourniture d'un moyen de cryptologie relève de la LCEN (art. 30) et du décret

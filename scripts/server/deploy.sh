@@ -10,8 +10,7 @@
 # séparée une fois la base confirmée stable.
 #
 # Usage (en root ou un compte sudo, sur le VPS lui-même — PAS depuis cette session, qui n'a pas
-# d'accès réseau sortant vers un serveur arbitraire, voir docs/UPDATES.md pour la même contrainte
-# côté mises à jour) :
+# d'accès réseau sortant vers un serveur arbitraire) :
 #   curl -fsSL https://raw.githubusercontent.com/relaxvendome-tech/murmure/main/scripts/server/deploy.sh | bash -s -- votre-domaine.fr
 # ou, dépôt déjà cloné :
 #   scripts/server/deploy.sh votre-domaine.fr
@@ -132,6 +131,3 @@ echo
 echo "==> Dans l'appli Murmure (réglages réseau, premier lancement) :"
 echo "      Adresse du serveur : https://${domain}"
 echo "      Jeton d'inscription : voir ci-dessus (ou ${repo_dir}/scripts/server/conduit.toml)"
-echo
-echo "==> Mises à jour futures de l'appli (voir docs/UPDATES.md) :"
-echo "      scripts/release/publish_update.sh <apk> <versionCode> <versionName> https://${domain}/updates"

@@ -66,15 +66,13 @@ jobs:
           storeFile=../upload-keystore.jks
           EOF
 
-      - name: Construire l'AAB (Play Store, sans auto-mise à jour)
-        # Saveur `play` : pas de REQUEST_INSTALL_PACKAGES, entrées de mise à jour masquées
-        # (MURMURE_SELF_UPDATE absent => false). Voir docs/UPDATES.md.
-        run: flutter build appbundle --release --flavor play
+      - name: Construire l'AAB (Play Store)
+        run: flutter build appbundle --release
 
       - name: Garde-fou policy Play (aucune permission d'installation dans l'AAB)
         run: |
-          m=$(find build/app/intermediates -path '*playRelease*' -name AndroidManifest.xml | grep -i merged | head -1)
-          test -n "$m" || { echo "Manifeste fusionné playRelease introuvable"; exit 1; }
+          m=$(find build/app/intermediates -path '*release*' -not -path '*debug*' -name AndroidManifest.xml | grep -i merged | head -1)
+          test -n "$m" || { echo "Manifeste fusionné release introuvable"; exit 1; }
           # Lecture XML (les commentaires du manifeste, conservés à la fusion, citent ce nom).
           python3 - "$m" <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -87,8 +85,8 @@ jobs:
           PY
           echo "OK : $m sans REQUEST_INSTALL_PACKAGES"
 
-      - name: Construire l'APK (installation directe, avec auto-mise à jour)
-        run: flutter build apk --release --split-per-abi --flavor direct --dart-define=MURMURE_SELF_UPDATE=true
+      - name: Construire l'APK universel (installation manuelle sur tablette de test)
+        run: flutter build apk --release
 
       - name: Nettoyer les secrets du disque
         if: always()
@@ -98,6 +96,6 @@ jobs:
         with:
           name: murmure-release
           path: |
-            build/app/outputs/bundle/playRelease/*.aab
-            build/app/outputs/flutter-apk/*.apk
+            build/app/outputs/bundle/release/*.aab
+            build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30

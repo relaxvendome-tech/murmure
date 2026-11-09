@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Saveur `play` (AAB Play Store) : filet de sécurité. Le manifeste principal ne déclare déjà
-     plus REQUEST_INSTALL_PACKAGES ; ceci la retire aussi si une dépendance transitive (plugin)
-     venait à l'ajouter via la fusion de manifestes, pour ne jamais la livrer sur Play. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"
-        tools:node="remove" />
-</manifest>

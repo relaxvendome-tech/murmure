@@ -96,7 +96,6 @@ class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
       mode: _mode,
       proxyHost: _mode == NetMode.customProxy ? _proxyHostCtrl.text.trim() : null,
       proxyPort: _mode == NetMode.customProxy ? int.tryParse(_proxyPortCtrl.text.trim()) : null,
-      updateManifestUrl: _current?.updateManifestUrl,
     );
 
     if (await _tryMode(base)) return;

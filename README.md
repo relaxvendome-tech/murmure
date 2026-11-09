@@ -35,8 +35,8 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
 - Appels audio/vidéo WebRTC (TURN `turns:` uniquement, sans STUN), refusés hors mode direct tant
   que l'absence de fuite n'est pas vérifiée par capture réseau ; pas d'appels de groupe, pas encore
   testés sur deux appareils réels — voir `docs/CALLS_ARCHITECTURE.md`
-- Mises à jour APK auto-hébergées, déclenchées manuellement, avec contrôle SHA-256 — uniquement
-  dans la saveur `direct` (hors Play Store), jamais dans la version Play — voir `docs/UPDATES.md`
+- Mises à jour : exclusivement via Google Play, aucune auto-mise à jour dans l'appli — voir
+  `docs/UPDATES.md`
 - Verrou PIN + code de contrainte + mode discret calculatrice (écran de verrou uniquement, icône
   de l'appli toujours honnête — voir `docs/UPDATES.md`)
 - Connexion directe, via Tor (Orbot), ou via proxy SOCKS5 personnalisé — basculable sans recompiler
@@ -62,12 +62,8 @@ docs/           documentation (dont ADMIN_KEY.md : architecture prévue de la cl
 
 ```bash
 flutter pub get
-flutter run --flavor play                                        # sans auto-mise à jour
-flutter run --flavor direct --dart-define=MURMURE_SELF_UPDATE=true   # avec auto-mise à jour
+flutter run
 ```
-
-Le projet Android a deux saveurs (`--flavor` est obligatoire pour `run`/`build`) : voir
-« Publier une version signée ».
 
 Au premier lancement, l'appli demande l'adresse d'un serveur Murmure. Voir `scripts/server/README.md`
 pour en déployer un.
@@ -78,16 +74,16 @@ Voir `android/key.properties.example` et `.github/workflows/build.yml` : la clé
 ("upload key") Play Store n'est jamais partagée en clair — elle vit soit dans un fichier local
 exclu de git, soit dans les secrets chiffrés de ce dépôt GitHub.
 
-Deux saveurs Android, même `applicationId` (`fr.lansight.murmure`) et même signature :
+Murmure n'est distribuée que sur Google Play (voir `docs/UPDATES.md`) : pas de saveur Gradle, pas
+d'auto-mise à jour.
 
-| Saveur | Usage | Commande | Auto-mise à jour |
+| Sortie | Usage | Commande | Fichier |
 |---|---|---|---|
-| `play` | Play Store | `flutter build appbundle --release --flavor play` | Non : pas de `REQUEST_INSTALL_PACKAGES`, pas de FileProvider, écran « Mises à jour » masqué |
-| `direct` | APK hors Play | `flutter build apk --release --split-per-abi --flavor direct --dart-define=MURMURE_SELF_UPDATE=true` | Oui (manuelle, voir `docs/UPDATES.md`) |
+| AAB | Play Store | `flutter build appbundle --release` | `build/app/outputs/bundle/release/*.aab` |
+| APK universel | Installation manuelle sur une tablette de test | `flutter build apk --release` | `build/app/outputs/flutter-apk/app-release.apk` |
 
-Sorties : `build/app/outputs/bundle/playRelease/*.aab` et `build/app/outputs/flutter-apk/*.apk`.
-La policy Google Play interdit à une appli distribuée sur Play de se mettre à jour hors Play :
-n'envoyez donc jamais l'APK `direct` sur Play, ni un AAB construit sans `--flavor play`.
+La CI produit les deux (artefact `murmure-release`) et échoue si `REQUEST_INSTALL_PACKAGES` est
+présente dans le manifeste fusionné. Seul l'AAB est envoyé sur Play.
 
 ## Sécurité
 

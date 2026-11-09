@@ -6,10 +6,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- REQUEST_INSTALL_PACKAGES n'est volontairement PAS déclarée ici : elle n'existe que dans
-         la saveur `direct` (src/direct/AndroidManifest.xml), jamais dans la saveur `play` (policy
-         Google Play : une appli distribuée sur Play ne se met pas à jour hors Play). Voir
-         docs/UPDATES.md. -->
+    <!-- REQUEST_INSTALL_PACKAGES n'est volontairement PAS déclarée : Murmure n'est distribuée que
+         par Google Play, qui assure seul les mises à jour. Voir docs/UPDATES.md. Le `remove` ci-dessous est un
+         filet de sécurité : il la retire aussi si un plugin tiers l'ajoutait via la fusion de manifestes. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:node="remove" />
 
     <!-- Mode Bluetooth maillé (hors-ligne). BLUETOOTH_ADVERTISE est annoté `usesPermissionFlags`
          "neverForLocation" : Murmure n'utilise jamais le Bluetooth pour géolocaliser qui que ce

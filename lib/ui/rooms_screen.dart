@@ -11,6 +11,7 @@ import '../account.dart';
 import '../calls/call_policy.dart';
 import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
+import '../ephemeral.dart';
 import '../media.dart';
 import '../network.dart';
 import 'device_verification_screen.dart';
@@ -521,6 +522,8 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() => _timeline = t);
       _maybeSendReadMarker();
     });
+    EphemeralService.instance.start(widget.room.client);
+    unawaited(EphemeralService.instance.sweepRoom(widget.room));
     _refreshTypingUsers();
     _typingSub = widget.room.client.onSync.stream.listen((_) => _refreshTypingUsers());
   }
@@ -676,6 +679,82 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Bloque le contact d'une conversation directe (`Client.ignoreUser`) : ses messages et
+  /// invitations ne sont plus reçus ; il n'en est pas averti. Aucun contenu journalisé.
+  Future<void> _blockContact() async {
+    final otherId = widget.room.directChatMatrixID;
+    if (otherId == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Bloquer ce contact ?'),
+        content: const Text(
+            'Vous ne recevrez plus ses messages ni ses invitations. Il n\'en sera pas averti. '
+            'Vous pourrez le débloquer à tout moment depuis Mon profil > Utilisateurs bloqués.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(context).pop(false), child: const Text('Annuler')),
+          FilledButton(
+              onPressed: () => Navigator.of(context).pop(true), child: const Text('Bloquer')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    try {
+      await widget.room.client.ignoreUser(otherId);
+      messenger.showSnackBar(const SnackBar(content: Text('Contact bloqué')));
+      navigator.pop();
+    } catch (_) {
+      messenger.showSnackBar(const SnackBar(
+          content: Text(
+              'Impossible de bloquer ce contact. Vérifiez votre connexion réseau et réessayez.')));
+    }
+  }
+
+  /// Dialogue de choix de la durée des messages éphémères (événement d'état `fr.murmure.ephemeral`,
+  /// voir lib/ephemeral.dart). L'événement d'état n'est pas chiffré : seule la durée est visible
+  /// du serveur, jamais le contenu des messages.
+  Future<void> _showEphemeralDialog() async {
+    final current = ephemeralTtlSeconds(widget.room);
+    final chosen = await showDialog<int>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Messages éphémères'),
+        children: [
+          for (final c in kEphemeralChoices)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(context).pop(c.$2),
+              child: Row(children: [
+                Expanded(child: Text(c.$1)),
+                if (c.$2 == current) const Icon(Icons.check, size: 18),
+              ]),
+            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 8, 24, 12),
+            child: Text(
+              'L\'effacement est garanti sur les appareils Murmure, pas contre une capture '
+              'd\'écran ou un client modifié.',
+              style: TextStyle(fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (chosen == null || chosen == current || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await setEphemeralTtl(widget.room, chosen);
+      if (mounted) setState(() {});
+      unawaited(EphemeralService.instance.sweepRoom(widget.room));
+    } catch (_) {
+      messenger.showSnackBar(const SnackBar(
+          content: Text(
+              'Impossible de modifier ce réglage. Vérifiez votre connexion et vos droits dans la conversation.')));
+    }
+  }
+
   void _showCallDisabledDialog(String message) {
     if (!mounted) return;
     showDialog<void>(
@@ -793,7 +872,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final events = _timeline?.events.where((e) => e.type == EventTypes.Message).toList() ?? [];
+    final events = _timeline?.events
+            .where((e) => e.type == EventTypes.Message && !isExpired(e, widget.room))
+            .toList() ??
+        [];
     // Trouvé en audit interne, vérifié contre le SDK matrix-dart pinné (tag v0.29.13,
     // `models/receipts.dart` : `LatestReceiptState.update` écrit `timeline.otherUsers[user] =
     // receiptData`, une AFFECTATION qui écrase l'entrée précédente de cet utilisateur — la carte
@@ -868,6 +950,25 @@ class _ChatScreenState extends State<ChatScreen> {
                 MaterialPageRoute(builder: (_) => GroupInfoScreen(room: widget.room)),
               ),
             ),
+          if (ephemeralTtlSeconds(widget.room) > 0)
+            IconButton(
+              icon: const Icon(Icons.timer_outlined),
+              tooltip:
+                  'Messages éphémères : ${ephemeralLabel(ephemeralTtlSeconds(widget.room))}',
+              onPressed: _showEphemeralDialog,
+            ),
+          PopupMenuButton<String>(
+            tooltip: 'Plus d\'options',
+            onSelected: (v) {
+              if (v == 'block') _blockContact();
+              if (v == 'ephemeral') _showEphemeralDialog();
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'ephemeral', child: Text('Messages éphémères')),
+              if (widget.room.isDirectChat)
+                const PopupMenuItem(value: 'block', child: Text('Bloquer ce contact')),
+            ],
+          ),
         ],
       ),
       body: Column(

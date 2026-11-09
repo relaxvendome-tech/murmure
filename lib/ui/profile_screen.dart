@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import 'blocked_users_screen.dart';
 
 /// Permet de voir et changer son pseudo (nom affiché) à tout moment, sans recréer de compte.
 ///
@@ -133,6 +134,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         ? const SizedBox(
                             width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Text('Enregistrer'),
+                  ),
+                  const SizedBox(height: 20),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.block),
+                    title: const Text('Utilisateurs bloqués'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => BlockedUsersScreen(client: widget.client)),
+                    ),
                   ),
                 ],
               ),

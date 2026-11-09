@@ -1,21 +1,5 @@
 {$MURMURE_DOMAIN} {
-	# Mises à jour de l'appli (voir docs/UPDATES.md et lib/update/) : chemin distinct du reste,
-	# servi en fichiers statiques depuis le volume monté par docker-compose.yml
-	# (`./updates:/srv/updates:ro`) — jamais proxyfié vers Conduit. `route` impose explicitement
-	# cet ordre (sinon la correspondance de chemin la plus générale du `reverse_proxy` ci-dessous
-	# intercepterait aussi ces requêtes). `no-store` : un manifeste périmé mis en cache côté client
-	# ou par un relais intermédiaire ferait proposer une version déjà remplacée, ou pire,
-	# empêcherait de voir une mise à jour de sécurité critique.
-	route {
-		handle_path /updates/* {
-			root * /srv/updates
-			header Cache-Control "no-store"
-			file_server
-		}
-		handle {
-			reverse_proxy conduit:6167
-		}
-	}
+	reverse_proxy conduit:6167
 
 	# En-têtes de sécurité : pas de mise en cache des réponses chiffrées, pas d'intégration dans
 	# une iframe tierce.
