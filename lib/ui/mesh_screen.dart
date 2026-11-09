@@ -81,7 +81,22 @@ class _MeshScreenState extends State<MeshScreen> {
           case MeshStarted():
             _log.insert(0, _LogEntry.status('Écoute Bluetooth démarrée'));
           case MeshStopped():
+            // `_active` est déjà remis à `false` par `_toggle` dans le cas normal (arrêt par
+            // l'interrupteur) — refaire la même affectation ici est sans effet dans ce cas, mais
+            // couvre aussi tout futur arrêt déclenché depuis `Mesh` elle-même sans passer par
+            // `_toggle`, sur le même principe que [MeshAdapterOff] ci-dessous.
+            _active = false;
             _log.insert(0, _LogEntry.status('Écoute Bluetooth arrêtée'));
+          case MeshAdapterOff():
+            // Trouvé en audit interne (voir le commentaire de `Mesh.start` dans mesh.dart) :
+            // l'adaptateur Bluetooth vient de quitter l'état actif de son propre chef (mode avion,
+            // extinction manuelle) — PAS un arrêt demandé via l'interrupteur ci-dessus, qui restait
+            // donc affiché « activé » sans que rien ne tourne plus réellement derrière, jusqu'à ce
+            // correctif. On remet l'interrupteur à l'état réel et on l'explique, plutôt que de
+            // laisser l'utilisateur croire le relais actif.
+            _active = false;
+            _log.insert(
+                0, _LogEntry.status('Bluetooth désactivé (mode avion ?) — mode hors-ligne arrêté'));
           case MeshMessageReceived(:final sender, :final text):
             // Déjà inséré en base par Mesh._handleIncomingLocked ; on l'ajoute ici seulement à
             // l'affichage en direct, jamais une deuxième fois en base.

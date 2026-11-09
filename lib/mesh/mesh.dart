@@ -77,6 +77,7 @@ class Mesh {
   MeshIdentity? _identity;
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<Uint8List>? _gattSub;
+  StreamSubscription<BluetoothAdapterState>? _adapterSub;
   Timer? _relayTimer;
   Timer? _rotateTimer;
   int _rotateIndex = 0;
@@ -343,6 +344,29 @@ class Mesh {
       _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
       unawaited(_rotateReadValue());
 
+      // Trouvé en audit interne : rien ici ne surveillait l'état de l'adaptateur Bluetooth une
+      // fois le scan démarré — seul un Bluetooth déjà éteint AU MOMENT de cet appel était détecté
+      // (voir le `catch` plus bas). Scénario réel pour l'usage visé par ce fichier, pas
+      // hypothétique : activer le mode avion coupe le Bluetooth sur la plupart des
+      // appareils/versions d'Android (sauf réglage explicite contraire, non garanti), y compris
+      // pendant que ce mode était déjà actif. Sans ce qui suit, `_running` restait bloqué à `true`
+      // et `MeshScreen._active` continuait d'afficher l'interrupteur sur « activé » alors que le
+      // scan et l'annonce étaient déjà morts côté système — aucun message, aucun relais, sans que
+      // rien ne le signale. Dangereux précisément dans le scénario visé (manifestation) : croire
+      // le mode hors-ligne actif alors qu'il ne l'est plus. On s'arrête maintenant proprement dès
+      // que l'adaptateur quitte l'état `on`, et on le signale distinctement d'un arrêt volontaire
+      // (voir [MeshEvent.adapterOff], géré par `ui/mesh_screen.dart` pour remettre l'interrupteur
+      // à l'état réel). LIMITE HONNÊTE : la fiabilité et le délai réels de ce flux
+      // (`FlutterBluePlus.adapterState`) face à un vrai basculement du mode avion n'ont pas été
+      // vérifiés sur un appareil physique, faute de matériel dans ce bac à sable — seule la
+      // disparition totale de toute détection, le défaut d'avant ce correctif, est certaine.
+      _adapterSub = FlutterBluePlus.adapterState.listen((state) {
+        if (_running && state != BluetoothAdapterState.on) {
+          _eventsController.add(const MeshEvent.adapterOff());
+          unawaited(stop());
+        }
+      });
+
       _eventsController.add(const MeshEvent.started());
     } catch (_) {
       await stop();
@@ -358,6 +382,8 @@ class Mesh {
     _relayTimer = null;
     await _gattSub?.cancel();
     _gattSub = null;
+    await _adapterSub?.cancel();
+    _adapterSub = null;
     _rotateTimer?.cancel();
     _rotateTimer = null;
     _inFlightExchanges.clear();
@@ -808,6 +834,7 @@ sealed class MeshEvent {
   const MeshEvent();
   const factory MeshEvent.started() = MeshStarted;
   const factory MeshEvent.stopped() = MeshStopped;
+  const factory MeshEvent.adapterOff() = MeshAdapterOff;
   const factory MeshEvent.messageReceived(List<int> sender, String text) = MeshMessageReceived;
 }
 
@@ -817,6 +844,15 @@ class MeshStarted extends MeshEvent {
 
 class MeshStopped extends MeshEvent {
   const MeshStopped();
+}
+
+/// Arrêt provoqué par l'adaptateur Bluetooth lui-même quittant l'état `on` (mode avion, extinction
+/// manuelle, coupure système) PENDANT que le mode hors-ligne tournait — distinct de [MeshStopped],
+/// qui couvre aussi l'arrêt volontaire par l'interrupteur de `MeshScreen`. Voir le commentaire dans
+/// [Mesh.start] : sans cette distinction, l'interface ne pouvait pas dire à l'utilisateur ce qui
+/// vient de se passer.
+class MeshAdapterOff extends MeshEvent {
+  const MeshAdapterOff();
 }
 
 class MeshMessageReceived extends MeshEvent {
