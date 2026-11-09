@@ -794,6 +794,40 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final events = _timeline?.events.where((e) => e.type == EventTypes.Message).toList() ?? [];
+    // Trouvé en audit interne, vérifié contre le SDK matrix-dart pinné (tag v0.29.13,
+    // `models/receipts.dart` : `LatestReceiptState.update` écrit `timeline.otherUsers[user] =
+    // receiptData`, une AFFECTATION qui écrase l'entrée précédente de cet utilisateur — la carte
+    // ne retient donc jamais que le DERNIER événement lu par chaque autre participant, jamais
+    // l'historique de ce qu'il a lu avant) : `Event.receipts` (event.dart) ne fait que comparer
+    // `entry.value.eventId == eventId`, donc ne renvoie un résultat non vide QUE pour l'événement
+    // exact que cette carte retient à l'instant présent. Conséquence réelle pour `seenByOther`
+    // plus bas (avant ce correctif, basé directement sur `e.receipts.any(...)`) : la coche
+    // « vu » apparaissait bien sur le dernier message lu par le correspondant, mais DISPARAISSAIT
+    // de ce message dès qu'il en lisait un plus récent — l'ancienne carte ayant alors été
+    // remplacée par la nouvelle, plus aucun événement ne correspond à l'ancien `eventId`. Aucune
+    // appli de référence (Signal, Telegram, Element lui-même) ne fait disparaître une coche "lu"
+    // déjà affichée de cette façon. On calcule donc maintenant « vu » par POSITION dans la
+    // timeline (newest-first, comme `events` ci-dessus) plutôt que par correspondance exacte
+    // d'identifiant : un message est vu dès qu'il est à la même position ou plus ancien que le
+    // point le plus récent que N'IMPORTE QUEL autre participant a atteint — exactement ce que la
+    // mise à jour de `LatestReceiptStateForTimeline` documente elle-même viser (« the one furthest
+    // down in the timeline »). Un identifiant de reçu introuvable dans `events` (timeline pas
+    // encore chargée jusque là) est ignoré plutôt que deviné : on ne prétend jamais un « vu » qu'on
+    // ne peut pas situer.
+    //
+    // `events` est du plus récent au plus ancien (index 0 = le plus récent — vérifié contre
+    // `Timeline` dans le SDK pinné : un événement live s'insère en tête, l'historique en pagination
+    // arrière s'ajoute en queue), donc un indice PLUS GRAND veut dire un message PLUS ANCIEN. Un
+    // reçu « lu jusqu'à X » couvre X et tout ce qui est plus ancien que X, donc tout indice >= celui
+    // de X. Pour « vu par au moins un autre participant », c'est l'indice de reçu le plus PETIT
+    // (celui qui couvre le plus de messages, donc les plus récents) qui fixe le seuil.
+    final otherReceiptIndices = <int>{};
+    for (final receipt in widget.room.receiptState.global.otherUsers.values) {
+      final idx = events.indexWhere((e) => e.eventId == receipt.eventId);
+      if (idx != -1) otherReceiptIndices.add(idx);
+    }
+    final minOtherReceiptIndex =
+        otherReceiptIndices.isEmpty ? null : otherReceiptIndices.reduce((a, b) => a < b ? a : b);
     final verificationStatus = _deviceVerificationStatus();
     return Scaffold(
       appBar: AppBar(
@@ -864,10 +898,13 @@ class _ChatScreenState extends State<ChatScreen> {
                       // on résout l'événement cité pour l'afficher au-dessus de la réponse.
                       final isReply = e.relationshipType == RelationshipTypes.reply;
                       // Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
-                      // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur,
-                      // `Event.receipts` (SDK pinné) donne qui a lu CET événement précisément.
+                      // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur.
+                      // Calculé par position (voir [otherReceiptIndices] ci-dessus), pas par
+                      // correspondance exacte d'identifiant d'événement : vu si ce message est à
+                      // la même position ou plus ancien (indice plus grand, liste du plus récent
+                      // au plus ancien) que le point de lecture le plus permissif.
                       final seenByOther =
-                          mine && e.receipts.any((r) => r.user.id != widget.room.client.userID);
+                          mine && minOtherReceiptIndex != null && i >= minOtherReceiptIndex;
                       return GestureDetector(
                         onLongPress: () => _setReplyTarget(e),
                         child: Align(
