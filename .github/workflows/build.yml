@@ -75,9 +75,16 @@ jobs:
         run: |
           m=$(find build/app/intermediates -path '*playRelease*' -name AndroidManifest.xml | grep -i merged | head -1)
           test -n "$m" || { echo "Manifeste fusionné playRelease introuvable"; exit 1; }
-          if grep -q 'REQUEST_INSTALL_PACKAGES' "$m"; then
-            echo "REQUEST_INSTALL_PACKAGES présente dans la version Play ($m) : refusé."; exit 1
-          fi
+          # Lecture XML (les commentaires du manifeste, conservés à la fusion, citent ce nom).
+          python3 - "$m" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          A = '{http://schemas.android.com/apk/res/android}name'
+          root = ET.parse(sys.argv[1]).getroot()
+          bad = [e.get(A) for e in root.iter() if e.tag in ('uses-permission', 'uses-permission-sdk-23')
+                 and e.get(A) == 'android.permission.REQUEST_INSTALL_PACKAGES']
+          if bad:
+              sys.exit('REQUEST_INSTALL_PACKAGES présente dans la version Play : refusé.')
+          PY
           echo "OK : $m sans REQUEST_INSTALL_PACKAGES"
 
       - name: Construire l'APK (installation directe, avec auto-mise à jour)
