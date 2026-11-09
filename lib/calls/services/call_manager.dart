@@ -255,11 +255,16 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   @override
   Future<void> playRingtone() async {
-    // TODO (hors scope de cette passe) : sonnerie visible/sonore à l'arrivée d'un appel.
+    // Le SDK sonne AVANT initWithInvite, donc avant que createPeerConnection n'applique le
+    // fail-closed : sans ce test, un appel que la politique réseau va refuser (mode Tor/proxy)
+    // ferait sonner le téléphone pour rien, puis s'arrêterait sans explication.
+    final net = await NetConfig.load();
+    if (!CallPolicy.isAllowed(net.mode)) return;
+    await CallOpsecNotifier.notifyIncomingCall();
   }
 
   @override
-  Future<void> stopRingtone() async {}
+  Future<void> stopRingtone() => CallOpsecNotifier.stopIncomingCall();
 }
 
 /// Point d'entrée unique pour démarrer un appel sortant, et porte d'accès à [VoIP] pour le reste

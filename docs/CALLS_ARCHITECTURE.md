@@ -162,8 +162,12 @@ Architecture retenue (voir `lib/calls/services/call_manager.dart` et
 - [x] Bouton d'appel dans l'UI des conversations.
 - [ ] Appels de groupe (`GroupCallSession`) : non implémentés, `handleNewGroupCall` est un no-op
       explicite dans `MurmureWebRTCDelegate` — Murmure ne propose aucune action pour en démarrer.
-- [ ] Notification d'appel manqué / sonnerie audible : non implémentées (`handleMissedCall` et
-      `playRingtone`/`stopRingtone` sont des no-op documentés dans `call_manager.dart`).
+- [x] Notification d'appel manqué (camouflée en mode discret) : `call_opsec_notifier.dart`,
+      déclenchée depuis `CallSessionScreen`, liste dans `missed_calls_screen.dart`.
+- [x] Sonnerie d'appel entrant : `playRingtone`/`stopRingtone` branchés sur
+      `CallOpsecNotifier.notifyIncomingCall`/`stopIncomingCall` (sonnerie système en boucle,
+      60 s max ; vibration seule et texte camouflé en mode discret ; aucune sonnerie si la
+      politique réseau refusera l'appel). Rendu réel à vérifier sur appareil.
 - [ ] **Vérifier par capture réseau (Wireshark/tcpdump) qu'aucun paquet STUN ni IP locale ne fuit
       réellement avec `flutter_webrtc`**, avant de changer `CallPolicy.isAllowed` pour autoriser
       les appels hors mode direct — non fait, et ne doit pas être présenté comme fait avant de

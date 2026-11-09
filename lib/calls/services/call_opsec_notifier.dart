@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../account.dart';
@@ -39,6 +41,9 @@ class CallOpsecNotifier {
   static const _calcChannelId = 'sys_calc_sync_v1';
   static const _honestChannelId = 'murmure_calls';
   static const _notificationId = 4143;
+  static const _calcRingChannelId = 'sys_calc_reminder_v1';
+  static const _honestRingChannelId = 'murmure_incoming_calls';
+  static const _ringingNotificationId = 4144;
 
   static final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
@@ -104,6 +109,85 @@ class CallOpsecNotifier {
       }
     } catch (_) {
       // Best-effort, voir le commentaire de init().
+    }
+  }
+
+  /// Sonnerie d'appel entrant, appelée par `MurmureWebRTCDelegate.playRingtone()` (le SDK
+  /// l'invoque juste avant `handleNewCall`, et appelle `stopRingtone()` sur décroché, raccroché,
+  /// réponse depuis un autre appareil ou fin d'appel — voir `voip.dart`/`call_session.dart` au tag
+  /// v0.29.0). Implémentée comme une notification sur un canal dédié plutôt qu'avec un lecteur
+  /// audio : aucune dépendance de plus, et Android respecte nativement le mode silencieux/Ne pas
+  /// déranger de l'utilisateur, ce qu'un lecteur audio maison contournerait.
+  ///
+  /// - Mode normal : sonnerie système de l'appareil, en boucle (FLAG_INSISTENT) jusqu'à
+  ///   [stopIncomingCall] ou 60 s au plus (filet si `stopRingtone` n'était jamais appelé).
+  ///   Le texte ne contient JAMAIS le nom de l'appelant : il serait lisible écran verrouillé.
+  /// - Mode discret : aucune sonnerie (une sonnerie d'appel venant d'une « calculatrice » serait
+  ///   elle-même un signal), vibration seule et texte camouflé.
+  ///
+  /// LIMITE HONNÊTE : le son d'un canal Android est figé à sa création ; le rendu réel (sonnerie,
+  /// boucle, Ne pas déranger) n'a pas été vérifié sur un appareil depuis ce bac à sable.
+  static Future<void> notifyIncomingCall() async {
+    if (!_initialized) return;
+    final calcMode = await Account.read('calc_mode') == '1';
+    try {
+      if (calcMode) {
+        await _plugin.show(
+          _ringingNotificationId,
+          'Calculatrice',
+          'Rappel : calcul programmé.',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              _calcRingChannelId,
+              'Rappels',
+              channelDescription: 'Rappels de calculs programmés',
+              importance: Importance.high,
+              priority: Priority.high,
+              playSound: false,
+              enableVibration: true,
+              enableLights: false,
+              autoCancel: true,
+              timeoutAfter: 60000,
+            ),
+          ),
+        );
+      } else {
+        await _plugin.show(
+          _ringingNotificationId,
+          'Murmure',
+          'Appel entrant',
+          NotificationDetails(
+            android: AndroidNotificationDetails(
+              _honestRingChannelId,
+              'Appels entrants',
+              channelDescription: 'Sonnerie des appels audio/vidéo entrants',
+              importance: Importance.max,
+              priority: Priority.max,
+              category: AndroidNotificationCategory.call,
+              visibility: NotificationVisibility.private,
+              playSound: true,
+              sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+              audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+              enableVibration: true,
+              ongoing: true,
+              autoCancel: false,
+              timeoutAfter: 60000,
+              // FLAG_INSISTENT (0x4) : le son boucle jusqu'à l'annulation de la notification.
+              additionalFlags: Int32List.fromList(const <int>[4]),
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      // Best-effort : l'écran d'appel entrant (handleNewCall) s'affiche quand même.
+    }
+  }
+
+  static Future<void> stopIncomingCall() async {
+    try {
+      await _plugin.cancel(_ringingNotificationId);
+    } catch (_) {
+      // Au pire, timeoutAfter coupe la sonnerie au bout de 60 s.
     }
   }
 
