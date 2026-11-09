@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import '../message_notifier.dart';
 import 'blocked_users_screen.dart';
 
 /// Permet de voir et changer son pseudo (nom affiché) à tout moment, sans recréer de compte.
@@ -30,10 +31,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _saving = false;
   String? _error;
   String? _savedMessage;
+  bool _notifMessages = true;
 
   @override
   void initState() {
     super.initState();
+    MessageNotifier.isEnabled().then((v) {
+      if (mounted) setState(() => _notifMessages = v);
+    });
     _load();
   }
 
@@ -136,6 +141,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         : const Text('Enregistrer'),
                   ),
                   const SizedBox(height: 20),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.notifications_outlined),
+                    title: const Text('Notifications de messages'),
+                    subtitle: const Text(
+                        'Affiche « Nouveau message » sans jamais montrer le contenu ni '
+                        "l'expéditeur. Uniquement tant que l'appli tourne ; aucune en mode discret."),
+                    value: _notifMessages,
+                    onChanged: (v) {
+                      setState(() => _notifMessages = v);
+                      MessageNotifier.setEnabled(v);
+                    },
+                  ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.block),

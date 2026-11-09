@@ -4,6 +4,11 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../account.dart';
 
+/// MISE À JOUR (Google Play) : en mode discret, le texte est désormais NEUTRE (« Rappel —
+/// Nouvelle activité. ») au lieu d'imiter une calculatrice, pour ne pas enfreindre la policy
+/// « Impersonation » (Android affiche de toute façon le nom réel de l'appli dans l'en-tête).
+/// Les mentions « calculatrice » ci-dessous décrivent l'ancien comportement.
+///
 /// Notification d'appel manqué, adaptée au mode discret (voir `lib/stealth.dart` et
 /// `ui/lock_screens.dart`) : camouflée en notification de calculatrice quand le mode discret est
 /// actif, honnête (« Murmure — Appel manqué ») sinon.
@@ -38,10 +43,10 @@ import '../../account.dart';
 class CallOpsecNotifier {
   CallOpsecNotifier._();
 
-  static const _calcChannelId = 'sys_calc_sync_v1';
+  static const _calcChannelId = 'discreet_activity_v2';
   static const _honestChannelId = 'murmure_calls';
   static const _notificationId = 4143;
-  static const _calcRingChannelId = 'sys_calc_reminder_v1';
+  static const _calcRingChannelId = 'discreet_ring_v2';
   static const _honestRingChannelId = 'murmure_incoming_calls';
   static const _ringingNotificationId = 4144;
 
@@ -73,13 +78,13 @@ class CallOpsecNotifier {
       if (calcMode) {
         await _plugin.show(
           _notificationId,
-          'Calculatrice',
-          'Indexation des fonctions trigonométriques terminée.',
+          'Rappel',
+          'Nouvelle activité.',
           const NotificationDetails(
             android: AndroidNotificationDetails(
               _calcChannelId,
-              'Synchronisation arrière-plan',
-              channelDescription: "Maintenance automatique de l'historique des calculs",
+              'Activité (mode discret)',
+              channelDescription: 'Notifications neutres affichées en mode discret',
               importance: Importance.low,
               priority: Priority.low,
               playSound: false,
@@ -134,13 +139,13 @@ class CallOpsecNotifier {
       if (calcMode) {
         await _plugin.show(
           _ringingNotificationId,
-          'Calculatrice',
-          'Rappel : calcul programmé.',
+          'Rappel',
+          'Nouvelle activité.',
           const NotificationDetails(
             android: AndroidNotificationDetails(
               _calcRingChannelId,
-              'Rappels',
-              channelDescription: 'Rappels de calculs programmés',
+              'Rappels (mode discret)',
+              channelDescription: 'Vibration neutre des appels entrants en mode discret',
               importance: Importance.high,
               priority: Priority.high,
               playSound: false,

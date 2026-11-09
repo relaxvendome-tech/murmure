@@ -11,13 +11,24 @@ void main() {
     expect(isExpiredAt(originServerTs: sent, ttlSeconds: -5, now: later), isFalse);
   });
 
-  test('expire strictement après le TTL', () {
+  test('expire strictement après TTL + tolérance d\'horloge', () {
     expect(isExpiredAt(originServerTs: sent, ttlSeconds: 300,
-        now: sent.add(const Duration(seconds: 299))), isFalse);
+        now: sent.add(const Duration(seconds: 360))), isFalse);
     expect(isExpiredAt(originServerTs: sent, ttlSeconds: 300,
-        now: sent.add(const Duration(seconds: 300))), isFalse);
-    expect(isExpiredAt(originServerTs: sent, ttlSeconds: 300,
-        now: sent.add(const Duration(seconds: 301))), isTrue);
+        now: sent.add(const Duration(seconds: 361))), isTrue);
+  });
+
+  test('message antérieur à l\'activation : jamais expiré (pas d\'effacement rétroactif)', () {
+    final enabled = sent.add(const Duration(hours: 1));
+    final much = sent.add(const Duration(days: 30));
+    expect(isExpiredAt(originServerTs: sent, ttlSeconds: 300, now: much, enabledAt: enabled),
+        isFalse);
+    expect(isExpiredAt(originServerTs: enabled.add(const Duration(seconds: 1)), ttlSeconds: 300,
+        now: much, enabledAt: enabled), isTrue);
+  });
+
+  test('TTL démesuré borné à 1 an', () {
+    expect(parseTtlSeconds({'ttl_seconds': 1 << 40}), kMaxTtlSeconds);
   });
 
   test('horloge locale en retard : non expiré', () {

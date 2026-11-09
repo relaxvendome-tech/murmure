@@ -5,6 +5,8 @@
     <!-- Réseau : requis pour Matrix. INTERNET seul ; pas d'accès SMS/contacts/appels. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Déverrouillage biométrique optionnel (local_auth) : l'interface seulement, jamais les clés. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <!-- REQUEST_INSTALL_PACKAGES n'est volontairement PAS déclarée : Murmure n'est distribuée que
          par Google Play, qui assure seul les mises à jour. Voir docs/UPDATES.md. Le `remove` ci-dessous est un

@@ -9,6 +9,7 @@ import 'calls/services/call_manager.dart';
 import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
 import 'media.dart';
+import 'message_notifier.dart';
 import 'mesh/mesh_opsec_notifier.dart';
 import 'network.dart';
 import 'ui/lock_screens.dart';
@@ -52,6 +53,7 @@ Future<void> main() async {
   // l'aveugle, sans compilateur Flutter local pour les valider un par un.
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
   await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
+  await MessageNotifier.init(); // notifications de nouveaux messages (sans contenu), best-effort
   // Trouvé en audit interne (revue multi-IA croisée) : sans cet appel, un message reçu en mode
   // maillé Bluetooth (voir mesh/mesh.dart) n'était signalé que si `MeshScreen` était déjà ouvert
   // (seul abonné précédent à `Mesh.instance.events`). S'abonne ici une fois, pour toute la durée
@@ -182,6 +184,7 @@ class _MurmureAppState extends State<MurmureApp> {
       // ci-dessus, pour ne manquer aucune demande entrante dès le premier rendu.
       final verificationManager = VerificationManager(client: client)..navigatorKey = murmureNavigatorKey;
       verificationManager.start();
+      MessageNotifier.attach(client); // écoute client.onEvent, voir message_notifier.dart
 
       if (!mounted) return;
       setState(() {

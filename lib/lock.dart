@@ -34,6 +34,11 @@ enum PinResult {
 /// à la réécrire.
 class AppLock {
   static const maxFailures = 10;
+
+  /// Au bout de ce nombre d'échecs de PIN consécutifs, le déverrouillage biométrique est coupé
+  /// (clé `bio_enabled`) : quelqu'un qui devine le PIN n'a pas à pouvoir compter sur une biométrie
+  /// laissée active ; il faut la réactiver depuis les réglages.
+  static const bioMaxPinFailures = 3;
   static const minLength = 4;
   static const maxLength = 8;
   static final _kdf = Pbkdf2(macAlgorithm: Hmac.sha256(), iterations: 120000, bits: 256);
@@ -132,7 +137,7 @@ class AppLock {
   static Future<void> removeDuress() => Account.delete('duress_hash');
 
   static Future<void> disable() async {
-    for (final k in ['pin_hash', 'duress_hash', 'pin_fails']) {
+    for (final k in ['pin_hash', 'duress_hash', 'pin_fails', 'bio_enabled']) {
       await Account.delete(k);
     }
   }
@@ -167,6 +172,7 @@ class AppLock {
     }
     final fails = maxFailures - await remaining() + 1;
     await Account.write('pin_fails', '$fails');
+    if (fails >= bioMaxPinFailures) await Account.delete('bio_enabled');
     return fails >= maxFailures ? PinResult.exhausted : PinResult.wrong;
   }
 

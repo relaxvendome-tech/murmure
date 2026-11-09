@@ -3,6 +3,8 @@ import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import '../network.dart';
+import '../verification/device_verification_status.dart';
+import 'device_verification_screen.dart';
 
 /// Trouvé en audit interne (revue multi-IA croisée, recoupée par Qwen : « une fois le groupe
 /// créé, il n'y a aucun moyen de l'administrer »). `NewGroupScreen` (group_screen.dart) crée un
@@ -29,6 +31,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   bool _busyMembers = false;
   String? _error;
   List<User> _participants = [];
+  bool _loadingKeys = false;
+  bool _keysError = false;
 
   @override
   void initState() {
@@ -53,6 +57,103 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     } catch (_) {
       if (mounted) setState(() => _participants = widget.room.getParticipants());
     }
+    await _loadDeviceKeys();
+  }
+
+  /// `Client.userDeviceKeys` peut être incomplet avant la sync : on demande explicitement les
+  /// clés des membres affichés (`updateUserDeviceKeys(additionalUsers:)`). En cas d'échec on
+  /// garde ce qui est déjà connu et on le signale (les boucliers restent gris).
+  Future<void> _loadDeviceKeys() async {
+    if (!mounted || _loadingKeys) return;
+    final ids = _participants.map((u) => u.id).toSet();
+    if (ids.isEmpty) return;
+    setState(() {
+      _loadingKeys = true;
+      _keysError = false;
+    });
+    try {
+      await widget.room.client.updateUserDeviceKeys(additionalUsers: ids);
+      if (mounted) setState(() => _loadingKeys = false);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loadingKeys = false;
+          _keysError = true;
+        });
+      }
+    }
+  }
+
+  Future<void> _openVerification(User u) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DeviceVerificationScreen(
+        client: widget.room.client,
+        userId: u.id,
+        displayName: u.calcDisplayname(),
+      ),
+    ));
+    // L'état a pu changer pendant l'écran ouvert.
+    if (mounted) setState(() {});
+  }
+
+  Widget _shield(bool? status) {
+    if (status == null) {
+      return const Icon(Icons.shield_outlined, color: Colors.grey, semanticLabel: 'Aucune clé connue');
+    }
+    return Icon(
+      status ? Icons.verified_user : Icons.gpp_maybe_outlined,
+      color: status ? Colors.green : Colors.orange,
+      semanticLabel: status ? 'Tous les appareils vérifiés' : 'Appareil non vérifié',
+    );
+  }
+
+  Widget _summary(String? myId) {
+    final scheme = Theme.of(context).colorScheme;
+    final others = _participants
+        .where((u) => u.id != myId && (u.membership == Membership.join || u.membership == Membership.invite))
+        .toList();
+    final verified = others
+        .where((u) => userVerificationStatus(widget.room.client, u.id) == true)
+        .length;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$verified membres sur ${others.length} vérifiés',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (_loadingKeys)
+                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Les messages restent envoyés à tous les appareils des membres, y compris ceux qui ne '
+            'sont pas vérifiés : la vérification n\'affiche que l\'état de confiance, elle ne '
+            'bloque personne.',
+            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+          ),
+          if (_keysError) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Impossible de récupérer les clés de certains membres pour l\'instant.',
+              style: TextStyle(color: scheme.error, fontSize: 13),
+            ),
+            TextButton(onPressed: _loadingKeys ? null : _loadDeviceKeys, child: const Text('Réessayer')),
+          ],
+        ],
+      ),
+    );
   }
 
   Future<void> _saveName() async {
@@ -204,6 +305,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             ],
           ),
           const SizedBox(height: 16),
+          _summary(myId),
+          const SizedBox(height: 16),
           Text(
             'Membres (${_participants.length})',
             style: Theme.of(context).textTheme.titleMedium,
@@ -213,13 +316,19 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                 leading: const CircleAvatar(child: Icon(Icons.person)),
                 title: Text(u.calcDisplayname()),
                 subtitle: u.membership == Membership.invite ? const Text('Invitation en attente') : null,
-                trailing: (room.canKick && u.id != myId)
-                    ? IconButton(
+                onTap: u.id == myId ? null : () => _openVerification(u),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (u.id != myId) _shield(userVerificationStatus(room.client, u.id)),
+                    if (room.canKick && u.id != myId)
+                      IconButton(
                         icon: const Icon(Icons.person_remove_outlined),
                         tooltip: 'Retirer',
                         onPressed: _busyMembers ? null : () => _removeMember(u),
-                      )
-                    : null,
+                      ),
+                  ],
+                ),
               )),
           if (_error != null) ...[
             const SizedBox(height: 12),

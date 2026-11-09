@@ -37,20 +37,39 @@ String ephemeralLabel(int ttlSeconds) {
 /// Logique pure d'expiration (testable sans serveur) : un message est expiré si son âge dépasse
 /// STRICTEMENT le TTL. TTL <= 0 : jamais expiré. Âge négatif (horloge locale en retard sur le
 /// serveur) : non expiré.
+///
+/// [enabledAt] : date d'activation du réglage. Un message ANTÉRIEUR n'expire jamais — activer
+/// « 5 minutes » ne doit pas effacer rétroactivement tout l'historique (revue interne).
+/// [kClockSkewTolerance] : marge contre une horloge locale en avance sur le serveur, qui
+/// masquerait sinon un message à peine reçu (revue croisée Grok, vérifiée).
+const Duration kClockSkewTolerance = Duration(seconds: 60);
+
+/// TTL maximal accepté depuis le contenu d'état (un autre client peut écrire n'importe quoi).
+const int kMaxTtlSeconds = 365 * 86400;
+
 bool isExpiredAt({
   required DateTime originServerTs,
   required int ttlSeconds,
   required DateTime now,
+  DateTime? enabledAt,
 }) {
   if (ttlSeconds <= 0) return false;
-  return now.difference(originServerTs) > Duration(seconds: ttlSeconds);
+  if (enabledAt != null && originServerTs.isBefore(enabledAt)) return false;
+  return now.difference(originServerTs) > Duration(seconds: ttlSeconds) + kClockSkewTolerance;
 }
 
 /// Extrait un TTL valide d'un contenu d'état brut ; tout ce qui n'est pas un entier > 0 donne 0.
 int parseTtlSeconds(Map<String, Object?>? content) {
   final v = content?['ttl_seconds'];
-  if (v is int && v > 0) return v;
+  if (v is int && v > 0) return v > kMaxTtlSeconds ? kMaxTtlSeconds : v;
   return 0;
+}
+
+/// Date à laquelle le réglage actuel a été posé (horodatage serveur de l'événement d'état), ou
+/// null si inconnue (état « stripped » d'une invitation).
+DateTime? ephemeralEnabledAt(Room room) {
+  final st = room.getState(kEphemeralEventType);
+  return st is Event ? st.originServerTs : null;
 }
 
 /// TTL (secondes) configuré pour cette conversation ; 0 = désactivé.
@@ -65,7 +84,7 @@ Future<void> setEphemeralTtl(Room room, int ttlSeconds) async {
     room.id,
     kEphemeralEventType,
     '',
-    {'ttl_seconds': ttlSeconds < 0 ? 0 : ttlSeconds},
+    {'ttl_seconds': ttlSeconds.clamp(0, kMaxTtlSeconds)},
   );
 }
 
@@ -74,6 +93,7 @@ bool isExpired(Event event, Room room, {DateTime? now}) => isExpiredAt(
       originServerTs: event.originServerTs,
       ttlSeconds: ephemeralTtlSeconds(room),
       now: now ?? DateTime.now(),
+      enabledAt: ephemeralEnabledAt(room),
     );
 
 /// Service qui rédige périodiquement les messages expirés ENVOYÉS PAR L'UTILISATEUR.
@@ -126,6 +146,15 @@ class EphemeralService {
     Timeline? timeline;
     try {
       timeline = await room.getTimeline();
+      // La timeline chargée ne contient que les derniers événements : remonter l'historique
+      // (5 pages max par balayage) tant qu'il peut rester des messages postérieurs à
+      // l'activation, sinon un vieux message expiré ne serait jamais rédigé (revue Grok).
+      final enabledAt = ephemeralEnabledAt(room);
+      for (var page = 0; page < 5 && timeline.canRequestHistory; page++) {
+        final oldest = timeline.events.isEmpty ? null : timeline.events.last.originServerTs;
+        if (oldest != null && enabledAt != null && oldest.isBefore(enabledAt)) break;
+        await timeline.requestHistory();
+      }
       final now = DateTime.now();
       final expired = timeline.events.where((e) =>
           e.type == EventTypes.Message &&
@@ -136,6 +165,7 @@ class EphemeralService {
             originServerTs: e.originServerTs,
             ttlSeconds: ephemeralTtlSeconds(room),
             now: now,
+            enabledAt: enabledAt,
           ));
       for (final e in expired.toList()) {
         if (!_inFlight.add(e.eventId)) continue;

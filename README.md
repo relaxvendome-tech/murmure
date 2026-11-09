@@ -39,6 +39,7 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
   `docs/UPDATES.md`
 - Verrou PIN + code de contrainte + mode discret calculatrice (écran de verrou uniquement, icône
   de l'appli toujours honnête — voir `docs/UPDATES.md`)
+- Déverrouillage biométrique optionnel (empreinte/visage, désactivé par défaut) en complément du PIN : n'ouvre que l'interface, jamais sur l'écran calculatrice, ne remplace pas le code de contrainte
 - Connexion directe, via Tor (Orbot), ou via proxy SOCKS5 personnalisé — basculable sans recompiler
 - Mode Bluetooth maillé pour fonctionner sans réseau (voir `lib/mesh/`, limites documentées dans
   `lib/mesh/mesh.dart`)

@@ -13,7 +13,9 @@ import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
 import '../ephemeral.dart';
 import '../media.dart';
+import '../message_notifier.dart';
 import '../network.dart';
+import '../verification/device_verification_status.dart';
 import 'device_verification_screen.dart';
 import 'group_info_screen.dart';
 import 'group_screen.dart';
@@ -515,6 +517,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    MessageNotifier.activeRoomId = widget.room.id;
     widget.room.getTimeline(onUpdate: () {
       if (mounted) setState(() {});
       _maybeSendReadMarker();
@@ -597,6 +600,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // événements du salon en arrière-plan.
   @override
   void dispose() {
+    if (MessageNotifier.activeRoomId == widget.room.id) MessageNotifier.activeRoomId = null;
     _textCtrl.dispose();
     _timeline?.cancelSubscriptions();
     _typingStopTimer?.cancel();
@@ -659,9 +663,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!widget.room.isDirectChat) return null;
     final otherId = widget.room.directChatMatrixID;
     if (otherId == null) return null;
-    final devices = widget.room.client.userDeviceKeys[otherId]?.deviceKeys.values;
-    if (devices == null || devices.isEmpty) return null;
-    return devices.every((d) => d.verified);
+    return userVerificationStatus(widget.room.client, otherId);
   }
 
   Future<void> _openDeviceVerification() async {

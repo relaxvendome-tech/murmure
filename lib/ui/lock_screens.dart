@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import '../biometric.dart';
 import '../calls/services/call_manager.dart';
 import '../calls/services/call_opsec_notifier.dart';
 import '../config.dart';
@@ -241,6 +242,8 @@ class _PinScreenState extends State<PinScreen> {
   String? _error;
   bool _busy = false;
   int? _remaining;
+  bool _bioOffered = false; // biométrie activée ET PIN existant : bouton + prompt au démarrage
+  bool _bioRunning = false;
 
   @override
   void initState() {
@@ -249,6 +252,35 @@ class _PinScreenState extends State<PinScreen> {
       AppLock.remaining().then((r) {
         if (mounted) setState(() => _remaining = r);
       });
+      unawaited(_initBiometric());
+    }
+  }
+
+  /// Propose la biométrie au démarrage de l'écran de verrou NORMAL. Jamais appelé par
+  /// [CalculatorLockScreen] (mode discret) : un prompt biométrique trahirait l'appli. Le PIN
+  /// reste toujours utilisable ; la biométrie n'ouvre que l'UI (clé SQLCipher inchangée).
+  Future<void> _initBiometric() async {
+    final offered = await Biometric.enabled() && await AppLock.enabled() && await Biometric.available();
+    if (!mounted || !offered) return;
+    setState(() => _bioOffered = true);
+    await _tryBiometric();
+  }
+
+  Future<void> _tryBiometric() async {
+    if (_bioRunning || _busy || !mounted) return;
+    _bioRunning = true;
+    final r = await Biometric.authenticate('Déverrouillez Murmure');
+    _bioRunning = false;
+    if (!mounted) return;
+    switch (r) {
+      case BioResult.success:
+        widget.onSuccess?.call();
+      case BioResult.fallback:
+        break; // retour silencieux au PIN
+      case BioResult.lockedTemporarily:
+        setState(() => _error = 'Biométrie verrouillée temporairement. Utilisez votre code.');
+      case BioResult.lockedPermanently:
+        setState(() => _error = 'Biométrie verrouillée par Android. Utilisez votre code.');
     }
   }
 
@@ -411,6 +443,13 @@ class _PinScreenState extends State<PinScreen> {
                 ],
               ),
             ),
+            if (_bioOffered)
+              IconButton(
+                tooltip: 'Empreinte ou visage',
+                icon: const Icon(Icons.fingerprint),
+                iconSize: 36,
+                onPressed: _busy ? null : _tryBiometric,
+              ),
             const SizedBox(height: 16),
             FilledButton(
               onPressed: _busy ? null : _submit,
@@ -480,6 +519,8 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
   bool _pinEnabled = false;
   bool _hasDuress = false;
   bool _calcMode = false;
+  bool _bioEnabled = false;
+  bool _bioAvailable = false;
   bool _loading = true;
 
   @override
@@ -492,11 +533,15 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
     final enabled = await AppLock.enabled();
     final duress = await AppLock.hasDuress();
     final calc = await Account.read('calc_mode');
+    final bio = await Biometric.enabled();
+    final bioAvail = enabled && await Biometric.available();
     if (!mounted) return;
     setState(() {
       _pinEnabled = enabled;
       _hasDuress = duress;
       _calcMode = calc == '1';
+      _bioEnabled = bio && enabled;
+      _bioAvailable = bioAvail;
       _loading = false;
     });
   }
@@ -537,6 +582,34 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
             },
           ),
           if (_pinEnabled) ...[
+            SwitchListTile(
+              title: const Text('Déverrouiller avec l\'empreinte/le visage'),
+              subtitle: Text(!_bioAvailable && !_bioEnabled
+                  ? 'Indisponible : aucune empreinte ou visage enregistré sur cet appareil.'
+                  : 'Ouvre l\'appli sans taper le code, qui reste toujours possible. '
+                      'Ne permet pas d\'entrer le code de contrainte.'
+                      '${_calcMode ? ' Inactif en mode discret.' : ''}'),
+              value: _bioEnabled,
+              onChanged: (_bioAvailable || _bioEnabled)
+                  ? (v) async {
+                      if (v) {
+                        // Activation = authentification biométrique réussie d'abord.
+                        final r = await Biometric.authenticate('Confirmez pour activer le déverrouillage biométrique');
+                        if (!mounted) return;
+                        if (r == BioResult.success) {
+                          await Biometric.setEnabled(true);
+                        } else if (r == BioResult.lockedTemporarily || r == BioResult.lockedPermanently) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                              content: Text('Biométrie verrouillée par Android. Réessayez plus tard.')));
+                        }
+                      } else {
+                        await Biometric.setEnabled(false);
+                      }
+                      if (!mounted) return;
+                      await _load();
+                    }
+                  : null,
+            ),
             SwitchListTile(
               title: const Text('Code de contrainte'),
               subtitle: const Text('Un second code qui efface tout, en silence, ouvre une appli vierge'),

@@ -68,7 +68,15 @@ class CallPolicy {
       // de laisser WebRTC tenter sa chance avec des candidats host/srflx non maîtrisés.
       return null;
     }
-    if (creds.uris.isEmpty) return null;
+    // Défense en profondeur : ne garder QUE des URI TURN, même si le homeserver renvoyait une
+    // entrée stun: (mauvaise config ou serveur compromis). Plus aucune URI exploitable → refus.
+    final turnUris = creds.uris
+        .where((u) {
+          final l = u.trim().toLowerCase();
+          return l.startsWith('turn:') || l.startsWith('turns:');
+        })
+        .toList(growable: false);
+    if (turnUris.isEmpty) return null;
 
     return CallIceConfig(
       // Volontairement AUCUNE entrée `stun:` ici — voir le point 1 de
@@ -76,7 +84,7 @@ class CallPolicy {
       // l'appelant, ce qu'on refuse précisément dès que le mode n'est pas direct.
       iceServers: [
         CallIceServer(
-          urls: creds.uris,
+          urls: turnUris,
           username: creds.username,
           credential: creds.password,
         ),
