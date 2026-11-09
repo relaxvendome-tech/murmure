@@ -155,9 +155,28 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             ?: throw IllegalStateException("Cet appareil ne peut pas annoncer de service BLE")
         advertiser = leAdvertiser
 
+        // Trouvé en audit interne (demande explicite de l'utilisateur : maximiser la portée du
+        // relais Bluetooth) : `ADVERTISE_TX_POWER_MEDIUM` est le niveau par défaut suggéré par la
+        // documentation Android pour un usage général, pas le maximum que l'API autorise une appli
+        // à demander. `ADVERTISE_TX_POWER_HIGH` est le niveau le plus élevé exposé par
+        // `AdvertiseSettings` (API publique, documentée depuis l'API 21) : la puce Bluetooth du
+        // téléphone (via le pilote/HAL du fabricant) reste seule à décider de la puissance réelle
+        // émise, et la clamp de toute façon aux limites réglementaires et matérielles — cette API
+        // ne permet jamais de dépasser ce que l'antenne et la réglementation autorisent, seulement
+        // d'utiliser le maximum qu'elles autorisent déjà. `ADVERTISE_MODE_BALANCED` (intervalle
+        // d'annonce) est volontairement conservé : il ne change rien à la portée radio elle-même
+        // (contrairement à la puissance d'émission), seulement à la fréquence des annonces, et
+        // `ADVERTISE_MODE_LOW_LATENCY` a un coût batterie réel pour un gain qui n'est pas celui
+        // demandé ici — voir le commentaire sur l'autonomie dans `Mesh.start` (mesh.dart).
+        // LIMITE HONNÊTE, à ne jamais présenter autrement : la portée effective reste bornée par
+        // l'antenne et le firmware Bluetooth de CHAQUE téléphone (celui-ci ET celui d'en face),
+        // pas seulement par ce réglage — aucune mesure sur appareil physique n'a été faite dans ce
+        // bac à sable (qui n'a pas de matériel Bluetooth), et aucune comparaison chiffrée face à
+        // une autre application (dont Bitchat) n'a été vérifiée. Ce correctif demande au système
+        // le maximum que l'API publique autorise, rien de plus garanti que cela.
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(true)
             .build()
         // Pas de nom d'appareil ni d'identifiant dans l'annonce : seul l'UUID de service Murmure
