@@ -18,6 +18,7 @@ import '../media.dart';
 import '../message_notifier.dart';
 import '../network.dart';
 import '../privacy_settings.dart';
+import '../reactions.dart';
 import '../verification/device_verification_status.dart';
 import 'device_verification_screen.dart';
 import 'group_info_screen.dart';
@@ -676,6 +677,97 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _cancelReply() => setState(() => _replyingTo = null);
 
+  /// Réactions (emoji) actives sur [e] d'après la timeline chargée, réduites à ce dont
+  /// lib/reactions.dart a besoin. `Event.aggregatedEvents` (SDK pinné) retire déjà lui-même une
+  /// réaction redevenue redactée (voir `Timeline.removeAggregatedEvent`) ; `!r.redacted` reste une
+  /// garde défensive bon marché plutôt qu'une correction d'un défaut connu du SDK.
+  List<ReactionEntry> _reactionsOf(Event e) {
+    final timeline = _timeline;
+    if (timeline == null) return const [];
+    final result = <ReactionEntry>[];
+    for (final r in e.aggregatedEvents(timeline, RelationshipTypes.reaction)) {
+      if (r.redacted) continue;
+      final key = reactionKeyOf(r.content);
+      if (key == null) continue;
+      result.add((senderId: r.senderId, key: key));
+    }
+    return result;
+  }
+
+  /// Bascule la réaction [key] de l'utilisateur sur [target] : l'ajoute si absente, retire SES
+  /// propres réactions portant ce même emoji si déjà présente (plusieurs appareils du même compte
+  /// pourraient en théorie en avoir posé plus d'une ; on les retire toutes par cohérence). Jamais
+  /// de retour visuel bloquant en cas d'échec (hors ligne, droit insuffisant) : la timeline reste
+  /// la seule source de vérité affichée, un nouvel appui retentera au prochain appui.
+  Future<void> _toggleReaction(Event target, String key) async {
+    final myId = widget.room.client.userID;
+    if (myId == null) return;
+    final timeline = _timeline;
+    if (timeline == null) return;
+    final mine = target
+        .aggregatedEvents(timeline, RelationshipTypes.reaction)
+        .where((r) => !r.redacted && r.senderId == myId && reactionKeyOf(r.content) == key)
+        .toList();
+    try {
+      if (mine.isNotEmpty) {
+        for (final r in mine) {
+          await r.redactEvent();
+        }
+      } else {
+        await widget.room.sendReaction(target.eventId, key);
+      }
+    } catch (_) {
+      // Best-effort : voir le commentaire ci-dessus.
+    }
+  }
+
+  /// Menu d'appui long sur un message : réagir (emoji rapides) ou répondre. Remplace l'ancien
+  /// comportement (appui long = répondre directement) par un choix explicite, pour ajouter les
+  /// réactions sans perdre l'accès à la réponse.
+  Future<void> _showMessageActions(Event e) async {
+    final myId = widget.room.client.userID;
+    final existing = _reactionsOf(e);
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final emoji in kQuickReactions)
+                    IconButton(
+                      icon: Text(emoji, style: const TextStyle(fontSize: 22)),
+                      tooltip: myId != null && hasOwnReaction(existing, myId, emoji)
+                          ? 'Retirer cette réaction'
+                          : 'Réagir avec $emoji',
+                      onPressed: () {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(_toggleReaction(e, emoji));
+                      },
+                    ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.reply_outlined),
+              title: const Text('Répondre'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _setReplyTarget(e);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _refreshTypingUsers() {
     final myId = widget.room.client.userID;
     final ids = widget.room.typingUsers.map((u) => u.id).where((id) => id != myId).toSet();
@@ -1191,8 +1283,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       // au plus ancien) que le point de lecture le plus permissif.
                       final seenByOther =
                           mine && minOtherReceiptIndex != null && i >= minOtherReceiptIndex;
+                      final reactions = undecryptable ? const <ReactionEntry>[] : _reactionsOf(e);
                       return GestureDetector(
-                        onLongPress: undecryptable ? null : () => _setReplyTarget(e),
+                        onLongPress: undecryptable ? null : () => _showMessageActions(e),
                         child: Align(
                           alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
                           child: Container(
@@ -1240,6 +1333,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   Text(
                                     isReply ? _stripReplyFallback(e.text) : e.text,
                                     style: TextStyle(color: textColor),
+                                  ),
+                                if (reactions.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Wrap(
+                                      spacing: 4,
+                                      runSpacing: 4,
+                                      children: [
+                                        for (final entry
+                                            in groupReactionsBySenders(reactions).entries)
+                                          _ReactionChip(
+                                            emoji: entry.key,
+                                            count: entry.value.length,
+                                            mine: entry.value.contains(widget.room.client.userID),
+                                            onTap: () => _toggleReaction(e, entry.key),
+                                          ),
+                                      ],
+                                    ),
                                   ),
                                 const SizedBox(height: 2),
                                 // Trouvé en audit interne, suite à la revue croisée IA sur l'écart avec
@@ -1408,6 +1519,56 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Une chip de réaction (emoji + nombre) sous un message — voir [_ChatScreenState._toggleReaction].
+/// [mine] : au moins un appareil de l'utilisateur courant a posé cette réaction (mise en évidence
+/// visuelle, comme Telegram/Signal) ; un appui bascule (ajoute si absente, retire la ou les
+/// réactions de l'utilisateur courant portant ce même emoji si déjà présente).
+class _ReactionChip extends StatelessWidget {
+  const _ReactionChip({
+    required this.emoji,
+    required this.count,
+    required this.mine,
+    required this.onTap,
+  });
+  final String emoji;
+  final int count;
+  final bool mine;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: mine ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+          border: mine ? Border.all(color: scheme.primary) : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 13)),
+            if (count > 1) ...[
+              const SizedBox(width: 3),
+              Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: mine ? scheme.onPrimaryContainer : scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

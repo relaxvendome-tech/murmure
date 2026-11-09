@@ -43,6 +43,8 @@ avec plusieurs failles de sécurité de la 2.3.0 corrigées dès la conception :
 - Connexion directe, via Tor (Orbot), ou via proxy SOCKS5 personnalisé — basculable sans recompiler
 - Mode Bluetooth maillé pour fonctionner sans réseau (voir `lib/mesh/`, limites documentées dans
   `lib/mesh/mesh.dart`)
+- Réponse à un message et réactions (emoji) — voir `lib/reactions.dart` ; pas encore d'édition de
+  message envoyé
 
 ## Structure
 
