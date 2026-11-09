@@ -5,13 +5,23 @@ import '../network.dart';
 /// Politique d'appel : décide SI un appel peut démarrer et construit la configuration ICE à lui
 /// donner, selon le mode réseau choisi par l'utilisateur (voir `docs/CALLS_ARCHITECTURE.md`).
 ///
-/// LIMITE HONNÊTE — ce que ce fichier NE fait PAS : il ne lance aucun appel, n'intègre aucun
-/// plugin WebRTC (`flutter_webrtc` n'est pas une dépendance de ce projet), et ne construit aucune
-/// interface utilisateur. C'est une politique pure : "dans ce mode réseau, un appel est-il
-/// autorisé, et si oui avec quelle configuration ICE ?". L'intégration réelle (signalisation
-/// `matrix-dart-sdk` Voip, négociation SDP, rendu audio/vidéo, bannière d'avertissement visible
-/// dans l'UI) reste à faire — voir la liste "Ce qui reste à faire" dans
-/// `docs/CALLS_ARCHITECTURE.md`, qui n'est pas entièrement cochée par ce fichier seul.
+/// Trouvé en audit interne : ce commentaire de classe affirmait encore, jusqu'ici, que
+/// « `flutter_webrtc` n'est pas une dépendance de ce projet » et que ce fichier ne faisait que
+/// construire une politique sans intégration réelle — exact au moment où ce fichier a été écrit en
+/// premier (voir `docs/CALLS_ARCHITECTURE.md`, section « Décisions prises... »), mais plus du tout
+/// depuis : `flutter_webrtc` est déclaré dans `pubspec.yaml`, et `lib/calls/services/
+/// call_manager.dart` (`MurmureWebRTCDelegate.createPeerConnection`) utilise réellement cette
+/// politique pour construire chaque connexion WebRTC, entrante comme sortante — voir
+/// `docs/CALLS_ARCHITECTURE.md`, section « ce qui est fait, ce qui ne l'est pas ». Laisser ce
+/// commentaire périmé à côté des garanties de sécurité ci-dessous risquait de faire croire à tort
+/// qu'aucune de ces garanties n'est câblée dans l'appli réelle, alors qu'elles le sont. Ce fichier
+/// reste néanmoins une politique pure au sens où il ne contient lui-même aucun appel à
+/// `flutter_webrtc` ni à l'UI — c'est `call_manager.dart` qui l'utilise.
+///
+/// LIMITE HONNÊTE RESTANTE, elle, toujours vraie : rien ici n'a été vérifié par capture réseau
+/// (Wireshark/tcpdump) sur un appareil physique — voir la case non cochée correspondante dans
+/// `docs/CALLS_ARCHITECTURE.md`. C'est précisément pourquoi [isAllowed] reste `false` hors mode
+/// direct, quelle que soit la qualité de la configuration ICE construite ci-dessous.
 ///
 /// Ce que ce fichier garantit, lui, dès qu'il est utilisé par l'implémentation d'appel réelle :
 /// - Aucun serveur STUN n'est jamais inclus dans la configuration ICE retournée (le point 1 de
