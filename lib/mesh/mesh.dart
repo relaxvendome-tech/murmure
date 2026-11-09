@@ -83,6 +83,9 @@ class Mesh {
   int _rotateIndex = 0;
   bool _running = false;
 
+  /// Vrai si le relais Bluetooth tourne (lecture seule, pour l'affichage d'état).
+  bool get isRunning => _running;
+
   /// Appareils avec lesquels un échange GATT (connexion → écriture → lecture → déconnexion, voir
   /// [_tryExchange]) est déjà en cours, et horodatage du dernier échange terminé avec chacun.
   ///

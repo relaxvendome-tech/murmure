@@ -3,7 +3,9 @@ import 'package:matrix/matrix.dart';
 
 import '../account.dart';
 import '../message_notifier.dart';
+import '../privacy_settings.dart';
 import 'blocked_users_screen.dart';
+import 'security_info_screen.dart';
 
 /// Permet de voir et changer son pseudo (nom affiché) à tout moment, sans recréer de compte.
 ///
@@ -32,12 +34,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _error;
   String? _savedMessage;
   bool _notifMessages = true;
+  bool _sendReadReceipts = false;
+  bool _sendTyping = false;
 
   @override
   void initState() {
     super.initState();
     MessageNotifier.isEnabled().then((v) {
       if (mounted) setState(() => _notifMessages = v);
+    });
+    PrivacySettings.sendReadReceipts().then((v) {
+      if (mounted) setState(() => _sendReadReceipts = v);
+    });
+    PrivacySettings.sendTyping().then((v) {
+      if (mounted) setState(() => _sendTyping = v);
     });
     _load();
   }
@@ -154,6 +164,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       MessageNotifier.setEnabled(v);
                     },
                   ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.done_all),
+                    title: const Text('Envoyer les accusés de lecture'),
+                    subtitle: const Text(
+                        'Si activé : le serveur et votre correspondant voient quand et jusqu\'à '
+                        'quel message vous avez lu. Si désactivé : aucun accusé public n\'est '
+                        'envoyé (vos non-lus restent remis à zéro localement).'),
+                    value: _sendReadReceipts,
+                    onChanged: (v) {
+                      setState(() => _sendReadReceipts = v);
+                      PrivacySettings.setSendReadReceipts(v);
+                    },
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.edit_outlined),
+                    title: const Text('Indiquer quand j\'écris'),
+                    subtitle: const Text(
+                        'Si activé : le serveur et votre correspondant voient en direct que vous '
+                        'êtes en train d\'écrire dans la conversation.'),
+                    value: _sendTyping,
+                    onChanged: (v) {
+                      setState(() => _sendTyping = v);
+                      PrivacySettings.setSendTyping(v);
+                    },
+                  ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.block),
@@ -162,6 +199,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(
                           builder: (_) => BlockedUsersScreen(client: widget.client)),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.shield_outlined),
+                    title: const Text('Sécurité et limites'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const SecurityInfoScreen()),
                     ),
                   ),
                 ],

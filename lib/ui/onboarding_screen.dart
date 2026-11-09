@@ -5,6 +5,7 @@ import 'package:matrix/matrix.dart';
 import '../account.dart';
 import '../network.dart';
 import 'qr_screens.dart';
+import 'security_info_screen.dart';
 
 /// Premier lancement : configurer le serveur (jamais codé en dur, voir network.dart), puis créer
 /// un compte anonyme (identifiant et mot de passe aléatoires, seul le nom affiché est choisi).
@@ -315,8 +316,12 @@ class _CreateAccountScreenState extends State<_CreateAccountScreen> {
       _busy = true;
       _error = null;
     });
+    // Navigator capturé AVANT l'await : ce widget est remplacé par RoomsScreen dès l'inscription.
+    final nav = Navigator.of(context);
     try {
       await Account.register(widget.client, name);
+      // Affiche UNE fois « Sécurité et limites » juste après la création du compte.
+      nav.push(MaterialPageRoute(builder: (_) => const SecurityInfoScreen()));
       // Trouvé en audit interne : ce commentaire affirmait que MurmureApp (`_Home` dans
       // main.dart) réagissait seul à ce changement — c'était faux, rien ne l'abonnait à
       // `client.onLoginStateChanged` avant la correction de ce bug dans main.dart. C'est

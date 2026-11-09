@@ -1,9 +1,11 @@
 # Fiche Google Play — Murmure (test ouvert)
 
 Textes rédigés à partir du code réel de `lib/`, `android/app/src/main/AndroidManifest.xml` et `scripts/server/`.
-Fonctions volontairement ABSENTES (vérifiées par grep, ne pas les annoncer) : messages éphémères / à
-disparition, déverrouillage biométrique (aucun `local_auth`), notifications de messages en arrière-plan (seule
-la notification d'appel manqué existe), changement d'icône de lancement (retiré, voir `UPDATES.md`).
+Fonctions volontairement ABSENTES (vérifiées par grep, ne pas les annoncer) : notifications de messages
+lorsque le processus de l'appli est tué par Android (elles n'existent que tant que l'appli tourne), changement
+d'icône de lancement (retiré, voir `UPDATES.md`). Messages éphémères (`lib/ephemeral.dart`), biométrie
+(`lib/biometric.dart`, `local_auth`), blocage (`blocked_users_screen.dart`) et notifications sans contenu
+(`message_notifier.dart`) existent désormais et sont annoncés.
 
 Vocabulaire interdit : « inviolable », « 100 % sécurisé », « intraçable », « validé par l'ANSSI », « anonyme
 garanti ».
@@ -41,15 +43,19 @@ UN COMPTE SANS DONNÉES PERSONNELLES
 MESSAGES ET APPELS CHIFFRÉS
 • Conversations privées et groupes chiffrés de bout en bout (Matrix, Olm/Megolm).
 • Envoi de photos, chiffrées comme les messages.
+• Messages éphémères réglables par conversation : ils sont masqués puis supprimés par les appareils Murmure ; ils ne protègent pas d'une capture d'écran.
+• Blocage de contacts.
+• Notifications sans contenu : « Nouveau message », sans nom ni texte.
+• Accusés de lecture et indicateur de saisie désactivés par défaut.
 • Appels audio et vidéo.
 • Vérification des appareils par comparaison d'emojis (SAS) ou d'empreinte, pour confirmer que vous parlez bien à la bonne personne.
 • Ajout d'un contact par QR code.
 • Base de données locale chiffrée (SQLCipher), clé conservée dans l'Android Keystore.
 
 PROTECTION DE VOTRE APPAREIL
-• Verrou par code PIN, avec effacement après trop d'essais erronés.
+• Verrou par code PIN, avec effacement après trop d'essais erronés. Déverrouillage biométrique optionnel, en complément du code.
 • Code de contrainte : s'il est saisi, Murmure efface localement clés, messages et médias, puis se ferme.
-• Écran de verrouillage « Calculatrice » optionnel, à l'intérieur de l'appli : le bon code ouvre Murmure. L'icône et le nom de l'appli sur votre écran d'accueil restent toujours « Murmure ».
+• Mode discret optionnel : écran de verrouillage d'apparence calculatrice à l'intérieur de l'application ; l'icône et le nom restent Murmure. Le bon code ouvre Murmure ; ce n'est pas une application cachée.
 • Captures d'écran bloquées et aperçu masqué dans les applications récentes.
 • Aucune sauvegarde automatique Android des données de l'appli.
 
@@ -73,7 +79,8 @@ Première version de test ouverte de Murmure 3.0.
 • Comptes sans téléphone ni e-mail
 • Messages, groupes, photos et appels audio/vidéo chiffrés de bout en bout (Matrix)
 • Vérification des appareils (SAS)
-• Verrou PIN, code de contrainte, écran Calculatrice
+• Verrou PIN (biométrie optionnelle), code de contrainte, mode discret
+• Messages éphémères, blocage de contacts
 • Modes Tor / proxy SOCKS5
 • Relais Bluetooth maillé (expérimental)
 Des bugs sont possibles. Signalez-les via le lien de contact de la fiche.
@@ -138,8 +145,8 @@ Points d'attention :
   les utilisateurs : oui (messages privés) ; partage de localisation : non ; achats : non ; pas de violence
   propre à l'appli. Attendre un PEGI 12 / Teen environ.
 - **Contenu généré par les utilisateurs** : prévoir une politique de signalement et de blocage ou l'expliquer
-  (serveur privé sur invitation, modération par l'administrateur). Vérifier qu'une fonction de blocage existe
-  (non trouvée dans `lib/` : à ajouter ou justifier, c'est exigé pour les applis de messagerie ouvertes).
+  (serveur privé sur invitation, modération par l'administrateur). Fonction de blocage présente
+  (`lib/ui/blocked_users_screen.dart`, accessible depuis le profil) : la citer dans le formulaire.
 - **Publicités** : aucune. **Application gouvernementale / financière / santé** : non.
 - **Accès à l'appli pour l'examen** : l'appli exige l'adresse d'un serveur et un jeton d'inscription. Fournir
   dans « Instructions d'accès » : URL du serveur, jeton d'inscription, QR code d'onboarding, deux comptes de test

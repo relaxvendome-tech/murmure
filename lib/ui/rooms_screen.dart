@@ -15,11 +15,13 @@ import '../ephemeral.dart';
 import '../media.dart';
 import '../message_notifier.dart';
 import '../network.dart';
+import '../privacy_settings.dart';
 import '../verification/device_verification_status.dart';
 import 'device_verification_screen.dart';
 import 'group_info_screen.dart';
 import 'group_screen.dart';
 import 'lock_screens.dart';
+import 'network_status_chip.dart';
 import 'mesh_screen.dart';
 import 'profile_screen.dart';
 import 'qr_screens.dart';
@@ -94,7 +96,16 @@ class RoomsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Murmure'),
+        title: Row(children: [
+          const Text('Murmure'),
+          const SizedBox(width: 8),
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: NetworkStatusChip(client: client),
+            ),
+          ),
+        ]),
         actions: [
           IconButton(
             icon: const Icon(Icons.badge_outlined),
@@ -514,9 +525,20 @@ class _ChatScreenState extends State<ChatScreen> {
   /// autre participant, statut d'envoi d'un message, etc.) alors que rien de nouveau n'a été lu.
   String? _lastReadMarkerEventId;
 
+  /// Réglages de confidentialité (désactivés par défaut, voir PrivacySettings), chargés une fois
+  /// à l'ouverture. [_settingsReady] est attendu avant tout envoi pour ne jamais émettre avant
+  /// d'avoir lu le réglage.
+  bool _sendReceipts = false;
+  bool _sendTyping = false;
+  late final Future<void> _settingsReady = () async {
+    _sendReceipts = await PrivacySettings.sendReadReceipts();
+    _sendTyping = await PrivacySettings.sendTyping();
+  }();
+
   @override
   void initState() {
     super.initState();
+    unawaited(_settingsReady); // déclenche le chargement des réglages (late final paresseux)
     MessageNotifier.activeRoomId = widget.room.id;
     widget.room.getTimeline(onUpdate: () {
       if (mounted) setState(() {});
@@ -548,7 +570,14 @@ class _ChatScreenState extends State<ChatScreen> {
             latest == null || e.originServerTs.isAfter(latest.originServerTs) ? e : latest);
     if (latest == null || latest.eventId == _lastReadMarkerEventId) return;
     _lastReadMarkerEventId = latest.eventId;
-    unawaited(widget.room.setReadMarker(latest.eventId, mRead: latest.eventId).catchError((_) {}));
+    // SDK v0.29.0 (room.dart:1394) : `setReadMarker` envoie TOUJOURS `m.fully_read` et
+    // `m.read.private` (privé, invisible des autres) ; `m.read` (public) seulement si
+    // `public ?? client.receiptsPublicByDefault` (défaut true). On passe donc `public`
+    // explicitement : sans réglage activé, le compteur de non-lus se remet à zéro sans accusé public.
+    final id = latest.eventId;
+    unawaited(_settingsReady
+        .then((_) => widget.room.setReadMarker(id, mRead: id, public: _sendReceipts))
+        .catchError((_) {}));
   }
 
   void _setReplyTarget(Event e) => setState(() => _replyingTo = e);
@@ -571,7 +600,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _typingStopTimer?.cancel();
     _typingStopTimer = Timer(const Duration(seconds: 4), _stopTyping);
-    if (_typingActive) return;
+    if (_typingActive || !_sendTyping) return;
     _typingActive = true;
     // Best-effort : une notification de frappe manquée ou en échec (réseau coupé) n'a aucun
     // impact fonctionnel, contrairement à l'envoi d'un message — pas de SnackBar ici.
