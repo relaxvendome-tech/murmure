@@ -134,6 +134,26 @@ class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
     // `_OnboardingScreenState._applyConfig` — sans ça, ce réglage serait enregistré mais sans
     // aucun effet jusqu'au prochain démarrage de l'appli.
     widget.client.httpClient = await cfg.httpClient();
+    // Trouvé en audit interne (vérifié contre le SDK matrix-dart pinné, tag v0.29.13,
+    // `matrix_api_lite/matrix_api.dart`) : `Client.homeserver` est un simple alias de `baseUri`,
+    // l'URL de base que le SDK utilise pour construire CHAQUE requête (sync, envoi, médias) — pas
+    // seulement le transport (`httpClient`, déjà réappliqué ci-dessus). Cette ligne manquait ici :
+    // pour un compte déjà créé (seul cas qui passe par cet écran — l'onboarding, lui, laisse
+    // `Account.register()` → `client.checkHomeserver()` le fixer au moment de l'inscription),
+    // changer l'ADRESSE du serveur (pas seulement le mode direct/Tor/proxy) semblait réussir — le
+    // test de portée ci-dessus passait, le réglage était enregistré, le message de confirmation
+    // s'affichait — mais ne changeait rien au trafic réel : chaque requête continuait de partir
+    // vers l'ancienne adresse (`baseUri` jamais mis à jour), restaurée identique au prochain
+    // démarrage puisque `Client.init()` la relit depuis la session déjà stockée, jamais depuis
+    // `NetConfig`. Concrètement inopérant pour le scénario même documenté en tête de ce fichier :
+    // basculer vers une autre adresse du même serveur (ex. miroir .onion) une fois le compte créé.
+    // Assignation directe plutôt que `client.checkHomeserver(cfg.homeserver)` : cette dernière
+    // remet `homeserver` à `null` dans son propre `catch` en cas d'échec (vérifié dans le SDK
+    // réel) — inutile et dangereux ici, puisque [canReach] vient déjà de confirmer la portée de
+    // cette adresse avec le bon client, et qu'on ne veut surtout pas casser un client déjà connecté
+    // et fonctionnel sur un échec tardif (version/flux de connexion) sans rapport avec la portée
+    // déjà vérifiée.
+    widget.client.homeserver = cfg.homeserver;
     if (!mounted) return true;
     setState(() => _testing = false);
     ScaffoldMessenger.of(context).showSnackBar(
