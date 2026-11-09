@@ -41,4 +41,17 @@ class MeshForegroundService {
       // Idem.
     }
   }
+
+  /// Niveau d'API Android (Build.VERSION.SDK_INT), ou null hors Android / canal indisponible.
+  /// Sert à ne demander la permission de localisation que là où le scan BLE l'exige encore
+  /// (SDK <= 30) — voir ui/mesh_screen.dart.
+  static Future<int?> sdkInt() async {
+    try {
+      return await _channel.invokeMethod<int>('sdkInt');
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
 }

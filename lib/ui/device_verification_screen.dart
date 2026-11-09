@@ -68,12 +68,12 @@ class _DeviceVerificationScreenState extends State<DeviceVerificationScreen> {
   }
 
   /// Regroupe une empreinte Ed25519 (base64, ~43 caractères) en blocs de 4 pour une comparaison
-  /// visuelle plus facile — convention courante pour l'affichage d'empreintes de clé publique.
+  /// visuelle plus facile. La casse est CONSERVÉE : le base64 y est sensible (« a » ≠ « A »),
+  /// mettre en majuscules ferait accepter deux empreintes différentes comme identiques.
   String _formatFingerprint(String key) {
-    final upper = key.toUpperCase();
     final groups = <String>[];
-    for (var i = 0; i < upper.length; i += 4) {
-      groups.add(upper.substring(i, i + 4 > upper.length ? upper.length : i + 4));
+    for (var i = 0; i < key.length; i += 4) {
+      groups.add(key.substring(i, i + 4 > key.length ? key.length : i + 4));
     }
     return groups.join(' ');
   }
@@ -88,7 +88,8 @@ class _DeviceVerificationScreenState extends State<DeviceVerificationScreen> {
         content: Text(
           'Vous confirmez avoir comparé cette empreinte avec ${widget.displayName} par un canal '
           'différent de Murmure (en personne, par un appel déjà authentifié, etc.) et qu\'elle '
-          'correspond exactement :\n\n${_formatFingerprint(fingerprint)}\n\n'
+          'correspond exactement (majuscules et minuscules comprises) :\n\n'
+          '${_formatFingerprint(fingerprint)}\n\n'
           'Ne confirmez que si vous avez vraiment fait cette comparaison — marquer un appareil '
           'comme vérifié sans l\'avoir fait ne protège de rien.',
         ),
@@ -114,6 +115,14 @@ class _DeviceVerificationScreenState extends State<DeviceVerificationScreen> {
     setState(() => _busyDeviceId = deviceId);
     try {
       await device.setVerified(verified);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(verified
+              ? 'Impossible de marquer l\'appareil comme vérifié. Réessayez.'
+              : 'Impossible de retirer la vérification. Réessayez.'),
+        ));
+      }
     } finally {
       if (mounted) setState(() => _busyDeviceId = null);
     }

@@ -41,6 +41,15 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   bool _calcMode = false;
   DateTime? _backgroundedAt;
 
+  /// Dernier état connu « code PIN activé » (mémorisé par [_init]/[_relock]) : permet de masquer
+  /// le contenu de façon SYNCHRONE au retour au premier plan, sans attendre la lecture Keystore de
+  /// [_relock] — sinon la conversation ouverte restait brièvement visible avant le verrou.
+  bool _pinEnabled = false;
+
+  /// Échec de lecture du réglage au démarrage (Keystore indisponible…) : écran d'erreur avec
+  /// bouton « Réessayer » plutôt qu'un splash bloqué indéfiniment.
+  bool _initFailed = false;
+
   /// Vrai si un `didChangeAppLifecycleState(resumed)` a dépassé [kRelockAfter] PENDANT qu'un
   /// appel était actif (voir [_relock]) : le reverrouillage n'a donc pas été appliqué sur le
   /// moment, mais reste dû — [_onActiveCallChanged] le déclenche dès que l'appel se termine, sans
@@ -66,19 +75,29 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   void _onActiveCallChanged() {
     if (_relockPendingCallEnd && !widget.callManager.activeCallListenable.value) {
       _relockPendingCallEnd = false;
+      _lockSync();
       unawaited(_relock());
     }
   }
 
   Future<void> _init() async {
-    final enabled = await AppLock.enabled();
-    final calc = await Account.read('calc_mode');
-    if (!mounted) return;
-    setState(() {
-      _calcMode = calc == '1';
-      _unlocked = !enabled;
-    });
-    AppLock.isUnlocked = _unlocked!;
+    if (_initFailed) setState(() => _initFailed = false);
+    try {
+      final enabled = await AppLock.enabled();
+      final calc = await Account.read('calc_mode');
+      if (!mounted) return;
+      _pinEnabled = enabled;
+      setState(() {
+        _calcMode = calc == '1';
+        _unlocked = !enabled;
+      });
+      AppLock.isUnlocked = !enabled;
+    } catch (_) {
+      // Échec fermé : l'appli reste verrouillée (isUnlocked == false) et propose de réessayer.
+      AppLock.isUnlocked = false;
+      if (!mounted) return;
+      setState(() => _initFailed = true);
+    }
   }
 
   /// Trouvé en audit interne : comparait auparavant à un `Duration(seconds: 30)` codé en dur ici
@@ -99,16 +118,47 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   // de focus transitoire d'un volet de notifications ou d'un appel entrant que couvre `inactive`)
   // est le signal fiable d'un VRAI passage en arrière-plan : il n'est, lui, traversé qu'en
   // descendant, jamais en remontant vers `resumed`.
+  //
+  // Trouvé en audit interne (contournement du verrou par appel entrant) : l'instant de mise en
+  // arrière-plan est maintenant AUSSI publié dans [AppLock.backgroundedAt], pour que
+  // [AppLock.isUnlocked] devienne `false` dès [kRelockAfter] écoulé EN ARRIÈRE-PLAN — et non
+  // seulement au retour au premier plan. Au `resumed`, l'horodatage est consommé (remis à
+  // `null`) : un `resumed` sans `paused` préalable (volet de notifications, boîte de dialogue
+  // système) ne peut donc jamais reverrouiller sur la base d'un ancien horodatage.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
-      _backgroundedAt = DateTime.now();
+      final now = DateTime.now();
+      _backgroundedAt = now;
+      AppLock.backgroundedAt = now;
     } else if (state == AppLifecycleState.resumed) {
       final since = _backgroundedAt;
-      if (since != null && DateTime.now().difference(since) > kRelockAfter) {
-        unawaited(_relock());
+      _backgroundedAt = null;
+      AppLock.backgroundedAt = null;
+      if (since == null || DateTime.now().difference(since) <= kRelockAfter) return;
+      // Report du verrou UNIQUEMENT pour un appel réellement en cours (micro ouvert) et si
+      // l'appli était déverrouillée : ne jamais raccrocher un appel décroché pour reverrouiller.
+      // Un appel qui sonne seulement, ou une appli déjà verrouillée, ne retarde rien.
+      if (_unlocked == true && widget.callManager.delegate.hasLiveCall) {
+        _relockPendingCallEnd = true;
+        return;
       }
+      _lockSync();
+      unawaited(_relock());
     }
+  }
+
+  /// Partie synchrone du reverrouillage : [AppLock.isUnlocked] passe à `false` immédiatement
+  /// (fail closed pour tout code hors widgets, voir [_relock]) et, si un code est connu comme
+  /// activé, le contenu est masqué dès cette frame (routes empilées refermées, écran de verrou
+  /// affiché) sans attendre la lecture Keystore de [_relock].
+  void _lockSync() {
+    AppLock.isUnlocked = false;
+    if (!mounted || _unlocked != true) return;
+    if (!(_pinEnabled || AppLock.lastKnownEnabled)) return;
+    final nav = Navigator.of(context);
+    if (nav.canPop()) nav.popUntil((route) => route.isFirst);
+    setState(() => _unlocked = false);
   }
 
   /// Trouvé en audit interne (revue indépendante), deux bugs réels dans l'ancien code inline :
@@ -158,21 +208,36 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   /// (sans toucher à `AppLock.isUnlocked`, qui reste `true` : l'appli n'affiche RIEN de verrouillé
   /// tant que l'appel dure) et on le rejoue dès que [CallManager.activeCallListenable] repasse à
   /// `false` (voir [_onActiveCallChanged]) — jamais en détruisant la session pour reverrouiller.
+  ///
+  /// Le report pendant un appel est désormais décidé par l'appelant
+  /// ([didChangeAppLifecycleState], via `delegate.hasLiveCall`), pas ici : [_relock] verrouille
+  /// toujours. Relit aussi `calc_mode` : le mode discret a pu être activé/désactivé depuis
+  /// [_init], et l'écran de verrou affiché doit suivre le réglage courant.
   Future<void> _relock() async {
-    if (widget.callManager.activeCallListenable.value) {
-      _relockPendingCallEnd = true;
-      return;
-    }
     AppLock.isUnlocked = false;
-    final enabled = await AppLock.enabled();
-    if (!mounted || !enabled) {
+    bool enabled;
+    String? calc;
+    try {
+      enabled = await AppLock.enabled();
+      calc = await Account.read('calc_mode');
+    } catch (_) {
+      // Keystore illisible : on garde le dernier état connu (verrouillé si un code existait).
+      enabled = _pinEnabled || AppLock.lastKnownEnabled;
+      calc = _calcMode ? '1' : '0';
+    }
+    if (!mounted) return;
+    _pinEnabled = enabled;
+    if (!enabled) {
       AppLock.isUnlocked = true; // relock annulé : rien n'est verrouillé, on restaure l'état réel.
+      if (_unlocked != true) setState(() => _unlocked = true);
       return;
     }
-    if (Navigator.of(context).canPop()) {
-      Navigator.of(context).popUntil((route) => route.isFirst);
-    }
-    setState(() => _unlocked = false);
+    final nav = Navigator.of(context);
+    if (nav.canPop()) nav.popUntil((route) => route.isFirst);
+    setState(() {
+      _calcMode = calc == '1';
+      _unlocked = false;
+    });
   }
 
   Future<void> _wipe() async {
@@ -183,14 +248,22 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   /// voir `calls/services/call_opsec_notifier.dart`) AVANT d'afficher l'intérieur de l'appli —
   /// directive explicite de l'utilisateur, pour qu'elle ne reste pas visible dans la barre d'état
   /// une fois la calculatrice « ouverte ».
+  ///
+  /// Une fois déverrouillé, un appel entrant arrivé pendant le verrou (non affiché, voir
+  /// `MurmureWebRTCDelegate.handleNewCall`) est présenté après la frame suivante.
   void _onUnlockSuccess() {
+    if (!mounted) return;
+    _relockPendingCallEnd = false;
     unawaited(CallOpsecNotifier.clear());
-    setState(() => _unlocked = true);
     AppLock.isUnlocked = true;
+    setState(() => _unlocked = true);
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => widget.callManager.delegate.presentPendingCall());
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_initFailed) return _InitError(onRetry: () => unawaited(_init()));
     if (_unlocked == null) return const _Splash();
     if (_unlocked == true) return widget.child;
     if (_calcMode) {
@@ -213,7 +286,22 @@ class _Splash extends StatelessWidget {
   Widget build(BuildContext context) => const Scaffold(body: Center(child: CircularProgressIndicator()));
 }
 
-enum PinScreenMode { unlock, setPin, setDuress, confirm }
+class _InitError extends StatelessWidget {
+  const _InitError({required this.onRetry});
+  final VoidCallback onRetry;
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Erreur, réessayez'),
+            const SizedBox(height: 16),
+            FilledButton(onPressed: onRetry, child: const Text('Réessayer')),
+          ]),
+        ),
+      );
+}
+
+enum PinScreenMode { unlock, setPin, setDuress, confirm, confirmDuress }
 
 /// Écran de saisie de code, réutilisé pour déverrouiller, définir le code normal, définir le code
 /// de contrainte, ou confirmer un nouveau code avant de l'enregistrer.
@@ -260,27 +348,61 @@ class _PinScreenState extends State<PinScreen> {
   /// [CalculatorLockScreen] (mode discret) : un prompt biométrique trahirait l'appli. Le PIN
   /// reste toujours utilisable ; la biométrie n'ouvre que l'UI (clé SQLCipher inchangée).
   Future<void> _initBiometric() async {
-    final offered = await Biometric.enabled() && await AppLock.enabled() && await Biometric.available();
+    // Jamais en mode discret, même si cet écran est affiché brièvement après un changement du
+    // réglage (avant que [LockGate._relock] n'ait relu `calc_mode`) : le prompt trahirait l'appli.
+    final bool offered;
+    try {
+      offered = (await Account.read('calc_mode')) != '1' &&
+          await Biometric.enabled() &&
+          await AppLock.enabled() &&
+          await Biometric.available();
+    } catch (_) {
+      return;
+    }
     if (!mounted || !offered) return;
     setState(() => _bioOffered = true);
     await _tryBiometric();
   }
 
+  /// Biométrie toujours autorisée ? Revérifiée AVANT et APRÈS le prompt : après
+  /// [AppLock.bioMaxPinFailures] échecs de PIN, `bio_enabled` est supprimé (voir [AppLock.check])
+  /// et un succès biométrique ne doit alors plus rien déverrouiller, même si le bouton était
+  /// encore affiché ou le prompt déjà ouvert.
+  Future<bool> _bioStillAllowed() async {
+    try {
+      return await Biometric.enabled() && await AppLock.enabled();
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _tryBiometric() async {
     if (_bioRunning || _busy || !mounted) return;
     _bioRunning = true;
-    final r = await Biometric.authenticate('Déverrouillez Murmure');
-    _bioRunning = false;
-    if (!mounted) return;
-    switch (r) {
-      case BioResult.success:
-        widget.onSuccess?.call();
-      case BioResult.fallback:
-        break; // retour silencieux au PIN
-      case BioResult.lockedTemporarily:
-        setState(() => _error = 'Biométrie verrouillée temporairement. Utilisez votre code.');
-      case BioResult.lockedPermanently:
-        setState(() => _error = 'Biométrie verrouillée par Android. Utilisez votre code.');
+    try {
+      if (!await _bioStillAllowed()) {
+        if (mounted) setState(() => _bioOffered = false);
+        return;
+      }
+      final r = await Biometric.authenticate('Déverrouillez Murmure');
+      if (!mounted) return;
+      switch (r) {
+        case BioResult.success:
+          if (!await _bioStillAllowed()) {
+            if (mounted) setState(() => _bioOffered = false);
+            return;
+          }
+          if (!mounted || _busy) return;
+          widget.onSuccess?.call();
+        case BioResult.fallback:
+          break; // retour silencieux au PIN
+        case BioResult.lockedTemporarily:
+          setState(() => _error = 'Biométrie verrouillée temporairement. Utilisez votre code.');
+        case BioResult.lockedPermanently:
+          setState(() => _error = 'Biométrie verrouillée par Android. Utilisez votre code.');
+      }
+    } finally {
+      _bioRunning = false;
     }
   }
 
@@ -299,12 +421,26 @@ class _PinScreenState extends State<PinScreen> {
   }
 
   Future<void> _submit() async {
+    if (_busy) return;
     if (_pin.length < AppLock.minLength) {
       setState(() => _error = 'Au moins ${AppLock.minLength} chiffres');
       return;
     }
     setState(() => _busy = true);
+    try {
+      await _handleSubmit();
+    } catch (_) {
+      // Keystore/isolat indisponible, etc. : ne jamais laisser l'écran bloqué en « occupé ».
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _pin = '';
+        _error = 'Erreur, réessayez';
+      });
+    }
+  }
 
+  Future<void> _handleSubmit() async {
     switch (widget.mode) {
       case PinScreenMode.unlock:
         final r = await AppLock.check(_pin);
@@ -323,12 +459,16 @@ class _PinScreenState extends State<PinScreen> {
             // LockGate relock (voir didChangeAppLifecycleState) remplace cet écran entre les deux
             // await — "setState() called after dispose()" côté testeurs humains. Revérifié ici.
             final remaining = await AppLock.remaining();
+            // Après AppLock.bioMaxPinFailures échecs, `bio_enabled` a été supprimé : on retire
+            // aussi le bouton biométrique de cet écran.
+            final bioStill = _bioOffered && await Biometric.enabled();
             if (!mounted) return;
             setState(() {
               _busy = false;
               _pin = '';
               _remaining = remaining;
               _error = 'Code incorrect';
+              if (!bioStill) _bioOffered = false;
             });
           case PinResult.exhausted:
             await widget.onWipe?.call();
@@ -355,35 +495,40 @@ class _PinScreenState extends State<PinScreen> {
         Navigator.of(context).pop();
         widget.onSuccess?.call();
       case PinScreenMode.setDuress:
-        // Trouvé en audit interne : cette vérification comparait auparavant `_pin` à un champ
-        // `excludePin` censé porter le code normal en clair — jamais réellement transmis par
-        // l'appelant (LockSettingsScreen construisait ce PinScreen sans ce paramètre), et de
-        // toute façon structurellement impossible à y faire transiter proprement : le code normal
-        // n'est JAMAIS gardé en clair une fois défini (seule son empreinte PBKDF2 est persistée,
-        // voir [AppLock]), donc aucun appelant arrivant depuis les réglages ne peut jamais le
-        // connaître. Conséquence réelle : rien n'empêchait de définir un code de contrainte
-        // identique au code normal. Comme [AppLock.check] teste la contrainte EN PREMIER, cela
-        // aurait transformé chaque déverrouillage normal en effacement total — un PIN qui
-        // fonctionnait au moment du réglage se serait mis à tout détruire au prochain usage normal,
-        // sans aucun signal d'alerte pour l'utilisateur. Corrigé en comparant directement à
-        // l'empreinte déjà en stockage via [AppLock.classify], qui n'a besoin que du PIN candidat
-        // tout juste saisi — jamais de code en clair à faire transiter.
+        // Trouvé en audit interne : le code de contrainte était enregistré dès la première
+        // saisie, sans confirmation — une faute de frappe créait un code d'effacement inconnu de
+        // l'utilisateur (et donc inutilisable le jour où il en a besoin). Comme pour le code
+        // normal, une seconde saisie identique est maintenant exigée ([PinScreenMode.confirmDuress]).
         //
-        // Trouvé en audit interne (optimisation réelle, pas de principe) : cette vérification et
-        // l'écriture qui suivait faisaient chacune leur propre dérivation PBKDF2-SHA256 à 120 000
-        // itérations pour le même PIN/sel — deux calculs délibérément coûteux pour une seule
-        // action utilisateur. `AppLock.trySetDuress` fait maintenant les deux en un seul calcul.
-        if (!await AppLock.trySetDuress(_pin)) {
-          if (!mounted) return;
+        // La vérification « différent du code normal » (voir [AppLock.trySetDuress] : une seule
+        // dérivation PBKDF2, comparaison à l'empreinte stockée, jamais de code en clair à faire
+        // transiter) est faite à la confirmation ; l'écran de confirmation renvoie `true` si le
+        // code a été enregistré, `false` s'il est identique au code normal, `null` si abandon.
+        final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(
+          builder: (_) => PinScreen(mode: PinScreenMode.confirmDuress, pendingPin: _pin),
+        ));
+        if (!mounted) return;
+        if (saved == true) {
+          Navigator.of(context).pop();
+          return;
+        }
+        setState(() {
+          _busy = false;
+          _pin = '';
+          _error = saved == false ? 'Doit différer du code normal' : null;
+        });
+      case PinScreenMode.confirmDuress:
+        if (_pin != widget.pendingPin) {
           setState(() {
             _busy = false;
             _pin = '';
-            _error = 'Doit différer du code normal';
+            _error = 'Les codes ne correspondent pas';
           });
           return;
         }
+        final ok = await AppLock.trySetDuress(_pin);
         if (!mounted) return;
-        Navigator.of(context).pop();
+        Navigator.of(context).pop(ok);
     }
   }
 
@@ -392,6 +537,7 @@ class _PinScreenState extends State<PinScreen> {
         PinScreenMode.setPin => 'Choisir un code',
         PinScreenMode.confirm => 'Confirmer le code',
         PinScreenMode.setDuress => 'Code de contrainte',
+        PinScreenMode.confirmDuress => 'Confirmer le code de contrainte',
       };
 
   @override

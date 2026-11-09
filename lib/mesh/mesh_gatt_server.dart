@@ -14,6 +14,9 @@ class MeshGattServerBridge {
   /// Démarre l'annonce BLE et le serveur GATT natif. Ne lève jamais : sur une plateforme sans ce
   /// canal, ou si le Bluetooth est indisponible/désactivé sur l'appareil, le rôle périphérique est
   /// simplement absent et le maillage continue avec le seul rôle central.
+  ///
+  /// Renvoie `true` seulement quand le natif a confirmé l'annonce BLE (onStartSuccess) ; un refus
+  /// d'annonce (asynchrone côté Android) est désormais propagé et donne `false`.
   static Future<bool> start() async {
     try {
       final ok = await _method.invokeMethod<bool>('start');

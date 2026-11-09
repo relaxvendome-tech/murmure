@@ -43,10 +43,25 @@ import '../../account.dart';
 class CallOpsecNotifier {
   CallOpsecNotifier._();
 
-  static const _calcChannelId = 'discreet_activity_v2';
+  // v3 : les noms/descriptions des canaux v2 (« Activité (mode discret) », « … en mode discret »)
+  // révélaient eux-mêmes l'existence du mode discret dans Réglages > Notifications. Un nom de
+  // canal étant figé à sa création, on change d'identifiant et on supprime les anciens dans init().
+  static const _calcChannelId = 'discreet_activity_v3';
   static const _honestChannelId = 'murmure_calls';
   static const _notificationId = 4143;
-  static const _calcRingChannelId = 'discreet_ring_v2';
+  static const _calcRingChannelId = 'discreet_ring_v3';
+
+  /// Anciens canaux d'appel à supprimer. Volontairement SANS `sys_calc_cache_v1`/`sys_calc_bg_v1`,
+  /// toujours utilisés par le mesh (`lib/mesh/mesh_opsec_notifier.dart`, `MeshForegroundService`).
+  /// Supprimer un canal inexistant est sans effet côté Android.
+  static const _legacyChannelIds = <String>[
+    'discreet_activity_v2',
+    'discreet_ring_v2',
+    'discreet_activity_v1',
+    'discreet_ring_v1',
+    'discreet_activity',
+    'discreet_ring',
+  ];
   static const _honestRingChannelId = 'murmure_incoming_calls';
   static const _ringingNotificationId = 4144;
 
@@ -61,9 +76,16 @@ class CallOpsecNotifier {
       await _plugin.initialize(const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       ));
-      await _plugin
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-          ?.requestNotificationsPermission();
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await android?.requestNotificationsPermission();
+      for (final id in _legacyChannelIds) {
+        try {
+          await android?.deleteNotificationChannel(id);
+        } catch (_) {
+          // Best-effort, canal déjà absent ou API indisponible.
+        }
+      }
       _initialized = true;
     } catch (_) {
       // Pas de notification possible sur cet appareil/cette version d'Android : tant pis, le
@@ -83,8 +105,8 @@ class CallOpsecNotifier {
           const NotificationDetails(
             android: AndroidNotificationDetails(
               _calcChannelId,
-              'Activité (mode discret)',
-              channelDescription: 'Notifications neutres affichées en mode discret',
+              'Activité',
+              channelDescription: 'Activité',
               importance: Importance.low,
               priority: Priority.low,
               playSound: false,
@@ -144,8 +166,8 @@ class CallOpsecNotifier {
           const NotificationDetails(
             android: AndroidNotificationDetails(
               _calcRingChannelId,
-              'Rappels (mode discret)',
-              channelDescription: 'Vibration neutre des appels entrants en mode discret',
+              'Rappels',
+              channelDescription: 'Rappels',
               importance: Importance.high,
               priority: Priority.high,
               playSound: false,

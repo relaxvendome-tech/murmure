@@ -83,8 +83,22 @@ d'auto-mise à jour.
 | AAB | Play Store | `flutter build appbundle --release` | `build/app/outputs/bundle/release/*.aab` |
 | APK universel | Installation manuelle sur une tablette de test | `flutter build apk --release` | `build/app/outputs/flutter-apk/app-release.apk` |
 
-La CI produit les deux (artefact `murmure-release`) et échoue si `REQUEST_INSTALL_PACKAGES` est
-présente dans le manifeste fusionné. Seul l'AAB est envoyé sur Play.
+La CI produit les deux et échoue si `REQUEST_INSTALL_PACKAGES` est présente dans le manifeste
+fusionné. Seul l'AAB est envoyé sur Play. `targetSdk`/`compileSdk` 36, `versionCode` = 100 +
+numéro de run CI (`--build-number`).
+
+| Déclencheur | Signature | Artefact | Publiable |
+|---|---|---|---|
+| push sur `main` | clé debug (les secrets ne sont pas lus) | `murmure-DEBUG-non-publiable` | Non |
+| tag `v*`, ou lancement manuel avec `play_release: true` | clé d'upload, **obligatoire** | `murmure-release-play` | Oui |
+
+Pour une release Play, les 4 secrets GitHub `UPLOAD_KEYSTORE_BASE64`, `UPLOAD_STORE_PASSWORD`,
+`UPLOAD_KEY_PASSWORD`, `UPLOAD_KEY_ALIAS` sont requis : la CI échoue clairement si l'un manque, si
+l'AAB est signé debug (`keytool -printcert -jarfile`) ou si une bibliothèque native arm64-v8a/x86_64
+n'est pas alignée sur 16 Ko (simple avertissement pour les builds de `main`).
+
+Serveur : **créez VOTRE compte avant de diffuser le jeton d'inscription — le premier compte créé
+devient administrateur** (voir `scripts/server/README.md`).
 
 ## Sécurité
 

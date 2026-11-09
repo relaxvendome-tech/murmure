@@ -6,7 +6,8 @@
 build/
 .pub-cache/
 .pub/
-*.lock
+# pubspec.lock est VERSIONNÉ (application, pas bibliothèque) : builds reproductibles et
+# versions de dépendances auditables. Ne pas réintroduire de motif `*.lock` ici.
 
 # Android
 android/local.properties

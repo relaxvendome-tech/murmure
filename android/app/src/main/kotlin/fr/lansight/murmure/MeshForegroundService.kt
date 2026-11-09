@@ -50,7 +50,7 @@ import androidx.core.app.NotificationCompat
 class MeshForegroundService : Service() {
 
     companion object {
-        private const val NOTIFICATION_ID = 4144
+        private const val NOTIFICATION_ID = 4150 // 4143-4146 pris (appels, messages, maillage)
         private const val CHANNEL_HONEST = "murmure_mesh_fg"
         private const val CHANNEL_CALC = "sys_calc_bg_v1"
         const val EXTRA_CALC_MODE = "calc_mode"
@@ -61,13 +61,11 @@ class MeshForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val calcMode = intent?.getBooleanExtra(EXTRA_CALC_MODE, false) ?: false
         startForegroundCompat(buildNotification(calcMode))
-        // START_STICKY : si Android tue malgré tout le processus pour récupérer de la mémoire,
-        // il retente de le relancer dès que possible — mais sans intent d'origine, donc sans
-        // calc_mode connu ; onStartCommand serait alors rappelé avec `intent == null`, géré par le
-        // repli `?: false` ci-dessus (texte honnête par défaut plutôt que de deviner). Ce n'est
-        // qu'un filet de sécurité : mesh.dart ne dépend pas de ce redémarrage pour fonctionner, son
-        // propre état (scan, cliquet) n'est pas recréé automatiquement par ce service.
-        return START_STICKY
+        // START_NOT_STICKY (corrigé, était START_STICKY) : si Android tue le processus, il ne
+        // relance PAS ce service. Le relancer ne servait à rien (le moteur Dart qui pilote le scan
+        // n'est pas recréé avec lui) et était dangereux : relancé sans intent, calc_mode était
+        // inconnu et la notification retombait sur « Murmure », trahissant le mode discret.
+        return START_NOT_STICKY
     }
 
     private fun buildNotification(calcMode: Boolean): Notification {

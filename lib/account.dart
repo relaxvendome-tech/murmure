@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show AndroidFlutterLocalNotificationsPlugin, FlutterLocalNotificationsPlugin;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:matrix/matrix.dart';
 import 'package:path/path.dart' as p;
@@ -44,13 +46,54 @@ class Account {
 
   /// Clé SQLCipher commune aux bases locales, créée au premier lancement. Aléatoire, jamais
   /// dérivée du PIN (voir lock.dart pour pourquoi).
-  static Future<String> dbKey() async {
-    var key = await _storage.read(key: 'db_key');
-    if (key == null) {
-      key = _random(32);
-      await _storage.write(key: 'db_key', value: key);
-    }
+  ///
+  /// Trouvé en audit interne (effacement interrompu) : si `wipeLocal` est interrompu après
+  /// `_storage.deleteAll()` mais avant la suppression des fichiers (appli tuée, batterie…), les
+  /// bases restent sur le disque alors que leur clé a disparu. Le lancement suivant créait une
+  /// NOUVELLE clé, tentait d'ouvrir l'ancienne base avec, échouait (« file is not a database »)
+  /// et affichait l'écran d'erreur de démarrage en boucle, sans issue. Quand aucune clé n'existe,
+  /// toute base présente est par construction indéchiffrable (orpheline) : on la supprime
+  /// (+ fichiers -wal/-shm/-journal) AVANT de créer la nouvelle clé. Les appels concurrents
+  /// (base Matrix, mesh, appels ouvertes en parallèle) sont sérialisés par [_dbKeyOp] pour
+  /// qu'une seule clé soit jamais créée et qu'aucune base fraîchement créée ne soit supprimée.
+  static Future<String> dbKey() =>
+      _dbKeyOp ??= _loadOrCreateDbKey().whenComplete(() => _dbKeyOp = null);
+
+  static Future<String>? _dbKeyOp;
+
+  static Future<String> _loadOrCreateDbKey() async {
+    final existing = await _storage.read(key: 'db_key');
+    if (existing != null) return existing;
+    await _deleteOrphanDatabases();
+    final key = _random(32);
+    await _storage.write(key: 'db_key', value: key);
     return key;
+  }
+
+  /// Supprime toutes les bases SQLCipher connues (Matrix, mesh, appels) et leurs fichiers annexes.
+  /// Chaque suppression est indépendante : l'échec de l'une n'empêche pas les autres.
+  static Future<void> _deleteOrphanDatabases() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      for (final name in [_dbName, kMeshDbName]) {
+        await _deleteDbFiles(p.join(dir.path, name));
+      }
+    } catch (_) {}
+    try {
+      await CallOpsecStore.wipe();
+    } catch (_) {}
+  }
+
+  static Future<void> _deleteDbFiles(String path) async {
+    try {
+      await sqlcipher.deleteDatabase(path);
+    } catch (_) {}
+    for (final suffix in ['', '-wal', '-shm', '-journal']) {
+      try {
+        final f = File('$path$suffix');
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
   }
 
   /// Graine aléatoire de 32 octets gardée dans le Keystore sous [name] (créée au premier appel).
@@ -97,6 +140,15 @@ class Account {
           : AuthenticationData(type: 'm.login.dummy', session: e.session);
       await client.register(
           username: username, password: password, initialDeviceDisplayName: device, auth: auth);
+    }
+    // Trouvé en audit interne : si libolm/vodozemac ne se charge pas, le SDK initialise le client
+    // SANS chiffrement (`client.encryption == null`) et les messages partiraient en clair. Une
+    // messagerie chiffrée ne doit jamais fonctionner dans ce mode dégradé : on annule.
+    if (!client.encryptionEnabled) {
+      try {
+        await client.logout();
+      } catch (_) {}
+      throw StateError('Chiffrement indisponible');
     }
     await setDisplayName(client, displayName);
   }
@@ -149,48 +201,87 @@ class Account {
   /// la 2.3.0 : sans cela, un observateur voit le redémarrage de l'appli, ce qui trahit l'usage
   /// du code de contrainte).
   static Future<Never> panic(Client? client) async {
-    await wipeLocal(client);
-    exit(0);
+    try {
+      await wipeLocal(client);
+    } catch (_) {
+      // Rien : l'effacement fait de son mieux étape par étape (voir [wipeLocal]) ; l'appli doit
+      // se fermer quoi qu'il arrive.
+    } finally {
+      exit(0);
+    }
   }
+
+  /// Canaux de notification Android créés par Murmure (Dart : message_notifier.dart,
+  /// calls/services/call_opsec_notifier.dart, mesh/mesh_opsec_notifier.dart ; natif :
+  /// MeshForegroundService.kt). Leur nom (« Appels », « Maillage Bluetooth »…) reste visible
+  /// dans les réglages Android de l'appli tant qu'ils existent : une trace d'usage.
+  static const _notificationChannels = [
+    'murmure_messages',
+    'murmure_calls',
+    'murmure_incoming_calls',
+    'discreet_activity_v2',
+    'discreet_ring_v2',
+    'murmure_mesh',
+    'sys_calc_cache_v1',
+    'murmure_mesh_fg',
+    'sys_calc_bg_v1',
+  ];
 
   /// Détruit tout ce que Murmure stocke sur ce téléphone (sans réseau).
   /// [client] peut être null si le démarrage a échoué ou si seul le mode Bluetooth sert.
+  ///
+  /// Chaque étape est isolée dans son propre try/catch : l'échec de l'une (plugin indisponible,
+  /// fichier verrouillé…) ne doit jamais empêcher les suivantes.
   static Future<void> wipeLocal(Client? client) async {
-    await _storage.deleteAll(); // en premier : sans la clé, la base SQLCipher est illisible
+    try {
+      await _storage.deleteAll(); // en premier : sans la clé, la base SQLCipher est illisible
+    } catch (_) {}
     try {
       await client?.dispose(closeDatabase: true);
     } catch (_) {}
-    await Mesh.reset();
+    try {
+      await Mesh.reset();
+    } catch (_) {}
     // Trouvé en audit interne (pas une proposition externe) : cette base a été ajoutée dans une
     // passe postérieure à l'écriture de la boucle ci-dessous, qui ne connaissait donc que les deux
     // bases historiques — `murmure_calls.db` (salons, identifiants Matrix des correspondants et
     // horodatages des appels manqués) survivait sinon à la fois à `panic()` et à
     // `deleteEverything()`, contredisant la garantie documentée juste au-dessus. Voir
     // `CallOpsecStore.wipe()` pour le détail.
-    await CallOpsecStore.wipe();
-    final dir = await getApplicationSupportDirectory();
-    for (final name in [_dbName, kMeshDbName]) {
-      final path = p.join(dir.path, name);
-      try {
-        await sqlcipher.deleteDatabase(path);
-      } catch (_) {}
-      // Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : ce nettoyage
-      // des fichiers annexes WAL/SHM/journal n'était tenté que dans le `catch` ci-dessus, donc
-      // jamais exécuté quand `deleteDatabase` réussissait — alors que SQLite/SQLCipher peut
-      // parfaitement réussir à supprimer le fichier principal tout en laissant `-wal`/`-shm`
-      // derrière (comportement connu, pas spécifique à ce dépôt). La clé SQLCipher a déjà été
-      // détruite tout en haut de cette méthode (`_storage.deleteAll()`), donc ces fichiers ne
-      // contiennent rien de déchiffrable pour quiconque les retrouverait — mais leur simple
-      // existence (nom de fichier, taille, horodatage) reste une trace qu'une base de données a
-      // existé à cet endroit, contrairement à l'objectif affiché par cette méthode de ne rien
-      // laisser derrière. Tenté maintenant inconditionnellement, plus seulement en cas d'échec.
-      for (final suffix in ['-wal', '-shm', '-journal']) {
+    try {
+      await CallOpsecStore.wipe();
+    } catch (_) {}
+    // Les fichiers annexes WAL/SHM/journal sont supprimés inconditionnellement (voir
+    // [_deleteDbFiles]) : SQLite peut supprimer le fichier principal en les laissant derrière.
+    try {
+      final dir = await getApplicationSupportDirectory();
+      for (final name in [_dbName, kMeshDbName]) {
+        await _deleteDbFiles(p.join(dir.path, name));
+      }
+    } catch (_) {}
+    try {
+      await purgeMediaCache();
+    } catch (_) {}
+    // Notifications : une notification « Nouveau message »/« Appel manqué » restée dans la barre
+    // d'état après un effacement trahirait l'usage de l'appli.
+    final notifications = FlutterLocalNotificationsPlugin();
+    try {
+      await notifications.cancelAll();
+    } catch (_) {}
+    AndroidFlutterLocalNotificationsPlugin? android;
+    try {
+      android = notifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    } catch (_) {}
+    if (android != null) {
+      for (final id in _notificationChannels) {
         try {
-          await File('$path$suffix').delete();
+          // Peut échouer (SecurityException) pour le canal d'un service de premier plan encore
+          // actif : on passe simplement au suivant.
+          await android.deleteNotificationChannel(id);
         } catch (_) {}
       }
     }
-    await purgeMediaCache();
   }
 }
 

@@ -41,6 +41,10 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   StreamSubscription<CallState>? _stateSub;
   bool _missedRecorded = false;
 
+  /// Vrai dès que l'utilisateur refuse l'appel entrant ([_decline]) : un refus volontaire n'est
+  /// pas un « appel manqué » et ne doit ni être enregistré ni notifié.
+  bool _declined = false;
+
   /// Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : vrai dans tous
   /// les chemins qui terminent proprement la session (`_decline`, `_hangUp`, ou la fin détectée à
   /// distance ci-dessous) — jamais mis à vrai par une simple fermeture d'écran (bouton retour
@@ -71,11 +75,21 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     // propre appel sortant tant qu'aucun autre setState ne survient.
     if (!mounted) return;
 
-    // `CachedStreamController` rejoue aux nouveaux abonnés les flux déjà présents au moment de
-    // l'abonnement (voir la doc de matrix-dart-sdk) : on ne manque donc pas un flux apparu avant
-    // que cet écran n'existe (cas d'un appel déjà en cours de connexion côté sortant).
+    // Corrigé : un ancien commentaire affirmait que `CachedStreamController` rejoue aux nouveaux
+    // abonnés les flux déjà présents — FAUX au tag v0.29.0 (simple StreamController.broadcast qui
+    // mémorise la dernière valeur sans jamais la réémettre). Les flux ajoutés avant cet abonnement
+    // (local d'un appel sortant, ajouté pendant `initOutboundCall` ; écran poussé tardivement par
+    // `presentPendingCall`) étaient donc perdus : vidéo locale noire et bouton micro inopérant.
+    // On s'abonne d'abord, puis on rattache explicitement les flux déjà présents (_attach est
+    // idempotent).
     _addSub = widget.session.onStreamAdd.stream.listen(_attach);
     _removeSub = widget.session.onStreamRemoved.stream.listen(_detach);
+    for (final feed in widget.session.getLocalStreams) {
+      _attach(feed);
+    }
+    for (final feed in widget.session.getRemoteStreams) {
+      _attach(feed);
+    }
 
     // Détection d'un appel manqué : un appel ENTRANT qui atteint `kEnded` sans jamais avoir été
     // décroché (voir [_accept]). Remplace une proposition reçue dans cette conversation qui
@@ -88,19 +102,52 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     // affiché indéfiniment (micro ouvert, vidéo figée) jusqu'à un retour manuel de l'utilisateur.
     // `_closing` évite un double `pop()` quand la fin à distance et une action locale
     // (`_decline`/`_hangUp`, qui pop déjà elles-mêmes) se recoupent.
-    _stateSub = widget.session.onCallStateChanged.stream.listen((state) {
-      if (state != CallState.kEnded) return;
-      if (!_answered && !widget.session.isOutgoing && !_missedRecorded) {
-        _missedRecorded = true;
-        unawaited(_recordMissedCall());
-      }
-      if (!_closing && mounted) {
-        _closing = true;
-        Navigator.of(context).pop();
-      }
+    _stateSub = widget.session.onCallStateChanged.stream.listen(_onCallState);
+
+    setState(() {
+      _answered = widget.session.isOutgoing || widget.session.answeredByUs;
+      _isMuted = widget.session.isMicrophoneMuted;
     });
 
-    setState(() => _answered = widget.session.isOutgoing);
+    // Même raison que pour les flux : un `kEnded` survenu avant l'abonnement (pendant
+    // l'initialisation des renderers) ne serait jamais réémis — l'écran resterait affiché sur un
+    // appel terminé. On traite donc l'état courant une fois abonné.
+    if (widget.session.callHasEnded) _onCallState(CallState.kEnded);
+  }
+
+  void _onCallState(CallState state) {
+    if (state != CallState.kEnded) return;
+    final session = widget.session;
+    // Pas un appel manqué : appel sortant, décroché (ici ou par nous), refusé volontairement, ou
+    // décroché sur un autre de nos appareils (`answeredElsewhere`).
+    if (!_answered &&
+        !_declined &&
+        !session.isOutgoing &&
+        !session.answeredByUs &&
+        session.hangupReason != CallErrorCode.answeredElsewhere &&
+        !_missedRecorded) {
+      _missedRecorded = true;
+      unawaited(_recordMissedCall());
+    }
+    if (!_closing) {
+      _closing = true;
+      _closeOwnRoute();
+    }
+  }
+
+  /// Ferme la route de CET écran, et seulement elle. Un simple `Navigator.pop()` fermait la route
+  /// au sommet de la pile — pas forcément la nôtre (dialogue ou autre écran poussé par-dessus, ou
+  /// second écran d'appel), d'où la fermeture du mauvais écran.
+  void _closeOwnRoute() {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
+    final navigator = Navigator.of(context);
+    if (route.isCurrent) {
+      navigator.pop();
+    } else {
+      navigator.removeRoute(route);
+    }
   }
 
   void _attach(WrappedMediaStream feed) {
@@ -132,12 +179,16 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   /// déclenche la notification camouflée — sans bloquer sur quoi que ce soit côté UI, l'appel est
   /// de toute façon en train de se terminer.
   Future<void> _recordMissedCall() async {
-    await CallOpsecStore.insert(MissedCall(
-      roomId: widget.session.room.id,
-      remoteUserId: widget.session.remoteUserId,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
-    await CallOpsecNotifier.notifyMissedCall();
+    try {
+      await CallOpsecStore.insert(MissedCall(
+        roomId: widget.session.room.id,
+        remoteUserId: widget.session.remoteUserId,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+      await CallOpsecNotifier.notifyMissedCall();
+    } catch (_) {
+      // Best-effort : jamais de crash ni de log de contenu pour un historique raté.
+    }
   }
 
   Future<void> _accept() async {
@@ -146,22 +197,37 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   }
 
   Future<void> _decline() async {
+    _declined = true;
     _closing = true;
-    await widget.session.reject();
-    if (mounted) Navigator.of(context).pop();
+    try {
+      await widget.session.reject();
+    } catch (_) {}
+    _closeOwnRoute();
   }
 
-  void _toggleMute() {
-    final feed = _localFeed;
-    if (feed == null) return;
-    setState(() => _isMuted = !_isMuted);
-    feed.setAudioMuted(_isMuted);
+  /// Corrigé : `WrappedMediaStream.setAudioMuted` ne fait que basculer un drapeau et émettre un
+  /// événement — il ne désactive AUCUNE piste audio : le micro continuait d'émettre alors que
+  /// l'icône affichait « coupé ». `CallSession.setMicrophoneMuted` met à jour ce drapeau PUIS
+  /// applique `track.enabled = false` aux pistes audio locales (`updateMuteStatus`) et prévient le
+  /// correspondant (métadonnées SDP).
+  Future<void> _toggleMute() async {
+    final session = widget.session;
+    try {
+      await session.setMicrophoneMuted(!session.isMicrophoneMuted);
+    } catch (_) {
+      // L'envoi des métadonnées peut échouer (réseau) ; les pistes, elles, sont déjà basculées
+      // localement avant cet envoi — l'icône ci-dessous reflète l'état réel de la session.
+    }
+    if (!mounted) return;
+    setState(() => _isMuted = session.isMicrophoneMuted);
   }
 
   Future<void> _hangUp() async {
     _closing = true;
-    await widget.session.hangup(reason: CallErrorCode.userHangup);
-    if (mounted) Navigator.of(context).pop();
+    try {
+      await widget.session.hangup(reason: CallErrorCode.userHangup);
+    } catch (_) {}
+    _closeOwnRoute();
   }
 
   @override

@@ -8,7 +8,7 @@
 
 1. Ouvrez Murmure et restez sur la liste des conversations.
 2. Appuyez sur l'icône en forme d'engrenage (« Réglages ») en haut à droite.
-3. Ouvrez l'écran « Verrouillage ».
+3. L'écran « Verrouillage » s'ouvre.
 4. Faites défiler jusqu'à la rubrique « Zone dangereuse ».
 5. Appuyez sur « Supprimer mon compte ».
 6. Confirmez en appuyant sur « Supprimer ».
@@ -25,7 +25,7 @@ L'application se ferme ensuite. Au prochain lancement, elle redémarre comme neu
 
 - **Côté serveur :** l'application ne demande pas l'effacement des messages déjà envoyés. Les données conservées par le serveur (identifiants, salons, horodatages, tailles des échanges, messages chiffrés) et leur durée de conservation dépendent de la configuration du serveur, que l'application ne contrôle pas. Ce point est à confirmer auprès de l'administrateur du serveur.
 - **Chez vos correspondants :** les messages que vous avez envoyés restent sur les appareils de vos interlocuteurs. Murmure ne peut pas les effacer chez eux.
-- **Sauvegardes :** Murmure n'utilise pas de sauvegarde automatique Android de ses données.
+- **Sauvegardes :** Murmure exclut toutes ses données de la sauvegarde automatique Android (cloud) et du transfert vers un nouvel appareil.
 
 ## Demander la suppression sans l'application
 

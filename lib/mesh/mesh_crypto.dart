@@ -118,6 +118,65 @@ Future<(Uint8List chainA, Uint8List chainB)> meshRatchetRoots(SecretKey shared) 
   return (Uint8List.fromList(a.bytes), Uint8List.fromList(b.bytes));
 }
 
+/// Avancée de la chaîne de RÉCEPTION calculée en mémoire, sans aucun effet de bord : voir
+/// [meshPlanRecvAdvance]. Rien de ceci ne doit être persisté avant que [messageKey] ait permis
+/// un déchiffrement AES-GCM réussi (voir `Mesh._commitRecvPlan` dans mesh.dart).
+class MeshRecvPlan {
+  const MeshRecvPlan({
+    required this.messageKey,
+    required this.newChainKey,
+    required this.newNextCounter,
+    required this.skippedKeys,
+  });
+
+  /// Clé du message au rang demandé.
+  final Uint8List messageKey;
+
+  /// Clé de chaîne qui remplacera l'actuelle (l'actuelle doit alors être effacée).
+  final Uint8List newChainKey;
+
+  /// Prochain rang attendu après application (rang demandé + 1).
+  final int newNextCounter;
+
+  /// Clés des rangs sautés (rang, clé de message), à mettre en réserve à l'application.
+  final List<(int, Uint8List)> skippedKeys;
+}
+
+/// Calcule — sans rien modifier — ce que deviendrait la chaîne de réception ([chainKey], dont le
+/// prochain rang attendu est [nextCounter]) pour obtenir la clé du rang [targetCounter]. Mêmes
+/// primitives que [meshRatchetStep], appliquées [targetCounter] - [nextCounter] + 1 fois.
+///
+/// Retourne null si [targetCounter] < [nextCounter] (rang déjà franchi : sa clé ne se trouve plus
+/// que dans la réserve des rangs sautés, s'il y est) ou si le saut dépasse [maxSkipAhead].
+Future<MeshRecvPlan?> meshPlanRecvAdvance({
+  required Uint8List chainKey,
+  required int nextCounter,
+  required int targetCounter,
+  required int maxSkipAhead,
+}) async {
+  if (targetCounter < nextCounter) return null;
+  final steps = targetCounter - nextCounter;
+  if (steps > maxSkipAhead) return null;
+  var ck = chainKey;
+  final skipped = <(int, Uint8List)>[];
+  late Uint8List wanted;
+  for (var i = 0; i <= steps; i++) {
+    final step = await meshRatchetStep(ck);
+    if (i == steps) {
+      wanted = step.messageKey;
+    } else {
+      skipped.add((nextCounter + i, step.messageKey));
+    }
+    ck = step.nextChainKey;
+  }
+  return MeshRecvPlan(
+    messageKey: wanted,
+    newChainKey: ck,
+    newNextCounter: targetCounter + 1,
+    skippedKeys: List.unmodifiable(skipped),
+  );
+}
+
 /// Détermine, de façon déterministe et identique des deux côtés sans aucune négociation, laquelle
 /// des deux chaînes (A ou B) [myPublicKey] utilise pour ENVOYER face à [peerPublicKey] (l'autre
 /// sert à recevoir) : la clé publique la plus petite, au sens de la comparaison d'octets, envoie
@@ -256,6 +315,30 @@ class MeshEnvelope {
       ttl <= 0 || DateTime.now().difference(createdAt).inHours > maxAgeHours;
 }
 
+/// Tolérance d'horloge entre téléphones pour un horodatage d'enveloppe dans le futur.
+const Duration meshMaxClockSkew = Duration(minutes: 10);
+
+/// Motif de rejet d'une enveloppe entrante, voir [meshValidateIncoming].
+enum MeshEnvelopeRejection { futureTimestamp, ttlTooHigh, expired }
+
+/// Validation d'une enveloppe reçue AVANT tout traitement (aucune écriture en base, aucun
+/// déchiffrement) — contre l'inondation du maillage :
+/// - [MeshEnvelope.createdAt] au-delà de `now + meshMaxClockSkew` : une date lointaine rendait
+///   l'enveloppe indéfiniment « fraîche » (jamais purgée par âge) ;
+/// - [MeshEnvelope.ttl] > [MeshEnvelope.maxTtl] : le ttl n'est pas couvert par l'AAD, un relais
+///   pouvait le porter à 255 pour propager une enveloppe bien au-delà de la portée prévue ;
+/// - enveloppe expirée (ttl épuisé ou plus vieille que [MeshEnvelope.maxAgeHours]).
+/// Retourne null si l'enveloppe est acceptable.
+MeshEnvelopeRejection? meshValidateIncoming(MeshEnvelope env, {DateTime? now}) {
+  final t = now ?? DateTime.now();
+  if (env.createdAt.isAfter(t.add(meshMaxClockSkew))) return MeshEnvelopeRejection.futureTimestamp;
+  if (env.ttl > MeshEnvelope.maxTtl) return MeshEnvelopeRejection.ttlTooHigh;
+  if (env.ttl <= 0 || t.difference(env.createdAt).inHours > MeshEnvelope.maxAgeHours) {
+    return MeshEnvelopeRejection.expired;
+  }
+  return null;
+}
+
 /// Octets fixes d'une enveloppe sérialisée (voir [MeshEnvelope.serialize]), hors texte chiffré :
 /// id (16) + clé publique expéditeur (32) + indice destinataire (32) + compteur de cliquet (4) +
 /// nonce (12) + longueur du texte chiffré (2) + MAC (16) + ttl (1) + horodatage (4).
@@ -308,8 +391,8 @@ class MeshMessageTooLongException implements Exception {
 /// forger un message (il n'a pas la clé de message), mais pouvait altérer ces champs en clair sans
 /// que personne ne s'en aperçoive. Le cas le plus sérieux : réécrire [MeshEnvelope.chainCounter]
 /// avant de relayer. Le destinataire légitime calcule alors la clé de déchiffrement pour CE rang
-/// falsifié (voir `_recvKeyFor` dans mesh.dart) — l'authentification GCM échoue bien et le message
-/// ne se déchiffre pas (pas de fuite de contenu), mais `_recvKeyFor` a quand même, au passage, fait
+/// falsifié (voir `_planRecvKey` dans mesh.dart) — l'authentification GCM échoue bien et le message
+/// ne se déchiffre pas (pas de fuite de contenu), mais l'ancien `_recvKeyFor` avait quand même, au passage, fait
 /// avancer et mis au rebut l'état du cliquet de réception jusqu'à ce rang falsifié. Un relais sur
 /// le chemin d'un contact donné pouvait ainsi, sans jamais casser le chiffrement, pousser le
 /// cliquet de réception du destinataire bien au-delà des messages réellement envoyés — rendant
@@ -317,14 +400,22 @@ class MeshMessageTooLongException implements Exception {
 /// de cet expéditeur dès qu'ils arriveraient par un chemin intact. Un déni de service ciblé sur la
 /// confidentialité persistante elle-même, pas sur le contenu.
 ///
-/// Corrigé en liant ces champs à l'enveloppe via l'« Associated Data » (AAD) du GCM : [id],
-/// [senderPublicKey], [recipientHint], [chainCounter] et [createdAt] sont maintenant authentifiés
-/// (toute altération fait échouer le déchiffrement, comme une altération du texte lui-même) —
-/// SAUF [MeshEnvelope.ttl], volontairement exclu : il DOIT rester modifiable par chaque relais
-/// (décrémenté à chaque saut, voir [MeshEnvelope.relayed]), l'inclure casserait l'authentification
-/// dès le premier relais légitime. Falsifier le ttl reste possible (effet borné : raccourcir ou
-/// prolonger la propagation d'un message déjà vu, jamais lire ni forger son contenu, ni désynchroniser
-/// le cliquet d'un tiers), un compromis assumé plutôt qu'un oubli.
+/// L'AAD du GCM lie maintenant ces champs à l'enveloppe : [id], [senderPublicKey],
+/// [recipientHint], [chainCounter] et [createdAt] sont authentifiés (toute altération fait échouer
+/// le déchiffrement, comme une altération du texte lui-même). ATTENTION — l'AAD seule ne
+/// suffisait PAS à corriger le déni de service décrit ci-dessus, contrairement à ce qu'affirmait
+/// une version précédente de ce commentaire : le cliquet de réception (et la table `seen`) était
+/// modifié AVANT la vérification GCM, donc une enveloppe forgée (ou une fausse écriture GATT, qui
+/// n'a même pas besoin d'altérer un vrai message) au compteur élevé détruisait quand même le
+/// canal. Corrigé dans mesh.dart : la clé est d'abord calculée sans écriture
+/// ([meshPlanRecvAdvance] / `Mesh._planRecvKey`), le déchiffrement l'authentifie, et seulement
+/// en cas de succès l'état du cliquet est mis à jour en une transaction, puis l'id marqué `seen`.
+///
+/// [MeshEnvelope.ttl] est volontairement exclu de l'AAD : il DOIT rester modifiable par chaque
+/// relais (décrémenté à chaque saut, voir [MeshEnvelope.relayed]). Le falsifier reste possible,
+/// mais l'effet est borné : un ttl > [MeshEnvelope.maxTtl] est rejeté à la réception
+/// ([meshValidateIncoming]) ; on peut seulement raccourcir ou prolonger (jusqu'à maxTtl) la
+/// propagation d'un message, jamais lire ni forger son contenu, ni désynchroniser le cliquet.
 Uint8List _envelopeAad({
   required Uint8List id,
   required Uint8List senderPublicKey,
@@ -385,8 +476,9 @@ Future<MeshEnvelope> meshEncryptWithKey({
   );
 }
 
-/// Déchiffre une enveloppe avec une clé de message déjà retrouvée par le cliquet (voir
-/// mesh.dart:_MeshRatchetStore). Retourne null si l'authentification échoue (altération du texte
+/// Déchiffre une enveloppe avec une clé de message déjà calculée par le cliquet (voir
+/// [meshPlanRecvAdvance] et `Mesh._planRecvKey` dans mesh.dart). Fonction pure : c'est son succès
+/// qui autorise l'appelant à appliquer le plan du cliquet, jamais l'inverse. Retourne null si l'authentification échoue (altération du texte
 /// OU des champs d'enveloppe couverts par l'AAD — voir [_envelopeAad] — ou mauvaise clé).
 Future<String?> meshDecryptWithKey({
   required Uint8List messageKey,

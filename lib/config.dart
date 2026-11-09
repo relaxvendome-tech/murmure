@@ -18,3 +18,8 @@ const int kMaxMediaBytes = 50 * 1024 * 1024;
 
 /// Durée avant reverrouillage automatique de l'appli en arrière-plan.
 const Duration kRelockAfter = Duration(seconds: 30);
+
+/// Délai d'inactivité appliqué aux flux de réponse HTTP du client Matrix, identique à celui que
+/// le constructeur de `Client` (matrix-dart-sdk 0.29.x) pose lui-même via `FixedTimeoutHttpClient`.
+/// À réutiliser à chaque remplacement de `client.httpClient` (onboarding, réglages réseau).
+const Duration kHttpTimeout = Duration(seconds: 35);

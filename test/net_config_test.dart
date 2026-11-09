@@ -55,6 +55,29 @@ void main() {
       custom.close();
     });
 
+    test('customProxy par nom d\'hôte : aucune résolution DNS à la création (démarrage hors ligne)',
+        () async {
+      // `.invalid` ne se résout jamais (RFC 2606) : si httpClient() résolvait encore le nom au
+      // démarrage, cet appel lèverait. Il doit rendre un client sans lever.
+      final c = await _cfg(mode: NetMode.customProxy, host: 'proxy.murmure.invalid', port: 1080)
+          .httpClient();
+      c.close();
+    });
+
+    test('customProxy par nom d\'hôte irrésoluble : le premier envoi lève ProxyConfigError, '
+        'jamais de repli direct', () async {
+      final c = await _cfg(mode: NetMode.customProxy, host: 'proxy.murmure.invalid', port: 1080)
+          .httpClient();
+      try {
+        await expectLater(
+          c.get(Uri.parse('https://hs.example.org/_matrix/client/versions')),
+          throwsA(isA<ProxyConfigError>()),
+        );
+      } finally {
+        c.close();
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
     test('direct : retourne un client', () async {
       (await _cfg().httpClient()).close();
     });

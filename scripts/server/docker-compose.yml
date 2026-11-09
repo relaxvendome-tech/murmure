@@ -75,10 +75,17 @@ services:
     image: coturn/coturn:4.18.0-alpine
     restart: unless-stopped
     network_mode: host
+    # Démarre en root uniquement pour lire la clé privée du certificat Caddy (fichier 0600) ;
+    # coturn abandonne ensuite ses privilèges (proc-user/proc-group dans turnserver.conf).
+    user: "0:0"
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Certificats obtenus par Caddy pour le même domaine, en LECTURE SEULE (aucun second client
+      # ACME à maintenir). coturn ne recharge pas un certificat renouvelé à chaud : deploy.sh
+      # installe un redémarrage hebdomadaire de ce service.
+      - caddy-data:/caddy-data:ro
     command: ["-c", "/etc/coturn/turnserver.conf"]
+    depends_on: [caddy]
 
 networks:
   murmure:

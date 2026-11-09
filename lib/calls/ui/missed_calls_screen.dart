@@ -77,6 +77,33 @@ class _MissedCallsScreenState extends State<MissedCallsScreen> {
       body: FutureBuilder<List<MissedCall>>(
         future: _future,
         builder: (context, snapshot) {
+          // Sans ce test, une erreur d'ouverture de la base (clé absente, fichier corrompu…)
+          // laissait un spinner infini. Aucun détail de l'erreur n'est affiché ni journalisé.
+          if (snapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 48,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      "Impossible de charger l'historique des appels manqués.",
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(onPressed: _refresh, child: const Text('Réessayer')),
+                  ],
+                ),
+              ),
+            );
+          }
           if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
           }

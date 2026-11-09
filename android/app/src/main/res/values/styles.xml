@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+    <!-- Parents AppCompat (dépendance androidx.appcompat dans app/build.gradle.kts) : local_auth
+         exige un thème Theme.AppCompat.* sur Android <= 8 pour afficher sa boîte de dialogue
+         biométrique de compatibilité (plantage sinon). -->
+    <style name="LaunchTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:windowBackground">@drawable/launch_background</item>
     </style>
-    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+    <style name="NormalTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:windowBackground">@android:color/background_dark</item>
     </style>
 </resources>

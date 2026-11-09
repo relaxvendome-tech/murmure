@@ -1,5 +1,8 @@
 # Déploiement du serveur Murmure
 
+> **⚠ Créez VOTRE compte avant de diffuser le jeton d'inscription : le premier compte créé sur le
+> serveur devient administrateur.**
+
 Serveur Matrix minimal (Conduit) + HTTPS automatique (Caddy), pensé pour une petite instance low-cost
 (Hetzner CX22, AWS Lightsail Nano, EC2 t3.micro, ou tout VPS avec Docker).
 
@@ -13,9 +16,11 @@ Serveur Matrix minimal (Conduit) + HTTPS automatique (Caddy), pensé pour une pe
 ## Lancer — en une commande (`deploy.sh`)
 
 Installe Docker si besoin, clone ce dépôt, remplit `conduit.toml` (domaine + jeton d'inscription
-généré aléatoirement — jamais à saisir à la main), ouvre le pare-feu, démarre Conduit+Caddy
-(coturn exclu de cette première mise en ligne, voir l'en-tête du script), puis vérifie que le
-serveur répond en HTTPS :
+généré aléatoirement — jamais à saisir à la main), ouvre le pare-feu, démarre Conduit+Caddy,
+vérifie que le serveur répond en HTTPS, puis configure et démarre coturn (relais TURN des appels :
+même domaine, même secret que `conduit.toml`, certificat de Caddy monté en lecture seule, aucun
+journal). Si le certificat n'est pas encore prêt, `turn_uris` est désactivé dans `conduit.toml`
+jusqu'à la relance du script :
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/relaxvendome-tech/murmure/main/scripts/server/deploy.sh \
@@ -34,6 +39,9 @@ régénère pas le jeton ni ne touche aux données existantes.
    export MURMURE_DOMAIN=votre-domaine.fr
    docker compose up -d conduit caddy
    ```
+3. Appels : configurer `coturn/turnserver.conf` (voir `coturn/README.md`) puis
+   `docker compose up -d coturn` — ou commenter `turn_uris` dans `conduit.toml` tant que coturn
+   n'est pas configuré.
 
 Caddy obtient son certificat HTTPS automatiquement au premier démarrage (peut prendre une minute).
 
@@ -43,12 +51,15 @@ Dans l'appli Murmure (réglages réseau, premier lancement) :
 - Adresse du serveur : `https://votre-domaine.fr`
 - Jeton d'inscription : celui mis dans `conduit.toml`
 
+**Créez d'abord votre propre compte (il devient administrateur), et seulement ensuite diffusez le
+jeton.**
+
 ## Administration (clé maîtresse)
 
 Ce serveur n'est volontairement PAS administrable par une clé qui donnerait accès au contenu des
 messages — ceux-ci sont chiffrés de bout en bout et le serveur ne détient aucune clé de
 déchiffrement. La « clé maîtresse » décrite dans `docs/ADMIN_KEY.md` couvre uniquement :
-publication des mises à jour de l'appli, gestion du jeton d'inscription et des comptes, diffusion
+gestion du jeton d'inscription et des comptes, diffusion
 d'alertes signées (y compris relayées sur le maillage Bluetooth), et rotation de clé en cas
 d'urgence. Voir ce document pour la génération et la sauvegarde de cette clé.
 
@@ -58,6 +69,8 @@ d'urgence. Voir ce document pour la génération et la sauvegarde de cette clé.
 régulièrement, chiffré, hors du serveur :
 
 ```bash
-docker run --rm -v murmure_conduit-data:/data -v "$PWD":/backup alpine \
+# Nom du volume = <nom du projet Compose>_conduit-data (par défaut le dossier : « server »).
+# Vérifiez avec : docker volume ls | grep conduit-data
+docker run --rm -v server_conduit-data:/data -v "$PWD":/backup alpine \
   tar czf /backup/conduit-backup-$(date +%F).tar.gz -C /data .
 ```

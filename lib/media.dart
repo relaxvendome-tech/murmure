@@ -40,21 +40,29 @@ class MediaCache {
 
   /// Écrase puis supprime un fichier temporaire.
   static Future<void> wipe(File file) async {
+    RandomAccessFile? raf;
     try {
+      // Longueur lue AVANT l'ouverture : FileMode.write tronquerait le fichier à 0 (les blocs
+      // d'origine seraient libérés sans être écrasés). FileMode.append ne tronque pas ; avec
+      // setPosition(0), l'écriture se fait en place sur les blocs existants.
       final len = await file.length();
-      final sink = file.openWrite(mode: FileMode.write);
+      raf = await file.open(mode: FileMode.append);
+      await raf.setPosition(0);
       const chunk = 64 * 1024;
       var remaining = len;
-      final zeros = List<int>.filled(chunk, 0);
+      final zeros = Uint8List(chunk);
       while (remaining > 0) {
         final n = remaining < chunk ? remaining : chunk;
-        sink.add(n == chunk ? zeros : zeros.sublist(0, n));
+        await raf.writeFrom(zeros, 0, n);
         remaining -= n;
       }
-      await sink.flush();
-      await sink.close();
+      await raf.flush();
     } catch (_) {
       // Le fichier peut déjà avoir disparu ; la suppression ci-dessous est la garantie finale.
+    } finally {
+      try {
+        await raf?.close();
+      } catch (_) {}
     }
     try {
       await file.delete();

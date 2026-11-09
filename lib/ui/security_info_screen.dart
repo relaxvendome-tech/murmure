@@ -41,8 +41,12 @@ class SecurityInfoScreen extends StatelessWidget {
         'Votre adresse IP en mode direct (sans Tor ni proxy).',
         'Pendant un appel, le relais TURN voit votre adresse IP ; il ne voit pas le contenu, '
             'qui reste chiffré.',
+        'Jusqu\'où vous avez lu chaque conversation : un marqueur de lecture privé est toujours '
+            'envoyé au serveur, nécessaire pour synchroniser vos non-lus.',
         'Si l\'indicateur de saisie ou les accusés de lecture sont activés, vos correspondants '
-            'voient quand vous écrivez ou avez lu.',
+            'voient quand vous écrivez ou avez lu. Si les accusés sont désactivés : votre '
+            'correspondant ne voit pas que vous avez lu. Le serveur reçoit toujours un marqueur '
+            'de lecture privé, nécessaire pour synchroniser vos non-lus.',
       ],
     ),
     _Section(

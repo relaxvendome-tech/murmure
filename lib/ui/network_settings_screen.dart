@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:matrix/matrix.dart';
 
+import '../config.dart';
 import '../network.dart';
 import 'qr_screens.dart';
 
@@ -132,7 +133,13 @@ class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
     // Applique le nouveau client HTTP au client Matrix déjà connecté, exactement comme
     // `_OnboardingScreenState._applyConfig` — sans ça, ce réglage serait enregistré mais sans
     // aucun effet jusqu'au prochain démarrage de l'appli.
-    widget.client.httpClient = await cfg.httpClient();
+    // Même enveloppe que celle posée par le constructeur de `Client` (matrix-dart-sdk :
+    // `FixedTimeoutHttpClient(httpClient ?? http.Client(), Duration(seconds: 35))`) : sans elle,
+    // une connexion Tor/proxy bloquée ne serait plus jamais interrompue. L'ancien client interne
+    // est fermé pour ne pas laisser de sockets (éventuellement directs) ouverts.
+    final previous = widget.client.httpClient;
+    widget.client.httpClient = FixedTimeoutHttpClient(await cfg.httpClient(), kHttpTimeout);
+    _closeHttpClient(previous);
     // Trouvé en audit interne (vérifié contre le SDK matrix-dart pinné, tag v0.29.13,
     // `matrix_api_lite/matrix_api.dart`) : `Client.homeserver` est un simple alias de `baseUri`,
     // l'URL de base que le SDK utilise pour construire CHAQUE requête (sync, envoi, médias) — pas
@@ -248,5 +255,19 @@ class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
         ),
       ),
     );
+  }
+}
+
+/// Ferme le client HTTP interne remplacé (la classe d'enveloppe du SDK, [TimeoutHttpClient],
+/// n'implémente pas `close()` elle-même : c'est son `inner` qui détient les sockets).
+void _closeHttpClient(http.Client old) {
+  try {
+    if (old is TimeoutHttpClient) {
+      old.inner.close();
+    } else {
+      old.close();
+    }
+  } catch (_) {
+    // Best-effort : un client déjà fermé ne doit pas bloquer le changement de réglage.
   }
 }

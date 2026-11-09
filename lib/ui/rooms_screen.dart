@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -12,6 +13,7 @@ import '../calls/call_policy.dart';
 import '../calls/services/call_manager.dart';
 import '../calls/ui/missed_calls_screen.dart';
 import '../ephemeral.dart';
+import '../lock.dart';
 import '../media.dart';
 import '../message_notifier.dart';
 import '../network.dart';
@@ -148,9 +150,17 @@ class RoomsScreen extends StatelessWidget {
                 // après : plus simple et plus sûr que de reconstruire l'état en mémoire d'un
                 // client Matrix dont la base locale vient d'être supprimée sous ses pieds.
                 // Au prochain lancement, l'appli redémarre comme neuve (écran d'onboarding).
+                // Hors ligne, `deleteEverything` peut lever après avoir déjà effacé les données
+                // locales : on ferme l'appli dans tous les cas (`finally`), sinon l'appli resterait
+                // ouverte sur un client dont la base vient d'être supprimée.
                 onDeleteAccount: () async {
-                  await Account.deleteEverything(client);
-                  exit(0);
+                  try {
+                    await Account.deleteEverything(client);
+                  } catch (_) {
+                    // Ignoré volontairement : la fermeture ci-dessous a lieu quoi qu'il arrive.
+                  } finally {
+                    exit(0);
+                  }
                 },
               ),
             )),
@@ -220,6 +230,15 @@ class RoomsScreen extends StatelessWidget {
               final room = rooms[i - invites.length];
               final name = room.getLocalizedDisplayname();
               final lastTs = room.lastEvent?.originServerTs;
+              final last = room.lastEvent;
+              // Une demande de vérification d'appareil n'est pas un message de conversation :
+              // jamais affichée comme aperçu du dernier message.
+              final preview = last == null ||
+                      last.messageType == EventTypes.KeyVerificationRequest
+                  ? ''
+                  : last.type == EventTypes.Encrypted
+                      ? 'Message illisible sur cet appareil'
+                      : last.text;
               return ListTile(
                 leading: CircleAvatar(
                   backgroundColor: murmureAvatarColor(room.id),
@@ -232,7 +251,7 @@ class RoomsScreen extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: Text(
-                  room.lastEvent?.text ?? '',
+                  preview,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -488,10 +507,19 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _textCtrl = TextEditingController();
   Timeline? _timeline;
   bool _sendingMedia = false;
+
+  /// Pagination arrière : la liste est `reverse`, donc le « haut » (messages les plus anciens)
+  /// correspond à `maxScrollExtent`. [_loadingHistory] empêche toute réentrance.
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _loadingHistory = false;
+
+  /// Reconstruit périodiquement l'écran pour masquer les messages éphémères qui viennent
+  /// d'expirer, même sans nouvel événement dans la timeline.
+  Timer? _expiryTimer;
 
   // Indicateur « en train d'écrire » — cité par plusieurs IA (revue croisée « niveau
   // Telegram/Signal ») comme absent de cette appli alors que le SDK matrix-dart pinné l'expose
@@ -540,12 +568,29 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     unawaited(_settingsReady); // déclenche le chargement des réglages (late final paresseux)
     MessageNotifier.activeRoomId = widget.room.id;
-    widget.room.getTimeline(onUpdate: () {
+    WidgetsBinding.instance.addObserver(this);
+    _scrollCtrl.addListener(_onScroll);
+    _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
+    });
+    widget.room.getTimeline(onUpdate: () {
+      if (!mounted) return;
+      setState(() {});
       _maybeSendReadMarker();
     }).then((t) {
-      if (mounted) setState(() => _timeline = t);
+      // Écran fermé avant la fin du chargement : dispose() n'a pas pu désabonner cette timeline
+      // (encore nulle à ce moment-là), on le fait ici pour ne pas la laisser écouter le salon.
+      if (!mounted) {
+        t.cancelSubscriptions();
+        return;
+      }
+      setState(() => _timeline = t);
       _maybeSendReadMarker();
+      // Si la première page ne remplit pas l'écran, aucun défilement ne déclenchera la
+      // pagination : on vérifie une fois après le premier rendu.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _onScroll());
+    }).catchError((_) {
+      // Échec de chargement : l'indicateur reste affiché, sans journaliser de contenu.
     });
     EphemeralService.instance.start(widget.room.client);
     unawaited(EphemeralService.instance.sweepRoom(widget.room));
@@ -564,6 +609,12 @@ class _ChatScreenState extends State<ChatScreen> {
   /// l'utilisateur n'a pas réellement sous les yeux. Best-effort, comme tout le reste des accusés
   /// de ce fichier : un échec réseau ne doit jamais interrompre la lecture elle-même.
   void _maybeSendReadMarker() {
+    // Jamais d'accusé si l'appli n'est pas au premier plan, si elle est verrouillée, ou si un
+    // autre écran recouvre cette conversation : l'utilisateur ne lit pas réellement les messages.
+    if (!mounted) return;
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    if (!AppLock.isUnlocked) return;
+    if (ModalRoute.of(context)?.isCurrent != true) return;
     final latest = _timeline?.events
         .where((e) => e.type == EventTypes.Message)
         .fold<Event?>(null, (latest, e) =>
@@ -578,6 +629,47 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_settingsReady
         .then((_) => widget.room.setReadMarker(id, mRead: id, public: _sendReceipts))
         .catchError((_) {}));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _maybeSendReadMarker();
+  }
+
+  void _onScroll() {
+    if (!mounted || !_scrollCtrl.hasClients) return;
+    final pos = _scrollCtrl.position;
+    if (pos.pixels >= pos.maxScrollExtent - 300) unawaited(_loadMoreHistory());
+  }
+
+  Future<void> _loadMoreHistory() async {
+    final timeline = _timeline;
+    if (timeline == null || _loadingHistory) return;
+    if (timeline.isRequestingHistory || !timeline.canRequestHistory) return;
+    setState(() => _loadingHistory = true);
+    try {
+      await timeline.requestHistory();
+    } catch (_) {
+      // Réseau indisponible : on réessaiera au prochain défilement.
+    } finally {
+      if (mounted) setState(() => _loadingHistory = false);
+    }
+  }
+
+  /// Bouton « Réessayer » d'un message non déchiffrable : redemande la clé de session aux autres
+  /// appareils (`Event.requestKey`, qui lève si la clé n'est pas demandable).
+  Future<void> _requestKey(Event e) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await e.requestKey();
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(
+          content: Text('Clé demandée à vos autres appareils et aux participants')));
+    } catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(
+          content: Text('Impossible de demander la clé pour ce message')));
+    }
   }
 
   void _setReplyTarget(Event e) => setState(() => _replyingTo = e);
@@ -630,6 +722,10 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     if (MessageNotifier.activeRoomId == widget.room.id) MessageNotifier.activeRoomId = null;
+    WidgetsBinding.instance.removeObserver(this);
+    _expiryTimer?.cancel();
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
     _textCtrl.dispose();
     _timeline?.cancelSubscriptions();
     _typingStopTimer?.cancel();
@@ -673,11 +769,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final session = await widget.callManager.startCall(widget.room, type: type);
     if (session == null) {
-      _showCallDisabledDialog(
-        "L'appel n'a pas pu démarrer : aucun serveur TURN exploitable n'a été fourni par le "
-        'homeserver (voir docs/CALLS_ARCHITECTURE.md). Réessayez plus tard ou contactez '
-        "l'administrateur du serveur.",
-      );
+      if (!mounted) return;
+      _showCallDisabledDialog(widget.room.isDirectChat
+          ? "L'appel n'a pas pu démarrer : serveur d'appels indisponible, ou micro/caméra "
+              'refusé(e). Vérifiez les autorisations et réessayez plus tard.'
+          : 'Les appels de groupe ne sont pas disponibles : appelez un contact en conversation '
+              'directe.');
     }
     // Sinon, la navigation vers CallSessionScreen est faite par MurmureWebRTCDelegate.handleNewCall
     // (voir lib/calls/services/call_manager.dart), pas ici : c'est le même chemin que pour un
@@ -707,7 +804,9 @@ class _ChatScreenState extends State<ChatScreen> {
     ));
     // L'état "vérifié" a pu changer pendant l'écran ouvert : on reconstruit pour mettre à jour
     // l'icône de l'app bar (voir _deviceVerificationStatus).
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _maybeSendReadMarker();
   }
 
   /// Bloque le contact d'une conversation directe (`Client.ignoreUser`) : ses messages et
@@ -777,7 +876,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final messenger = ScaffoldMessenger.of(context);
     try {
       await setEphemeralTtl(widget.room, chosen);
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
       unawaited(EphemeralService.instance.sweepRoom(widget.room));
     } catch (_) {
       messenger.showSnackBar(const SnackBar(
@@ -848,16 +948,37 @@ class _ChatScreenState extends State<ChatScreen> {
   /// `vod.init()` au démarrage).
   Future<void> _pickAndSendImage(ImageSource source) async {
     if (_sendingMedia) return;
-    final XFile? picked = await ImagePicker().pickImage(source: source, imageQuality: 90);
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: source,
+        imageQuality: 90,
+        maxWidth: 2560,
+        maxHeight: 2560,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Impossible d\'accéder aux photos ou à l\'appareil photo')),
+        );
+      }
+      return;
+    }
     if (picked == null) return;
-    if (!mounted) return;
+    if (!mounted) {
+      unawaited(MediaCache.wipe(File(picked.path)));
+      return;
+    }
     setState(() => _sendingMedia = true);
     try {
       final rawBytes = await picked.readAsBytes();
       final Uint8List clean;
       try {
-        clean = stripExifAndReencode(rawBytes);
-      } on FormatException {
+        // Décodage/ré-encodage JPEG coûteux : hors du thread UI pour ne pas figer l'écran.
+        clean = await compute(stripExifAndReencode, rawBytes);
+      } catch (_) {
+        // FormatException (image non reconnue) ou erreur de l'isolat : on n'envoie jamais les
+        // octets bruts non nettoyés.
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Image illisible : fichier non reconnu, envoi annulé')),
@@ -873,6 +994,18 @@ class _ChatScreenState extends State<ChatScreen> {
             content: Text(
                 "Photo non envoyée (réseau indisponible ou serveur injoignable) — réessayez plus tard"),
           ),
+        );
+      }
+    } on FileTooBigMatrixException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo trop lourde pour le serveur')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Échec de l\'envoi')),
         );
       }
     } finally {
@@ -904,7 +1037,13 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final events = _timeline?.events
-            .where((e) => e.type == EventTypes.Message && !isExpired(e, widget.room))
+            .where((e) =>
+                // Les messages non déchiffrables (type resté `m.room.encrypted`) sont affichés
+                // avec un bouton « Réessayer » plutôt que silencieusement masqués.
+                (e.type == EventTypes.Message || e.type == EventTypes.Encrypted) &&
+                // Une demande de vérification d'appareil n'est pas un message de conversation.
+                e.messageType != EventTypes.KeyVerificationRequest &&
+                !isExpired(e, widget.room))
             .toList() ??
         [];
     // Trouvé en audit interne, vérifié contre le SDK matrix-dart pinné (tag v0.29.13,
@@ -1008,10 +1147,25 @@ class _ChatScreenState extends State<ChatScreen> {
             child: _timeline == null
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
+                    controller: _scrollCtrl,
                     reverse: true,
-                    itemCount: events.length,
+                    itemCount: events.length + (_loadingHistory ? 1 : 0),
                     itemBuilder: (context, i) {
+                      // Liste inversée : le dernier indice est affiché tout en haut.
+                      if (i >= events.length) {
+                        return const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        );
+                      }
                       final e = events[i];
+                      final undecryptable = e.type == EventTypes.Encrypted;
                       final mine = e.senderId == widget.room.client.userID;
                       final scheme = Theme.of(context).colorScheme;
                       final bubbleColor =
@@ -1038,7 +1192,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       final seenByOther =
                           mine && minOtherReceiptIndex != null && i >= minOtherReceiptIndex;
                       return GestureDetector(
-                        onLongPress: () => _setReplyTarget(e),
+                        onLongPress: undecryptable ? null : () => _setReplyTarget(e),
                         child: Align(
                           alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
                           child: Container(
@@ -1071,7 +1225,16 @@ class _ChatScreenState extends State<ChatScreen> {
                                     padding: const EdgeInsets.only(bottom: 4),
                                     child: _ReplyQuote(event: e, timeline: _timeline!, metaColor: metaColor),
                                   ),
-                                if (e.messageType == MessageTypes.Image)
+                                if (undecryptable) ...[
+                                  Text(
+                                    'Message illisible sur cet appareil (clé manquante)',
+                                    style: TextStyle(color: textColor, fontStyle: FontStyle.italic),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => _requestKey(e),
+                                    child: const Text('Réessayer'),
+                                  ),
+                                ] else if (e.messageType == MessageTypes.Image)
                                   _MessageImage(event: e)
                                 else
                                   Text(
@@ -1267,16 +1430,26 @@ class _ReplyQuote extends StatelessWidget {
       future: event.getReplyEvent(timeline),
       builder: (context, snapshot) {
         final quoted = snapshot.data;
+        final String label;
+        if (quoted == null) {
+          label = '…';
+        } else if (quoted.redacted) {
+          label = 'Message supprimé';
+        } else if (isExpired(quoted, quoted.room)) {
+          label = 'Message expiré';
+        } else if (quoted.type == EventTypes.Encrypted) {
+          label = 'Message illisible sur cet appareil';
+        } else {
+          label = '${quoted.senderFromMemoryOrFallback.calcDisplayname()} : '
+              '${_stripReplyFallback(quoted.text)}';
+        }
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
             border: Border(left: BorderSide(color: metaColor, width: 2)),
           ),
           child: Text(
-            quoted == null
-                ? '…'
-                : '${quoted.senderFromMemoryOrFallback.calcDisplayname()} : '
-                    '${_stripReplyFallback(quoted.text)}',
+            label,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: metaColor, fontSize: 12, fontStyle: FontStyle.italic),
@@ -1309,13 +1482,30 @@ class _MessageImage extends StatefulWidget {
   State<_MessageImage> createState() => _MessageImageState();
 }
 
+/// Taille maximale acceptée pour une image reçue (déclarée ET réelle) : au-delà, on refuse de
+/// télécharger/décoder pour éviter un épuisement mémoire provoqué par un expéditeur malveillant.
+const int _kMaxIncomingImageBytes = 15 * 1024 * 1024;
+
+class _ImageTooLarge implements Exception {
+  const _ImageTooLarge();
+}
+
 class _MessageImageState extends State<_MessageImage> {
   late final Future<MatrixFile> _future;
 
   @override
   void initState() {
     super.initState();
-    _future = widget.event.downloadAndDecryptAttachment();
+    _future = _load();
+  }
+
+  Future<MatrixFile> _load() async {
+    final declared = widget.event.infoMap['size'];
+    if (declared is num && declared > _kMaxIncomingImageBytes) throw const _ImageTooLarge();
+    final file = await widget.event.downloadAndDecryptAttachment();
+    // La taille déclarée n'est qu'une indication de l'expéditeur : on revérifie la taille réelle.
+    if (file.bytes.lengthInBytes > _kMaxIncomingImageBytes) throw const _ImageTooLarge();
+    return file;
   }
 
   @override
@@ -1326,13 +1516,24 @@ class _MessageImageState extends State<_MessageImage> {
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.hasError) {
+            final tooLarge = snapshot.error is _ImageTooLarge;
             return Container(
               width: 180,
               height: 120,
               alignment: Alignment.center,
+              padding: const EdgeInsets.all(8),
               color: Theme.of(context).colorScheme.errorContainer,
-              child: Icon(Icons.broken_image_outlined,
-                  color: Theme.of(context).colorScheme.onErrorContainer),
+              child: tooLarge
+                  ? Text(
+                      'Image trop volumineuse (plus de 15 Mo), non affichée',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                      ),
+                    )
+                  : Icon(Icons.broken_image_outlined,
+                      color: Theme.of(context).colorScheme.onErrorContainer),
             );
           }
           final file = snapshot.data;
@@ -1346,6 +1547,9 @@ class _MessageImageState extends State<_MessageImage> {
           return Image.memory(
             file.bytes,
             width: 240,
+            // Limite la résolution décodée en mémoire (une photo 4000 px décodée en pleine taille
+            // pèse ~64 Mo de RGBA) : largement suffisant pour une vignette de 240 dp.
+            cacheWidth: 480,
             fit: BoxFit.cover,
             errorBuilder: (context, error, stackTrace) => Container(
               width: 180,

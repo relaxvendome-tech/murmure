@@ -84,7 +84,35 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     }
   }
 
+  /// La vérification par émojis (SAS) d'un AUTRE utilisateur passe par une conversation directe
+  /// (SDK v0.29.0, `DeviceKeysList.startVerification` → `Client.startDirectChat`) : elle est créée
+  /// si elle n'existe pas encore. On prévient avant d'ouvrir l'écran ; la comparaison d'empreinte
+  /// seule n'ouvre rien.
   Future<void> _openVerification(User u) async {
+    if (widget.room.client.getDirectChatFromUserId(u.id) == null) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Vérifier ce membre'),
+          content: Text(
+            'La vérification par émojis ouvre une conversation directe avec '
+            '${u.calcDisplayname()} (elle sera créée et la personne y sera invitée). '
+            'La comparaison d\'empreinte, elle, ne crée aucune conversation.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Continuer'),
+            ),
+          ],
+        ),
+      );
+      if (go != true || !mounted) return;
+    }
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => DeviceVerificationScreen(
         client: widget.room.client,
@@ -94,6 +122,25 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     ));
     // L'état a pu changer pendant l'écran ouvert.
     if (mounted) setState(() {});
+  }
+
+  /// Après `invite`/`kick`, l'état local du salon n'est mis à jour qu'à la sync SUIVANTE :
+  /// relire la liste tout de suite afficherait l'ancienne composition. On attend (15 s max) une
+  /// sync où l'appartenance de [userId] vaut [expected], puis on recharge la liste.
+  Future<void> _reloadAfterMembership(String userId, Membership expected) async {
+    bool applied() =>
+        widget.room.getState(EventTypes.RoomMember, userId)?.content['membership'] ==
+        expected.name;
+    if (!applied()) {
+      try {
+        await widget.room.client.onSync.stream
+            .firstWhere((_) => applied())
+            .timeout(const Duration(seconds: 15));
+      } catch (_) {
+        // Délai dépassé ou hors ligne : on recharge quand même ce qui est connu.
+      }
+    }
+    if (mounted) await _loadParticipants();
   }
 
   Widget _shield(bool? status) {
@@ -140,7 +187,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           Text(
             'Les messages restent envoyés à tous les appareils des membres, y compris ceux qui ne '
             'sont pas vérifiés : la vérification n\'affiche que l\'état de confiance, elle ne '
-            'bloque personne.',
+            'bloque personne. Vérifier un membre par émojis ouvre une conversation directe avec '
+            'lui.',
             style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
           ),
           if (_keysError) ...[
@@ -219,7 +267,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     });
     try {
       await widget.room.invite(userId);
-      await _loadParticipants();
+      await _reloadAfterMembership(userId, Membership.invite);
       if (!mounted) return;
       setState(() => _busyMembers = false);
     } catch (e) {
@@ -253,7 +301,11 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     });
     try {
       await widget.room.kick(user.id);
-      await _loadParticipants();
+      // Retrait local immédiat (le serveur a accepté), puis relecture après la sync suivante.
+      if (mounted) {
+        setState(() => _participants = _participants.where((p) => p.id != user.id).toList());
+      }
+      await _reloadAfterMembership(user.id, Membership.leave);
       if (!mounted) return;
       setState(() => _busyMembers = false);
     } catch (e) {

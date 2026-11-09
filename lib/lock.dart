@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:cryptography/cryptography.dart';
 
 import 'account.dart';
+import 'config.dart' show kRelockAfter;
 import 'mesh/mesh_crypto.dart' show meshB64, meshUnB64, randomBytes;
 
 /// Résultat de la saisie d'un code.
@@ -41,7 +43,8 @@ class AppLock {
   static const bioMaxPinFailures = 3;
   static const minLength = 4;
   static const maxLength = 8;
-  static final _kdf = Pbkdf2(macAlgorithm: Hmac.sha256(), iterations: 120000, bits: 256);
+  static const _kdfIterations = 120000;
+  static const _kdfBits = 256;
 
   /// Trouvé en audit interne (revue croisée IA, confirmé en relisant la structure réelle des
   /// widgets) : [LockGate] (ui/lock_screens.dart) n'est qu'un simple widget sous `home:` de
@@ -73,9 +76,40 @@ class AppLock {
   /// pire cas est un appel arrivant littéralement avant que l'appli n'ait fini de démarrer,
   /// traité comme un appel manqué — jamais un bypass du verrou. [LockGate._init] remet la bonne
   /// valeur dès qu'elle est connue, quelques instants plus tard.
-  static bool isUnlocked = false;
+  ///
+  /// Trouvé en audit interne (contournement du verrou par appel entrant) : ce drapeau restait à
+  /// `true` pendant TOUT le séjour en arrière-plan — [LockGate] ne le repassait à `false` qu'au
+  /// retour au premier plan. Un appel entrant arrivant téléphone en poche, bien après
+  /// [kRelockAfter], voyait donc encore l'appli « déverrouillée » et poussait l'écran d'appel
+  /// par-dessus un verrou qui aurait dû être actif. [isUnlocked] est maintenant un getter qui
+  /// renvoie `false` dès que l'appli est en arrière-plan ([backgroundedAt], tenu à jour par
+  /// [LockGate]) depuis plus de [kRelockAfter], quel que soit l'état de session mémorisé.
+  static bool _sessionUnlocked = false;
 
-  static Future<bool> enabled() async => (await Account.read('pin_hash')) != null;
+  /// Instant du passage en arrière-plan (`AppLifecycleState.paused`), `null` au premier plan.
+  /// Maintenu exclusivement par [LockGate].
+  static DateTime? backgroundedAt;
+
+  static bool get isUnlocked {
+    final since = backgroundedAt;
+    if (since != null && DateTime.now().difference(since) > kRelockAfter) return false;
+    return _sessionUnlocked;
+  }
+
+  /// État de session (déverrouillé ou non), fixé par [LockGate] uniquement.
+  static set isUnlocked(bool value) => _sessionUnlocked = value;
+
+  /// Dernière valeur connue de [enabled] (mise à jour à chaque lecture/écriture du code), pour que
+  /// [LockGate] puisse masquer le contenu de façon synchrone au retour au premier plan sans
+  /// attendre une lecture Keystore.
+  static bool lastKnownEnabled = false;
+
+  static Future<bool> enabled() async {
+    final e = (await Account.read('pin_hash')) != null;
+    lastKnownEnabled = e;
+    return e;
+  }
+
   static Future<bool> hasDuress() async => (await Account.read('duress_hash')) != null;
 
   static Future<String> _salt() async {
@@ -87,9 +121,22 @@ class AppLock {
     return s;
   }
 
+  /// Dérivation PBKDF2-SHA256 (120 000 itérations, 256 bits) exécutée dans un isolat séparé :
+  /// l'implémentation pure Dart du paquet `cryptography` bloquait sinon le thread UI (gel visible
+  /// de l'écran de verrou à chaque saisie). Résultat strictement identique à l'ancien calcul fait
+  /// sur le thread principal (mêmes paramètres, même sel décodé, même encodage [meshB64]) : les
+  /// codes déjà enregistrés restent valides. La closure ne capture que des valeurs simples
+  /// (String, List<int>), transférables entre isolats.
   static Future<String> _hash(String pin, String salt) async {
-    final key = await _kdf.deriveKey(secretKey: SecretKey(utf8.encode(pin)), nonce: meshUnB64(salt));
-    return meshB64(await key.extractBytes());
+    final List<int> saltBytes = List<int>.of(meshUnB64(salt));
+    final bytes = await Isolate.run<List<int>>(() => _derive(pin, saltBytes));
+    return meshB64(bytes);
+  }
+
+  static Future<List<int>> _derive(String pin, List<int> salt) async {
+    final kdf = Pbkdf2(macAlgorithm: Hmac.sha256(), iterations: _kdfIterations, bits: _kdfBits);
+    final key = await kdf.deriveKey(secretKey: SecretKey(utf8.encode(pin)), nonce: salt);
+    return List<int>.of(await key.extractBytes());
   }
 
   /// Comparaison en temps constant (ne révèle pas le nombre de caractères corrects).
@@ -107,6 +154,7 @@ class AppLock {
   static Future<void> setPin(String pin) async {
     await Account.write('pin_hash', await _hash(pin, await _salt()));
     await Account.write('pin_fails', '0');
+    lastKnownEnabled = true;
   }
 
   /// Le code de contrainte doit différer du code normal (vérifié par l'appelant).
@@ -140,6 +188,7 @@ class AppLock {
     for (final k in ['pin_hash', 'duress_hash', 'pin_fails', 'bio_enabled']) {
       await Account.delete(k);
     }
+    lastKnownEnabled = false;
   }
 
   static Future<int> remaining() async =>

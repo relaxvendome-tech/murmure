@@ -16,8 +16,14 @@ import 'lock.dart';
 ///   confidentialité du projet). Une fois le processus tué par Android, plus aucune notification
 ///   de message n'arrive avant la prochaine ouverture ; les messages reçus entre-temps sont
 ///   signalés (au plus 24 h en arrière) au prochain rattrapage de sync.
-/// - Un message chiffré qui ne peut pas être déchiffré (clé manquante) ne déclenche rien tant
-///   qu'il n'est pas déchiffré (le SDK renvoie alors une mise à jour `decryptedTimelineQueue`).
+/// - Un message encore chiffré à sa réception (clé pas encore arrivée) notifie immédiatement un
+///   « Nouveau message » générique : la mise à jour `decryptedTimelineQueue` envoyée plus tard par
+///   le SDK est reconstruite SANS expéditeur (impossible d'exclure ses propres messages ou ceux d'un
+///   utilisateur bloqué) et est donc ignorée. Contrepartie : une réaction ou un événement chiffré
+///   illisible peut aussi notifier.
+/// - Rien n'est notifié pendant une synchronisation initiale (`Client.prevBatch == null` :
+///   première connexion, ou vidage du cache après blocage/déblocage d'un utilisateur), sinon tout
+///   l'historique récent déclencherait une rafale de fausses notifications.
 /// - Le rendu réel (canal, écran verrouillé) n'a pas été vérifié sur appareil depuis ce bac à sable.
 ///
 /// CONFIDENTIALITÉ : jamais le contenu, jamais le nom de l'expéditeur ni du salon : titre
@@ -86,26 +92,31 @@ class MessageNotifier with WidgetsBindingObserver {
   static Future<void> _onUpdate(Client client, EventUpdate u) async {
     try {
       if (!_initialized) return;
-      if (u.type != EventUpdateType.timeline &&
-          u.type != EventUpdateType.decryptedTimelineQueue) {
-        return;
-      }
-      // Les messages encore chiffrés (type m.room.encrypted) sont ignorés : on attend la version
-      // déchiffrée, ce qui évite de notifier des réactions/éditions/états illisibles.
-      if (u.content['type'] != EventTypes.Message) return;
+      // Synchronisation initiale (connexion, clearCache après blocage/déblocage) : `prevBatch`
+      // n'est affecté qu'APRÈS le traitement de la réponse /sync (même garde que le SDK pour les
+      // événements d'appel). Lu avant tout `await`.
+      if (client.prevBatch == null) return;
+      // Seulement la timeline en direct. `decryptedTimelineQueue` est ignoré : son contenu est
+      // reconstruit sans `sender` (voir l'en-tête) et le message a déjà notifié sous sa forme
+      // chiffrée (dédoublonnage par eventId).
+      if (u.type != EventUpdateType.timeline) return;
+      final type = u.content['type'];
+      if (type != EventTypes.Message && type != EventTypes.Encrypted) return;
       final room = client.getRoomById(u.roomID);
       if (room == null || room.membership != Membership.join) return;
-      if (room.id == _activeRoomId) return;
+      if (room.id == _activeRoomId && _isForegroundUnlocked) return;
       if (room.pushRuleState == PushRuleState.dontNotify) return; // salon mis en sourdine
       final event = Event.fromJson(u.content, room);
       if (event.senderId == client.userID) return;
       if (client.ignoredUsers.contains(event.senderId)) return; // utilisateur bloqué
       if (event.relationshipType == RelationshipTypes.edit) return; // édition, pas un nouveau message
+      // Demande de vérification d'appareil envoyée comme message : pas un message de conversation.
+      if (event.content['msgtype'] == 'm.key.verification.request') return;
       if (DateTime.now().difference(event.originServerTs) > _maxAge) return;
       if (isExpired(event, room)) return;
       if (!await isEnabled()) return;
       if (await Account.read('calc_mode') == '1') return; // mode discret : silence total
-      if (!_seen.add(event.eventId)) return; // dédoublonnage (mise à jour déchiffrée, re-sync)
+      if (!_seen.add(event.eventId)) return; // dédoublonnage (re-sync)
       if (_seen.length > _maxSeen) _seen.remove(_seen.first);
       _count++;
       await _show();
@@ -114,6 +125,11 @@ class MessageNotifier with WidgetsBindingObserver {
       // Best-effort ; jamais de log (le contenu ne doit jamais fuiter).
     }
   }
+
+  /// Vrai si l'appli est au premier plan ET déverrouillée : seule situation où la conversation
+  /// « active » est réellement sous les yeux de l'utilisateur.
+  static bool get _isForegroundUnlocked =>
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed && AppLock.isUnlocked;
 
   static Future<void> _show() async {
     await _plugin.show(
@@ -138,25 +154,46 @@ class MessageNotifier with WidgetsBindingObserver {
   /// Efface la notification et remet le compteur à zéro.
   static Future<void> clear() async {
     _count = 0;
-    _unlockWatch?.cancel();
-    _unlockWatch = null;
+    _stopUnlockWatch();
     try {
       await _plugin.cancel(_notificationId);
     } catch (_) {}
   }
 
-  /// Tant qu'une notification est affichée et que l'appli est au premier plan, l'efface dès que
-  /// l'appli est déverrouillée (lock_screens.dart ne l'appelle pas : fichier hors périmètre).
+  /// Tant qu'une notification est affichée et que l'appli est au premier plan mais verrouillée,
+  /// vérifie chaque seconde si elle a été déverrouillée (lock_screens.dart ne prévient pas : fichier
+  /// hors périmètre) pour effacer la notification. Le minuteur n'existe QU'AU PREMIER PLAN : il est
+  /// arrêté dès que l'appli passe en arrière-plan et relancé au retour (didChangeAppLifecycleState).
+  /// Appli déjà déverrouillée au premier plan : rien à surveiller (la notification concerne une
+  /// autre conversation et reste affichée).
   static void _watchUnlock() {
+    if (_count == 0) return;
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    if (AppLock.isUnlocked) return;
     _unlockWatch ??= Timer.periodic(const Duration(seconds: 1), (_) {
-      final foreground =
-          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
-      if (foreground && AppLock.isUnlocked) unawaited(clear());
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _stopUnlockWatch();
+      } else if (AppLock.isUnlocked) {
+        unawaited(clear());
+      }
     });
+  }
+
+  static void _stopUnlockWatch() {
+    _unlockWatch?.cancel();
+    _unlockWatch = null;
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && AppLock.isUnlocked) unawaited(clear());
+    if (state == AppLifecycleState.resumed) {
+      if (AppLock.isUnlocked) {
+        unawaited(clear()); // retour dans l'appli déverrouillée : nouveautés vues
+      } else {
+        _watchUnlock(); // surveille le déverrouillage, au premier plan seulement
+      }
+    } else {
+      _stopUnlockWatch(); // aucun minuteur en arrière-plan
+    }
   }
 }

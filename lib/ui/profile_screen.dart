@@ -169,9 +169,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     secondary: const Icon(Icons.done_all),
                     title: const Text('Envoyer les accusés de lecture'),
                     subtitle: const Text(
-                        'Si activé : le serveur et votre correspondant voient quand et jusqu\'à '
-                        'quel message vous avez lu. Si désactivé : aucun accusé public n\'est '
-                        'envoyé (vos non-lus restent remis à zéro localement).'),
+                        'Si activé : votre correspondant voit quand et jusqu\'à quel message vous '
+                        'avez lu. Si désactivé : votre correspondant ne voit pas que vous avez lu. '
+                        'Le serveur reçoit toujours un marqueur de lecture privé, nécessaire pour '
+                        'synchroniser vos non-lus.'),
                     value: _sendReadReceipts,
                     onChanged: (v) {
                       setState(() => _sendReadReceipts = v);

@@ -30,8 +30,21 @@ class _NetworkStatusChipState extends State<NetworkStatusChip> {
   void initState() {
     super.initState();
     _loadMode();
+    // SDK v0.29.0 : SyncStatus { waitingForResponse, processing, cleaningUp, finished, error }.
+    // Après une erreur, chaque nouvelle tentative repasse par `waitingForResponse` : n'en déduire
+    // « en ligne » faisait clignoter « Hors ligne ». On ne repasse en ligne que sur `finished`
+    // (sync réellement aboutie) ; les états intermédiaires ne changent rien.
+    _offline = widget.client.onSyncStatus.value?.status == SyncStatus.error;
     _syncSub = widget.client.onSyncStatus.stream.listen((u) {
-      final off = u.status == SyncStatus.error;
+      final bool off;
+      switch (u.status) {
+        case SyncStatus.error:
+          off = true;
+        case SyncStatus.finished:
+          off = false;
+        default:
+          return;
+      }
       if (mounted && off != _offline) setState(() => _offline = off);
     });
     _meshSub = Mesh.instance.events.listen((e) {

@@ -47,6 +47,17 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
   bool _justEvaluated = false;
   bool _checking = false;
 
+  /// Chiffres RÉELLEMENT tapés à la suite depuis le dernier opérateur, « = », « C », « ± » ou
+  /// virgule. Trouvé en audit interne : sans cela, appuyer plusieurs fois sur « = » réévaluait le
+  /// RÉSULTAT affiché (« 1234 = » → « 1234 », qui a la forme d'un code) et le retestait comme PIN
+  /// à chaque appui — chaque appui consommait un essai via [AppLock.check], jusqu'à l'effacement
+  /// total après [AppLock.maxFailures] appuis. Seule une saisie identique à ce champ est testée.
+  String _typedDigits = '';
+
+  /// Codes saisis pendant qu'une vérification était déjà en cours : testés ensuite, dans l'ordre
+  /// (auparavant ignorés silencieusement — un vrai code tapé pendant un test n'ouvrait rien).
+  final List<String> _pendingPins = [];
+
   // ---------------------------------------------------------------------------------------------
   // Saisie
   // ---------------------------------------------------------------------------------------------
@@ -55,11 +66,19 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
     HapticFeedback.selectionClick(); // identique pour toutes les touches : ne trahit rien
     switch (key) {
       case '±':
+        _typedDigits = '';
         _toggleSign();
       case 'C':
+        _typedDigits = '';
         _set('', '0');
       case '⌫':
-        if (_justEvaluated) return _set('', '0');
+        if (_justEvaluated) {
+          _typedDigits = '';
+          return _set('', '0');
+        }
+        if (_typedDigits.isNotEmpty) {
+          _typedDigits = _typedDigits.substring(0, _typedDigits.length - 1);
+        }
         final s = _input.isEmpty ? '' : _input.substring(0, _input.length - 1);
         _set(s, s.isEmpty ? '0' : s);
       case '=':
@@ -71,8 +90,11 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
 
   void _append(String key) {
     final isOp = '+−×÷'.contains(key);
+    final isDigit = '0123456789'.contains(key);
     var s = (_justEvaluated && !isOp) ? '' : _input;
     if (_display == 'Erreur') s = '';
+    // Nouvelle saisie (après « = » ou « Erreur ») : la série de chiffres tapés repart de zéro.
+    final fresh = s.isEmpty;
     if (s.length >= _maxLength) return;
     final last = s.isEmpty ? '' : s[s.length - 1];
     final negativeOperand = key == '−' && (last == '×' || last == '÷');
@@ -86,6 +108,7 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
     }
     if (isOp && s.isEmpty && key != '−') return;
     _justEvaluated = false;
+    _typedDigits = isDigit ? (fresh ? key : _typedDigits + key) : '';
     _set(s + key, s + key);
   }
 
@@ -102,6 +125,8 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
 
   void _equals() {
     final raw = _input;
+    final typed = _typedDigits;
+    _typedDigits = '';
     if (raw.isEmpty) return;
 
     // Toujours afficher un vrai résultat, y compris pour « 19842026 = » (qui vaut 19842026).
@@ -111,31 +136,40 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
     // Le résultat sert de point de départ au calcul suivant (sauf notation scientifique).
     _set(value == null || shown.contains('e') ? '' : shown, shown);
 
-    if (_pinShape.hasMatch(raw)) unawaited(_tryPin(raw));
+    // Seuls des chiffres réellement tapés à la suite (pas un résultat réévalué) sont testés.
+    if (_pinShape.hasMatch(raw) && raw == typed) unawaited(_tryPin(raw));
   }
 
   Future<void> _tryPin(String pin) async {
-    if (_checking) return;
+    if (_checking) {
+      _pendingPins.add(pin); // testé dès la fin de la vérification en cours
+      return;
+    }
     _checking = true;
     try {
-      // AppLock.check (pas classify) : compte cette tentative, voir le commentaire de classe.
-      final r = await AppLock.check(pin);
-      if (!mounted) return;
-      switch (r) {
-        case PinResult.ok:
+      String? next = pin;
+      while (next != null) {
+        // AppLock.check (pas classify) : compte cette tentative, voir le commentaire de classe.
+        final r = await AppLock.check(next);
+        if (!mounted) return;
+        if (r == PinResult.ok) {
+          _pendingPins.clear();
           _set('', '0');
           widget.onUnlocked();
-        case PinResult.duress:
+          return;
+        }
+        if (r == PinResult.duress || r == PinResult.exhausted) {
+          _pendingPins.clear();
           _set('', '0');
           await widget.onWipe();
-        case PinResult.exhausted:
-          _set('', '0');
-          await widget.onWipe();
-        case PinResult.wrong:
-          break; // rien : reste affiché comme un calcul normal, pas d'indice visuel d'échec
+          return;
+        }
+        // PinResult.wrong : rien, reste affiché comme un calcul normal (pas d'indice d'échec).
+        next = _pendingPins.isEmpty ? null : _pendingPins.removeAt(0);
       }
     } catch (_) {
       // Keystore indisponible, etc. : la calculatrice reste une calculatrice.
+      _pendingPins.clear();
     } finally {
       _checking = false;
     }

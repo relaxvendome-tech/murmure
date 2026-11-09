@@ -3,7 +3,8 @@
 Textes rédigés à partir du code réel de `lib/`, `android/app/src/main/AndroidManifest.xml` et `scripts/server/`.
 Fonctions volontairement ABSENTES (vérifiées par grep, ne pas les annoncer) : notifications de messages
 lorsque le processus de l'appli est tué par Android (elles n'existent que tant que l'appli tourne), changement
-d'icône de lancement (retiré, voir `UPDATES.md`). Messages éphémères (`lib/ephemeral.dart`), biométrie
+d'icône de lancement (retiré, voir `UPDATES.md`), mise à jour hors Google Play (retirée : aucune
+REQUEST_INSTALL_PACKAGES). Messages éphémères (`lib/ephemeral.dart`), biométrie
 (`lib/biometric.dart`, `local_auth`), blocage (`blocked_users_screen.dart`) et notifications sans contenu
 (`message_notifier.dart`) existent désormais et sont annoncés.
 
@@ -45,7 +46,7 @@ MESSAGES ET APPELS CHIFFRÉS
 • Envoi de photos, chiffrées comme les messages.
 • Messages éphémères réglables par conversation : ils sont masqués puis supprimés par les appareils Murmure ; ils ne protègent pas d'une capture d'écran.
 • Blocage de contacts.
-• Notifications sans contenu : « Nouveau message », sans nom ni texte.
+• Notifications sans contenu : « Nouveau message », sans nom ni texte (tant que l'appli tourne).
 • Accusés de lecture et indicateur de saisie désactivés par défaut.
 • Appels audio et vidéo.
 • Vérification des appareils par comparaison d'emojis (SAS) ou d'empreinte, pour confirmer que vous parlez bien à la bonne personne.
@@ -57,20 +58,20 @@ PROTECTION DE VOTRE APPAREIL
 • Code de contrainte : s'il est saisi, Murmure efface localement clés, messages et médias, puis se ferme.
 • Mode discret optionnel : écran de verrouillage d'apparence calculatrice à l'intérieur de l'application ; l'icône et le nom restent Murmure. Le bon code ouvre Murmure ; ce n'est pas une application cachée.
 • Captures d'écran bloquées et aperçu masqué dans les applications récentes.
-• Aucune sauvegarde automatique Android des données de l'appli.
+• Aucune sauvegarde automatique Android des données de l'appli, ni copie lors d'un transfert vers un nouveau téléphone.
 
 RÉSEAU
 • Connexion directe, via Tor (avec l'application Orbot) ou via un proxy SOCKS5 personnalisé. En mode Tor ou proxy, Murmure refuse de se connecter en direct plutôt que de revenir silencieusement à votre IP réelle.
 • Mode Bluetooth maillé, expérimental : relais de messages chiffrés d'appareil à appareil quand le réseau mobile est indisponible. Portée limitée, fonction en développement, aucune garantie de remise. Un service de premier plan et une notification permanente sont affichés pendant son fonctionnement.
 
-MISES À JOUR
-Si l'administrateur de votre serveur en configure une, Murmure peut vérifier et télécharger une nouvelle version (empreinte SHA-256 contrôlée). L'installation est toujours confirmée par Android. Sur Google Play, les mises à jour passent par Google Play.
+Les mises à jour de Murmure sont distribuées uniquement par Google Play.
 
 CE QUE MURMURE NE FAIT PAS
 Murmure protège le contenu des messages mais pas toutes les métadonnées : le serveur voit notamment les identifiants, les salons, les horaires et les tailles des échanges. Aucune application ne supprime tout risque, notamment si votre téléphone est compromis ou si votre interlocuteur est piégé. Murmure est un projet indépendant, sans audit officiel ni certification.
 
 Politique de confidentialité : voir le lien de la fiche.
 ```
+(3397 caractères, recompter après toute modification : limite 4000)
 
 ### Notes de version — première release de test (≤ 500 caractères)
 
@@ -106,7 +107,7 @@ données chiffrées de bout en bout dont le serveur ne peut pas lire le contenu 
 | Activité dans l'appli, historique web | Non (aucun analytique, aucune pub) |
 | Infos et performances de l'appli | Non (aucun SDK de plantage ni d'analytique) |
 | Identifiants de l'appareil ou autres | Non pour l'ID publicitaire. Le nom d'appareil Matrix (device) est un nom d'affichage de session, à citer dans la politique |
-| Adresse IP | Non journalisée : Caddy masque `remote_ip` / `client_ip`, Conduit en `log = "warn"`. L'IP est néanmoins vue techniquement par le serveur pour établir la connexion. Ne pas écrire « jamais vue ». **À vérifier : journaux de coturn (non configurés ici) et du pare-feu/hébergeur** |
+| Adresse IP | Non journalisée : Caddy masque `remote_ip` / `client_ip`, Conduit en `log = "warn"`. L'IP est néanmoins vue techniquement par le serveur pour établir la connexion. Ne pas écrire « jamais vue ». coturn configuré sans aucun journal (`log-file=/dev/null`, `scripts/server/coturn/turnserver.conf`). **À vérifier : journaux du pare-feu/hébergeur** |
 | Métadonnées Matrix | Oui, à décrire dans la politique : identifiants, salons, membres, horodatages, tailles, versions d'appareil |
 | Publicité, analytique, SDK tiers | Aucun |
 | Hébergement | Serveur en France (**à confirmer par l'hébergeur retenu avant publication**) |
@@ -124,17 +125,17 @@ IP non journalisée ; serveur en France ; aucune fédération (`allow_federation
 | ACCESS_FINE_LOCATION (`maxSdkVersion=30`) | Scan BLE sur Android ≤ 11, jamais lue | Moyen : localisation, justifier dans le formulaire |
 | CAMERA | Scan de QR codes (contacts, serveur), appels vidéo | Faible |
 | RECORD_AUDIO, MODIFY_AUDIO_SETTINGS | Appels audio/vidéo | Faible |
-| POST_NOTIFICATIONS | Notification d'appel manqué, notification du service Bluetooth | Faible |
+| POST_NOTIFICATIONS | Notifications sans contenu (nouveau message, appel manqué/entrant), notification du service Bluetooth. Demandée seulement après la création du compte et le déverrouillage, jamais au premier écran | Faible |
 | FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE | Service Bluetooth maillé en arrière-plan | **Moyen/élevé** : la déclaration du type `connectedDevice` demande une explication et une vidéo de démonstration |
 
 Points d'attention :
 1. **REQUEST_INSTALL_PACKAGES** : retirée (Murmure n'est distribuée que sur Google Play ; la CI échoue
    si elle réapparaît dans le manifeste fusionné). Plus de risque de refus sur ce point.
 2. **Foreground service** : prévoir description + vidéo montrant l'activation du mode Bluetooth.
-3. **Notification « calculatrice » (mode discret)** : le code camoufle la notification d'appel manquée en
-   notification de calculatrice (`call_opsec_notifier.dart`). Risque de lecture « comportement trompeur » ;
-   à décrire honnêtement dans la fiche (c'est le cas : écran « Calculatrice » optionnel) et à envisager de
-   désactiver dans la version Play.
+3. **Notifications en mode discret** : texte neutre (« Rappel — Nouvelle activité. »), sans imitation
+   d'une autre appli ; Android affiche de toute façon le nom réel « Murmure » dans l'en-tête
+   (`call_opsec_notifier.dart`). Seul l'écran de verrou interne a une apparence de calculatrice, ce que la
+   fiche décrit honnêtement.
 4. Localisation Android ≤ 11 : le formulaire « Autorisations sensibles » peut demander pourquoi ; réponse :
    exigence technique du scan BLE, aucune donnée de position lue.
 
@@ -159,7 +160,10 @@ Points d'attention :
 - **Chiffrement / export** : mentionner l'usage de chiffrement standard (pas de crypto propriétaire) pour la
   conformité export US ; en France, la fourniture d'un moyen de cryptologie relève de la LCEN (art. 30) et du décret
   2007-663 : vérifier auprès de l'ANSSI si une déclaration est requise ou si une exemption s'applique.
-- **Cible API** : targetSdk 35 conforme ; fournir l'AAB signé (clé de release, `key.properties`).
+- **Cible API** : targetSdk 36 / compileSdk 36 (exigence Google Play 2026) ; bibliothèques natives alignées
+  sur 16 Ko (vérifié par la CI). Fournir l'AAB signé avec la clé d'upload : uniquement l'artefact
+  `murmure-release-play` d'un tag `v*` (ou lancement manuel `play_release=true`) ; l'artefact
+  `murmure-DEBUG-non-publiable` des builds de `main` est signé debug et refusé par la Console.
 - **Test ouvert** : pays, quota, adresse e-mail/URL de retour des testeurs. Compte développeur personnel
   créé après nov. 2023 : 12 testeurs pendant 14 jours en test fermé avant la production (non requis pour le
   test ouvert seul).

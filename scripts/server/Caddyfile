@@ -4,7 +4,9 @@
 	# En-têtes de sécurité : pas de mise en cache des réponses chiffrées, pas d'intégration dans
 	# une iframe tierce.
 	header {
-		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		# Sans `preload` : l'inscription à la liste HSTS des navigateurs est quasi irréversible et
+		# engagerait tout le domaine parent ; à décider sciemment par l'hébergeur, pas par défaut.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		-Server

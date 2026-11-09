@@ -1,6 +1,7 @@
 package fr.lansight.murmure
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
@@ -38,6 +39,9 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Recréation de l'activité : ne jamais laisser tourner un second serveur GATT à côté de
+        // l'ancien (voir aussi cleanUpFlutterEngine).
+        meshGattServer?.shutdown()
         meshGattServer = MeshGattServer(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         // Service de premier plan du maillage Bluetooth (voir MeshForegroundService.kt). Piloté
         // uniquement depuis Dart par lib/mesh/mesh_foreground_service.dart, lui-même appelé par
@@ -66,8 +70,28 @@ class MainActivity : FlutterFragmentActivity() {
                         result.error("MESH_FG", e.message, null)
                     }
                 }
+                // Version d'Android (API level) : permet à Dart de ne demander la localisation
+                // que là où le scan BLE l'exige encore (SDK <= 30, voir mesh_screen.dart).
+                "sdkInt" -> result.success(Build.VERSION.SDK_INT)
                 else -> result.notImplemented()
             }
         }
+    }
+
+    /**
+     * Activité détruite (moteur Flutter détaché) : le code Dart du maillage meurt avec ce moteur,
+     * donc plus rien ne pilote le serveur GATT ni le service de premier plan. Corrigé : ils
+     * restaient actifs (annonce BLE orpheline + notification persistante) et une recréation de
+     * l'activité ouvrait un SECOND serveur GATT. On arrête tout ici.
+     */
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        meshGattServer?.shutdown()
+        meshGattServer = null
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, meshFgChannelName).setMethodCallHandler(null)
+        try {
+            stopService(Intent(this, MeshForegroundService::class.java))
+        } catch (_: Exception) {
+        }
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 }

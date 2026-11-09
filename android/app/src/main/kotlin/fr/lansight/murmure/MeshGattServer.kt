@@ -55,10 +55,13 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         /// exécuter ne doit pas pouvoir faire grossir le tampon de réassemblage indéfiniment (DoS
         /// mémoire) ; marge large pour ne jamais rejeter une écriture légitime.
         private const val MAX_PENDING_WRITE_BYTES = 4096
+
+        /// Délai maximal d'attente de onStartSuccess/onStartFailure après startAdvertising.
+        private const val ADVERTISE_START_TIMEOUT_MS = 5000L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var gattServer: BluetoothGattServer? = null
+    @Volatile private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var characteristic: BluetoothGattCharacteristic? = null
 
@@ -84,6 +87,10 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
     /// de plus.
     private val pendingPreparedWrites = mutableMapOf<String, MutableList<Pair<Int, ByteArray>>>()
 
+    /// Instantané de la valeur lue, par appareil, figé à la lecture d'offset 0 (voir
+    /// [gattCallback].onCharacteristicReadRequest). Synchronisé sur lui-même, comme ci-dessus.
+    private val readSnapshots = mutableMapOf<String, ByteArray>()
+
     private val methodChannel = MethodChannel(messenger, "fr.lansight.murmure/mesh_gatt")
     private val eventChannel = EventChannel(messenger, "fr.lansight.murmure/mesh_gatt_incoming")
 
@@ -91,11 +98,12 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
+                    // Le résultat n'est rendu à Dart qu'une fois l'annonce BLE réellement
+                    // confirmée (onStartSuccess) ou refusée (onStartFailure) : voir [start].
                     try {
-                        start()
-                        result.success(true)
+                        start(result)
                     } catch (e: Exception) {
-                        Log.w(TAG, "Impossible de démarrer le serveur GATT", e)
+                        Log.w(TAG, "Impossible de démarrer le serveur GATT")
                         result.error("GATT_START", e.message, null)
                     }
                 }
@@ -126,34 +134,54 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         })
     }
 
+    /**
+     * Démarre serveur GATT + annonce. Corrigé (démarrage partiel) : [gattServer], [advertiser] et
+     * [characteristic] ne sont assignés qu'APRÈS le succès complet (serveur ouvert, service ajouté,
+     * annonce confirmée par [AdvertiseCallback.onStartSuccess]). Avant, un échec à mi-chemin (pas
+     * d'annonceur, annonce refusée de façon asynchrone) laissait `gattServer != null` : le
+     * `if (gattServer != null) return` suivant faisait croire à un serveur actif, et l'échec
+     * d'annonce n'était que journalisé, jamais remonté à Dart. Toute erreur referme maintenant
+     * ce qui a été ouvert et est rendue via [result].
+     */
     @SuppressLint("MissingPermission")
-    private fun start() {
-        if (gattServer != null) return // déjà démarré
+    private fun start(result: MethodChannel.Result) {
+        if (gattServer != null) { // déjà démarré complètement
+            result.success(true)
+            return
+        }
+        if (pendingStart != null) {
+            result.error("GATT_START", "Démarrage déjà en cours", null)
+            return
+        }
 
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: throw IllegalStateException("Bluetooth indisponible sur cet appareil")
         val adapter: BluetoothAdapter = manager.adapter
             ?: throw IllegalStateException("Adaptateur Bluetooth indisponible")
         if (!adapter.isEnabled) throw IllegalStateException("Bluetooth désactivé")
+        val leAdvertiser = adapter.bluetoothLeAdvertiser
+            ?: throw IllegalStateException("Cet appareil ne peut pas annoncer de service BLE")
 
         val char = BluetoothGattCharacteristic(
             CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
-        characteristic = char
-
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         service.addCharacteristic(char)
 
         val server = manager.openGattServer(context, gattCallback)
             ?: throw IllegalStateException("Impossible d'ouvrir le serveur GATT")
-        server.addService(service)
-        gattServer = server
-
-        val leAdvertiser = adapter.bluetoothLeAdvertiser
-            ?: throw IllegalStateException("Cet appareil ne peut pas annoncer de service BLE")
-        advertiser = leAdvertiser
+        // Le serveur ouvert doit répondre aux callbacks dès maintenant (gattCallback lit
+        // [openingServer] tant que [gattServer] n'est pas encore assigné).
+        openingServer = server
+        try {
+            if (!server.addService(service)) throw IllegalStateException("addService refusé")
+        } catch (e: Exception) {
+            openingServer = null
+            try { server.close() } catch (_: Exception) {}
+            throw e
+        }
 
         // Trouvé en audit interne (demande explicite de l'utilisateur : maximiser la portée du
         // relais Bluetooth) : `ADVERTISE_TX_POWER_MEDIUM` est le niveau par défaut suggéré par la
@@ -199,11 +227,55 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             .setIncludeDeviceName(false)
             .addServiceUuid(android.os.ParcelUuid(SERVICE_UUID))
             .build()
-        leAdvertiser.startAdvertising(settings, data, advertiseCallback)
+
+        val pending = PendingStart(result, server, leAdvertiser, char)
+        pendingStart = pending
+        // Filet : si aucun des deux callbacks d'annonce n'arrive, on échoue au lieu de bloquer Dart.
+        mainHandler.postDelayed({ failPendingStart(pending, "Annonce BLE sans réponse") }, ADVERTISE_START_TIMEOUT_MS)
+        try {
+            leAdvertiser.startAdvertising(settings, data, advertiseCallback)
+        } catch (e: Exception) {
+            failPendingStart(pending, e.message ?: "startAdvertising a échoué")
+        }
+    }
+
+    /** Démarrage en attente de la confirmation asynchrone de l'annonce. */
+    private class PendingStart(
+        val result: MethodChannel.Result,
+        val server: BluetoothGattServer,
+        val advertiser: BluetoothLeAdvertiser,
+        val characteristic: BluetoothGattCharacteristic,
+    )
+
+    private var pendingStart: PendingStart? = null
+    @Volatile private var openingServer: BluetoothGattServer? = null
+
+    /** Serveur à utiliser dans les callbacks (actif, ou en cours d'ouverture). */
+    private fun activeServer(): BluetoothGattServer? = gattServer ?: openingServer
+
+    private fun completePendingStart(pending: PendingStart) {
+        if (pendingStart !== pending) return
+        pendingStart = null
+        gattServer = pending.server
+        advertiser = pending.advertiser
+        characteristic = pending.characteristic
+        openingServer = null
+        pending.result.success(true)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun failPendingStart(pending: PendingStart, message: String) {
+        if (pendingStart !== pending) return
+        pendingStart = null
+        try { pending.advertiser.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
+        try { pending.server.close() } catch (_: Exception) {}
+        if (openingServer === pending.server) openingServer = null
+        pending.result.error("GATT_ADVERTISE", message, null)
     }
 
     @SuppressLint("MissingPermission")
     private fun stop() {
+        pendingStart?.let { failPendingStart(it, "Arrêté avant la fin du démarrage") }
         try {
             advertiser?.stopAdvertising(advertiseCallback)
         } catch (_: Exception) {
@@ -214,13 +286,32 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         }
         advertiser = null
         gattServer = null
+        openingServer = null
         characteristic = null
         synchronized(pendingPreparedWrites) { pendingPreparedWrites.clear() }
+        synchronized(readSnapshots) { readSnapshots.clear() }
+    }
+
+    /**
+     * Arrêt définitif, appelé par MainActivity.cleanUpFlutterEngine (activité détruite) : arrête
+     * serveur et annonce, puis détache les handlers des canaux pour que ce moteur détruit ne
+     * garde aucune référence vers cette instance (pas de second serveur à la recréation).
+     */
+    fun shutdown() {
+        stop()
+        methodChannel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
+        eventSink = null
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            mainHandler.post { pendingStart?.let { completePendingStart(it) } }
+        }
+
         override fun onStartFailure(errorCode: Int) {
             Log.w(TAG, "Échec de l'annonce BLE : code $errorCode")
+            mainHandler.post { pendingStart?.let { failPendingStart(it, "Annonce BLE refusée (code $errorCode)") } }
         }
     }
 
@@ -232,9 +323,24 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             offset: Int,
             characteristic: BluetoothGattCharacteristic,
         ) {
-            val value = currentReadValue
-            val chunk = if (offset <= value.size) value.copyOfRange(offset, value.size) else ByteArray(0)
-            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
+            // Lecture longue (Read Blob) : une valeur > MTU-1 est lue en plusieurs requêtes à offset
+            // croissant. Corrigé : chaque morceau était pris dans [currentReadValue] du moment, que
+            // Dart fait tourner toutes les 15 s — une rotation entre deux morceaux mélangeait deux
+            // enveloppes. On fige maintenant un instantané par appareil à l'offset 0 et on sert les
+            // morceaux suivants depuis cet instantané ; offset hors bornes => GATT_INVALID_OFFSET.
+            val value: ByteArray? = synchronized(readSnapshots) {
+                if (offset == 0) {
+                    currentReadValue.also { readSnapshots[device.address] = it }
+                } else {
+                    readSnapshots[device.address]
+                }
+            }
+            val server = activeServer() ?: return
+            if (value == null || offset < 0 || offset > value.size) {
+                server.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
+                return
+            }
+            server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value.copyOfRange(offset, value.size))
         }
 
         /**
@@ -285,20 +391,20 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
                     // que de le laisser grossir sans borne ; l'enveloppe en cours sera simplement
                     // perdue, comme n'importe quelle écriture déjà rejetée ailleurs dans mesh.dart.
                     if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                        activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                     }
                     return
                 }
                 if (responseNeeded) {
                     // Spec ATT : la réponse à une Prepare Write Request échoie l'offset et la
                     // valeur reçus, pour que le central puisse vérifier l'intégrité avant d'exécuter.
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                    activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
                 return
             }
 
             if (responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+                activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
             // Transmis à Dart sur le thread principal : setMethodCallHandler/EventChannel ne sont
             // pas thread-safe depuis un callback Bluetooth qui arrive sur un thread binder.
@@ -327,7 +433,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
                     eventSink?.success(assembled)
                 }
             }
-            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         }
 
         @SuppressLint("MissingPermission")
@@ -338,6 +444,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             // jamais libéré) — trouvé en audit interne en ajoutant le réassemblage ci-dessus.
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 synchronized(pendingPreparedWrites) { pendingPreparedWrites.remove(device.address) }
+                synchronized(readSnapshots) { readSnapshots.remove(device.address) }
             }
         }
     }

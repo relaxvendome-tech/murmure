@@ -59,9 +59,83 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// inutile (ui → services → ui).
   Widget Function(CallSession session)? buildCallScreen;
 
+  /// Renseigné par [CallManager] juste après la construction de [VoIP] : permet à
+  /// [createPeerConnection] de rejeter les sessions orphelines quand la politique réseau refuse
+  /// l'appel (voir [_rejectOrphanSessions]).
+  VoIP? voip;
+
   CallSession? _active;
   StreamSubscription<CallState>? _activeStateSub;
   DateTime? _activeSince;
+
+  /// Sessions remises à [handleNewCall] (donc déjà « prises en charge » : écran d'appel ou chemin
+  /// verrouillé, qui enregistrent eux-mêmes l'appel manqué). Sert à [handleMissedCall] pour ne
+  /// compter que les appels manqués jamais présentés (refus « occupé » du SDK notamment), sans
+  /// doublon avec l'écran.
+  final Expando<bool> _presented = Expando<bool>('murmure_call_presented');
+
+  /// Appel entrant arrivé pendant que l'appli était verrouillée (voir [handleNewCall]) et
+  /// l'abonnement qui enregistrera l'appel manqué s'il n'est jamais présenté — repris par
+  /// [presentPendingCall] au déverrouillage.
+  CallSession? _pendingLockedCall;
+  StreamSubscription<CallState>? _pendingLockedSub;
+
+  /// Vrai seulement si un appel est réellement « vivant » côté utilisateur : appel sortant,
+  /// appel entrant décroché par nous (ou en cours de décroché), ou appel connecté. Une simple
+  /// sonnerie entrante non décrochée ne compte PAS : elle ne doit pas différer le reverrouillage.
+  bool get hasLiveCall {
+    final s = _active;
+    if (s == null || s.callHasEnded) return false;
+    if (s.isOutgoing || s.answeredByUs) return true;
+    switch (s.state) {
+      case CallState.kCreateAnswer:
+      case CallState.kConnecting:
+      case CallState.kConnected:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// À appeler après un déverrouillage réussi : si un appel entrant a sonné pendant que l'appli
+  /// était verrouillée et sonne ENCORE, pousse maintenant son écran d'appel. L'écran reprend
+  /// alors l'enregistrement d'un éventuel appel manqué (l'abonnement du chemin verrouillé est
+  /// annulé pour éviter un doublon). Sans effet si rien n'est en attente, si l'appli est encore
+  /// verrouillée ou si l'appel ne sonne plus (le chemin verrouillé l'enregistre alors lui-même).
+  void presentPendingCall() {
+    final session = _pendingLockedCall;
+    if (session == null) return;
+    if (!AppLock.isUnlocked) return;
+    if (session.callHasEnded || !session.isRinging) return;
+    final builder = buildCallScreen;
+    final nav = navigatorKey?.currentState;
+    if (builder == null || nav == null) return;
+    _pendingLockedSub?.cancel();
+    _pendingLockedSub = null;
+    _pendingLockedCall = null;
+    nav.push(MaterialPageRoute(builder: (_) => builder(session)));
+  }
+
+  /// Vrai si une fin d'appel entrant doit être comptée comme « appel manqué » : jamais décroché
+  /// par nous, et pas décroché sur un autre de nos appareils.
+  static bool _countsAsMissed(CallSession session) =>
+      !session.isOutgoing &&
+      !session.isGroupCall &&
+      !session.answeredByUs &&
+      session.hangupReason != CallErrorCode.answeredElsewhere;
+
+  static Future<void> _recordMissed(CallSession session) async {
+    try {
+      await CallOpsecStore.insert(MissedCall(
+        roomId: session.room.id,
+        remoteUserId: session.remoteUserId,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+      await CallOpsecNotifier.notifyMissedCall();
+    } catch (_) {
+      // Best-effort : un historique raté ne doit jamais faire planter la gestion d'appel.
+    }
+  }
 
   /// Trouvé en audit interne (revue croisée à 5 IA, point de vigilance soulevé indépendamment
   /// par ChatGPT et Qwen sur le correctif [activeCallNotifier] ci-dessous, demande explicite de
@@ -127,6 +201,11 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// directement l'état de la session dès qu'elle devient "active" ici, et on libère [_active]
   /// dès `CallState.kEnded`, quoi qu'il arrive par ailleurs côté SDK.
   void _watchActive(CallSession session) {
+    // Idempotent : pour un appel sortant, le SDK appelle déjà [handleNewCall] (donc ceci) avant
+    // que [CallManager.startCall] ne le rappelle ; se réabonner ferait rater un `kEnded` survenu
+    // entre-temps (CachedStreamController ne rejoue rien aux nouveaux abonnés).
+    if (_active == session && _activeStateSub != null) return;
+    if (session.callHasEnded) return;
     _active = session;
     _activeSince = DateTime.now();
     activeCallNotifier.value = true;
@@ -171,6 +250,15 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     final net = await NetConfig.load();
     final iceConfig = await CallPolicy.buildIceConfig(client: client, mode: net.mode);
     if (iceConfig == null) {
+      // Appel entrant refusé faute de TURN : le SDK a déjà lancé la sonnerie (playRingtone avant
+      // initWithInvite) et avale l'exception ci-dessous sans terminer la session, qui resterait
+      // orpheline (sonnerie en boucle FLAG_INSISTENT jusqu'au timeout, correspondant jamais
+      // prévenu). On coupe la sonnerie tout de suite, puis — une fois la pile du SDK déroulée —
+      // on rejette les sessions entrantes encore sans connexion WebRTC.
+      try {
+        await stopRingtone();
+      } catch (_) {}
+      Timer.run(_rejectOrphanSessions);
       throw const CallBlockedException(
         'Appel refusé par la politique réseau (voir docs/CALLS_ARCHITECTURE.md) : aucune '
         'connexion WebRTC ne peut être créée dans ce mode tant que son étanchéité n\'a pas été '
@@ -178,6 +266,21 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
       );
     }
     return webrtc.createPeerConnection(iceConfig.toJson(), constraints);
+  }
+
+  /// Rejette (`m.call.reject`/`hangup` côté SDK, ce qui libère aussi tout flux local) chaque
+  /// session ENTRANTE non terminée qui n'a pas de connexion WebRTC — exactement celles que
+  /// [createPeerConnection] vient de refuser. Les sessions sortantes sont volontairement exclues :
+  /// [CallManager.startCall] les termine lui-même après l'échec de `inviteToCall` (les rejeter ici
+  /// pourrait courir contre leur `getUserMedia` encore en cours et laisser le micro ouvert).
+  void _rejectOrphanSessions() {
+    final v = voip;
+    if (v == null) return;
+    for (final session in v.calls.values.toList()) {
+      if (session.isOutgoing || session.isGroupCall) continue;
+      if (session.pc != null || session.callHasEnded) continue;
+      unawaited(session.reject().catchError((_) {}));
+    }
   }
 
   /// Trouvé en audit interne (revue croisée IA, confirmé en relisant la structure réelle des
@@ -196,25 +299,43 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// `calc_mode` par [CallOpsecNotifier.notifyMissedCall] lui-même.
   @override
   Future<void> handleNewCall(CallSession session) async {
+    _presented[session] = true;
     _watchActive(session);
-    if (!AppLock.isUnlocked) {
-      StreamSubscription<CallState>? sub;
-      sub = session.onCallStateChanged.stream.listen((state) async {
-        if (state != CallState.kEnded) return;
-        await sub?.cancel();
-        if (session.isOutgoing) return; // rien à enregistrer : pas un appel manqué entrant
-        await CallOpsecStore.insert(MissedCall(
-          roomId: session.room.id,
-          remoteUserId: session.remoteUserId,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ));
-        await CallOpsecNotifier.notifyMissedCall();
-      });
+    final builder = buildCallScreen;
+    final nav = navigatorKey?.currentState;
+    if (AppLock.isUnlocked && builder != null && nav != null) {
+      nav.push(MaterialPageRoute(builder: (_) => builder(session)));
       return;
     }
-    final builder = buildCallScreen;
-    if (builder == null) return;
-    navigatorKey?.currentState?.push(MaterialPageRoute(builder: (_) => builder(session)));
+    if (session.isOutgoing) return; // rien à enregistrer : pas un appel manqué entrant
+    _trackLockedIncoming(session);
+  }
+
+  /// Chemin « verrouillé » de [handleNewCall] : aucune UI n'est poussée ; on mémorise la session
+  /// pour [presentPendingCall] et on enregistre nous-mêmes l'appel manqué à `kEnded` (l'écran
+  /// d'appel, qui le fait normalement, n'est pas monté). Chaque abonnement se désabonne lui-même
+  /// et ne touche aux champs partagés que s'ils désignent encore SA session.
+  void _trackLockedIncoming(CallSession session) {
+    StreamSubscription<CallState>? sub;
+    var done = false;
+    Future<void> onEnded() async {
+      if (done) return;
+      done = true;
+      await sub?.cancel();
+      if (_pendingLockedCall == session) {
+        _pendingLockedCall = null;
+        _pendingLockedSub = null;
+      }
+      if (_countsAsMissed(session)) await _recordMissed(session);
+    }
+
+    sub = session.onCallStateChanged.stream.listen((state) {
+      if (state == CallState.kEnded) unawaited(onEnded());
+    });
+    _pendingLockedCall = session;
+    _pendingLockedSub = sub;
+    // CachedStreamController ne rejoue rien : traiter un kEnded déjà survenu.
+    if (session.callHasEnded) unawaited(onEnded());
   }
 
   @override
@@ -237,10 +358,15 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
       _activeStateSub?.cancel();
       _activeStateSub = null;
     }
-    // La notification d'appel manqué elle-même (camouflée en mode discret) est déclenchée depuis
-    // CallSessionScreen, qui observe aussi CallState.kEnded sur un appel entrant jamais décroché
-    // (voir lib/calls/ui/call_session_screen.dart et call_opsec_notifier.dart) — ce handler-ci ne
-    // sert qu'à libérer le verrou canHandleNewCall, pas à dupliquer cette notification.
+    // Les appels présentés via [handleNewCall] sont enregistrés par CallSessionScreen (ou par le
+    // chemin verrouillé) : rien à dupliquer ici. En revanche, un appel entrant jamais présenté —
+    // typiquement refusé « occupé » par le SDK parce qu'un autre appel est en cours
+    // (`canHandleNewCall == false`), ou raccroché par l'appelant avant la fin d'initWithInvite —
+    // n'était jusqu'ici enregistré nulle part. NB : on ne peut pas se fier à `hangupReason`
+    // (`reject(reason: userBusy)` du SDK v0.29.0 retombe sur `hangup(userHangup)`).
+    if (_presented[session] != true && _countsAsMissed(session)) {
+      await _recordMissed(session);
+    }
   }
 
   @override
@@ -272,6 +398,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 class CallManager {
   CallManager({required Client client}) : delegate = MurmureWebRTCDelegate(client: client) {
     voip = VoIP(client, delegate);
+    delegate.voip = voip;
   }
 
   final MurmureWebRTCDelegate delegate;
@@ -304,15 +431,60 @@ class CallManager {
   /// la politique a bien refusé l'appel comme prévu. Intercepté ici pour honorer le contrat déjà
   /// documenté par ce commentaire (retourner `null`, jamais un échec silencieux) quelle que soit
   /// l'origine exacte du refus.
+  ///
+  /// Corrigé : la pré-vérification ne portait que sur [CallPolicy.isAllowed] ; sans TURN,
+  /// `inviteToCall` allait quand même jusqu'à `getUserMedia` (micro/caméra ouverts) avant d'échouer
+  /// sur `pc!`, et la session sortante restait non terminée (flux jamais libérés). On construit
+  /// désormais la configuration ICE AVANT tout `inviteToCall` (aucun accès micro/caméra si elle est
+  /// refusée) et, en cas d'exception malgré tout, on termine chaque session sortante de ce salon
+  /// créée par cette tentative. L'appel cible aussi explicitement le correspondant de la
+  /// conversation directe (`userId`) : sans lui, n'importe quel membre du salon pouvait décrocher,
+  /// et un salon non direct n'est pas pris en charge (retour `null`).
   Future<CallSession?> startCall(Room room, {required CallType type}) async {
     final net = await NetConfig.load();
     if (!CallPolicy.isAllowed(net.mode)) return null;
+    final peerId = room.directChatMatrixID;
+    if (peerId == null) return null;
+    final CallIceConfig? iceConfig;
     try {
-      final session = await voip.inviteToCall(room, type);
+      iceConfig = await CallPolicy.buildIceConfig(client: room.client, mode: net.mode);
+    } catch (_) {
+      return null;
+    }
+    if (iceConfig == null) return null;
+
+    final before = voip.calls.values.map((c) => c.callId).toSet();
+    try {
+      final session = await voip.inviteToCall(room, type, userId: peerId);
+      if (session.pc == null) {
+        // Refus tardif (TURN devenu indisponible entre la pré-vérification et la création de la
+        // connexion) sans exception remontée : même nettoyage que ci-dessous.
+        await _abortOutgoing(room, before, extra: session);
+        return null;
+      }
       delegate._watchActive(session);
       return session;
     } catch (_) {
+      await _abortOutgoing(room, before);
       return null;
+    }
+  }
+
+  /// Termine (libère micro/caméra via `CallSession.cleanUp` côté SDK) toute session sortante non
+  /// terminée de [room] apparue depuis [before] — c.-à-d. créée par la tentative qui vient
+  /// d'échouer, jamais un autre appel en cours.
+  Future<void> _abortOutgoing(Room room, Set<String> before, {CallSession? extra}) async {
+    final targets = <CallSession>{
+      if (extra != null) extra,
+      ...voip.calls.values.where(
+        (c) => c.room.id == room.id && c.isOutgoing && !before.contains(c.callId),
+      ),
+    };
+    for (final session in targets) {
+      if (session.callHasEnded) continue;
+      try {
+        await session.hangup(reason: CallErrorCode.userHangup);
+      } catch (_) {}
     }
   }
 }

@@ -5,7 +5,11 @@ import 'package:matrix/matrix.dart';
 /// Messages éphémères par conversation.
 ///
 /// Réglage : événement d'état Matrix personnalisé `fr.murmure.ephemeral` (state_key ''), contenu
-/// `{"ttl_seconds": int}` (0 ou absent = désactivé).
+/// `{"ttl_seconds": int, "enabled_at_ms": int?}` (TTL 0 ou absent = désactivé).
+/// `enabled_at_ms` = date (ms epoch) de la PREMIÈRE activation, conservée tant que le TTL reste
+/// > 0 : changer la durée (1 jour → 1 h) ne doit pas rendre permanents les messages antérieurs au
+/// changement. Absent lors d'une nouvelle activation : on prend alors l'horodatage serveur de
+/// l'événement d'état (pas l'horloge locale, qui peut être fausse).
 ///
 /// CONFIDENTIALITÉ : dans un salon chiffré, les événements d'état ne sont PAS chiffrés (seuls les
 /// événements de timeline le sont). Le serveur voit donc la durée choisie, mais jamais le contenu
@@ -65,11 +69,42 @@ int parseTtlSeconds(Map<String, Object?>? content) {
   return 0;
 }
 
-/// Date à laquelle le réglage actuel a été posé (horodatage serveur de l'événement d'état), ou
-/// null si inconnue (état « stripped » d'une invitation).
+/// Logique pure : date d'activation effective d'un contenu d'état posé à [originServerTs].
+/// `enabled_at_ms` est retenu s'il est un entier > 0 NON POSTÉRIEUR à l'événement (une valeur
+/// future, écrite par un client bogué ou malveillant, rendrait sinon des messages permanents) ;
+/// sinon [originServerTs].
+DateTime resolveEnabledAt(Map<String, Object?>? content, DateTime originServerTs) {
+  final v = content?['enabled_at_ms'];
+  if (v is int && v > 0) {
+    final at = DateTime.fromMillisecondsSinceEpoch(v, isUtc: true);
+    if (!at.isAfter(originServerTs)) return at;
+  }
+  return originServerTs;
+}
+
+/// Logique pure : contenu d'état à publier pour passer à [ttlSeconds], connaissant l'état
+/// précédent ([prevContent], et sa date d'activation résolue [prevEnabledAt]).
+/// - TTL 0 : désactivation, aucune date conservée (une réactivation repartira de zéro).
+/// - TTL > 0 et TTL précédent > 0 avec date connue : la date de première activation est conservée.
+/// - Sinon (nouvelle activation) : pas de `enabled_at_ms`, l'horodatage serveur fera foi.
+Map<String, Object?> buildEphemeralContent({
+  required int ttlSeconds,
+  Map<String, Object?>? prevContent,
+  DateTime? prevEnabledAt,
+}) {
+  final ttl = ttlSeconds.clamp(0, kMaxTtlSeconds);
+  if (ttl <= 0) return {'ttl_seconds': 0};
+  if (parseTtlSeconds(prevContent) > 0 && prevEnabledAt != null) {
+    return {'ttl_seconds': ttl, 'enabled_at_ms': prevEnabledAt.millisecondsSinceEpoch};
+  }
+  return {'ttl_seconds': ttl};
+}
+
+/// Date de première activation du réglage actuel (voir [resolveEnabledAt]), ou null si inconnue
+/// (état « stripped » d'une invitation).
 DateTime? ephemeralEnabledAt(Room room) {
   final st = room.getState(kEphemeralEventType);
-  return st is Event ? st.originServerTs : null;
+  return st is Event ? resolveEnabledAt(st.content, st.originServerTs) : null;
 }
 
 /// TTL (secondes) configuré pour cette conversation ; 0 = désactivé.
@@ -84,7 +119,11 @@ Future<void> setEphemeralTtl(Room room, int ttlSeconds) async {
     room.id,
     kEphemeralEventType,
     '',
-    {'ttl_seconds': ttlSeconds.clamp(0, kMaxTtlSeconds)},
+    buildEphemeralContent(
+      ttlSeconds: ttlSeconds,
+      prevContent: room.getState(kEphemeralEventType)?.content,
+      prevEnabledAt: ephemeralEnabledAt(room),
+    ),
   );
 }
 
@@ -95,6 +134,10 @@ bool isExpired(Event event, Room room, {DateTime? now}) => isExpiredAt(
       now: now ?? DateTime.now(),
       enabledAt: ephemeralEnabledAt(room),
     );
+
+/// Pagination du balayage : au plus 50 pages de 100 événements par conversation et par balayage.
+const int kSweepMaxPages = 50;
+const int kSweepPageSize = 100;
 
 /// Service qui rédige périodiquement les messages expirés ENVOYÉS PAR L'UTILISATEUR.
 class EphemeralService {
@@ -147,13 +190,16 @@ class EphemeralService {
     try {
       timeline = await room.getTimeline();
       // La timeline chargée ne contient que les derniers événements : remonter l'historique
-      // (5 pages max par balayage) tant qu'il peut rester des messages postérieurs à
-      // l'activation, sinon un vieux message expiré ne serait jamais rédigé (revue Grok).
+      // (jusqu'à [kSweepMaxPages] pages de [kSweepPageSize]) tant qu'il peut rester des messages
+      // postérieurs à l'activation, sinon un vieux message expiré ne serait jamais rédigé.
+      // Arrêt dès que l'événement le plus ancien chargé est antérieur à l'activation.
       final enabledAt = ephemeralEnabledAt(room);
-      for (var page = 0; page < 5 && timeline.canRequestHistory; page++) {
+      for (var page = 0; page < kSweepMaxPages && timeline.canRequestHistory; page++) {
         final oldest = timeline.events.isEmpty ? null : timeline.events.last.originServerTs;
         if (oldest != null && enabledAt != null && oldest.isBefore(enabledAt)) break;
-        await timeline.requestHistory();
+        final before = timeline.events.length;
+        await timeline.requestHistory(historyCount: kSweepPageSize);
+        if (timeline.events.length == before) break; // plus rien à charger
       }
       final now = DateTime.now();
       final expired = timeline.events.where((e) =>

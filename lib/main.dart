@@ -8,6 +8,7 @@ import 'account.dart';
 import 'calls/services/call_manager.dart';
 import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
+import 'ephemeral.dart';
 import 'media.dart';
 import 'message_notifier.dart';
 import 'mesh/mesh_opsec_notifier.dart';
@@ -52,7 +53,10 @@ Future<void> main() async {
   // WebRTC (migrations VoIP des versions 2.0.0 à 6.1.0) qu'il serait irresponsable de faire à
   // l'aveugle, sans compilateur Flutter local pour les valider un par un.
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
-  await CallOpsecNotifier.init(); // best-effort, voir le commentaire de cette méthode
+  // CallOpsecNotifier.init() n'est PLUS appelé ici : il demande POST_NOTIFICATIONS, et une
+  // fenêtre système de permission avant même l'onboarding (ou par-dessus l'écran de verrou) est à
+  // la fois mauvaise pour l'UX et révélatrice en mode discret. Appelé après l'onboarding et le
+  // premier déverrouillage, voir [_PostUnlockInit].
   await MessageNotifier.init(); // notifications de nouveaux messages (sans contenu), best-effort
   // Trouvé en audit interne (revue multi-IA croisée) : sans cet appel, un message reçu en mode
   // maillé Bluetooth (voir mesh/mesh.dart) n'était signalé que si `MeshScreen` était déjà ouvert
@@ -76,7 +80,7 @@ class _MurmureAppState extends State<MurmureApp> {
   CallManager? _callManager;
   VerificationManager? _verificationManager;
   bool _booting = true;
-  String? _bootError;
+  bool _bootError = false;
 
   @override
   void initState() {
@@ -172,6 +176,19 @@ class _MurmureAppState extends State<MurmureApp> {
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
 
+      // CRITIQUE (vérifié dans matrix-dart-sdk 0.29.x, `Client.init`) : si libolm ne se charge pas,
+      // le SDK journalise l'erreur, met `encryption = null` et CONTINUE — `encryptionEnabled`
+      // devient faux et les messages partiraient en clair, sans aucune erreur visible. Fail closed :
+      // une session connectée sans chiffrement fonctionnel ne démarre jamais.
+      if (client.isLogged() && !client.encryptionEnabled) {
+        try {
+          await client.dispose(closeDatabase: true);
+        } catch (_) {
+          // Best-effort : l'essentiel est de ne jamais exposer ce client à l'interface.
+        }
+        throw const _EncryptionUnavailable();
+      }
+
       // Appels (voir lib/calls/) : construit une seule fois, aux côtés du client Matrix. Le
       // delegate navigue vers CallSessionScreen via murmureNavigatorKey (pas de BuildContext
       // disponible ici) dès qu'un appel — sortant ou entrant — est prêt côté WebRTC.
@@ -185,6 +202,9 @@ class _MurmureAppState extends State<MurmureApp> {
       final verificationManager = VerificationManager(client: client)..navigatorKey = murmureNavigatorKey;
       verificationManager.start();
       MessageNotifier.attach(client); // écoute client.onEvent, voir message_notifier.dart
+      // Messages éphémères : balayage périodique de toutes les conversations, pas seulement de
+      // celle ouverte à l'écran (voir lib/ephemeral.dart).
+      EphemeralService.instance.start(client);
 
       if (!mounted) return;
       setState(() {
@@ -193,10 +213,13 @@ class _MurmureAppState extends State<MurmureApp> {
         _verificationManager = verificationManager;
         _booting = false;
       });
-    } catch (e) {
+    } catch (_) {
+      // Jamais le texte de l'exception à l'écran : cet écran s'affiche AVANT le verrou (il n'y a
+      // pas encore de client pour construire LockGate), donc lisible par quiconque tient le
+      // téléphone — un chemin de fichier, une adresse de serveur ou un identifiant y fuiraient.
       if (!mounted) return;
       setState(() {
-        _bootError = '$e';
+        _bootError = true;
         _booting = false;
       });
     }
@@ -223,11 +246,11 @@ class _MurmureAppState extends State<MurmureApp> {
       themeMode: ThemeMode.system,
       home: _booting
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-          : _bootError != null
-              ? _BootErrorScreen(error: _bootError!, onRetry: () {
+          : _bootError
+              ? _BootErrorScreen(onRetry: () {
                   setState(() {
                     _booting = true;
-                    _bootError = null;
+                    _bootError = false;
                   });
                   _boot();
                 })
@@ -269,16 +292,59 @@ class _Home extends StatelessWidget {
         if (!loggedIn) {
           return OnboardingScreen(client: client);
         }
-        return RoomsScreen(client: client, callManager: callManager);
+        // Même garde-fou que dans `_boot` (libolm absent => SDK silencieusement sans chiffrement),
+        // couvrant aussi la session ouverte juste après l'inscription, qui ne repasse pas par
+        // `_boot`. Rien n'est envoyable tant que ce test échoue.
+        if (!client.encryptionEnabled) {
+          return const _BootErrorScreen();
+        }
+        return _PostUnlockInit(child: RoomsScreen(client: client, callManager: callManager));
       },
     );
   }
 }
 
+/// Session connectée mais chiffrement de bout en bout indisponible (libolm non chargé) : on
+/// refuse de démarrer plutôt que d'envoyer en clair. Message volontairement neutre à l'écran.
+class _EncryptionUnavailable implements Exception {
+  const _EncryptionUnavailable();
+}
+
+/// Tâches à ne lancer qu'une fois l'onboarding terminé ET l'appli déverrouillée (ce widget n'est
+/// construit que sous LockGate, une fois connecté) : demande de permission de notifications
+/// (POST_NOTIFICATIONS, via [CallOpsecNotifier.init]). Une seule fois par processus.
+class _PostUnlockInit extends StatefulWidget {
+  const _PostUnlockInit({required this.child});
+  final Widget child;
+
+  @override
+  State<_PostUnlockInit> createState() => _PostUnlockInitState();
+}
+
+class _PostUnlockInitState extends State<_PostUnlockInit> {
+  static bool _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_done) return;
+    _done = true;
+    // Après le premier rendu : la fenêtre système ne doit pas interrompre la construction.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      CallOpsecNotifier.init(); // best-effort, ne lève jamais (voir cette méthode)
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 class _BootErrorScreen extends StatelessWidget {
-  const _BootErrorScreen({required this.error, required this.onRetry});
-  final String error;
-  final VoidCallback onRetry;
+  const _BootErrorScreen({this.onRetry});
+
+  /// Nul quand réessayer ne peut rien changer dans cette session (chiffrement indisponible après
+  /// inscription) : l'appli doit être relancée.
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -291,11 +357,15 @@ class _BootErrorScreen extends StatelessWidget {
             children: [
               const Icon(Icons.error_outline, size: 48),
               const SizedBox(height: 12),
-              const Text('Démarrage impossible', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(error, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-              FilledButton(onPressed: onRetry, child: const Text('Réessayer')),
+              const Text('Démarrage impossible. Réessayez.',
+                  textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold)),
+              if (onRetry != null) ...[
+                const SizedBox(height: 16),
+                FilledButton(onPressed: onRetry, child: const Text('Réessayer')),
+              ] else ...[
+                const SizedBox(height: 8),
+                const Text('Fermez puis relancez l\'appli.', textAlign: TextAlign.center),
+              ],
             ],
           ),
         ),

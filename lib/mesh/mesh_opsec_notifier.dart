@@ -31,7 +31,10 @@ class MeshOpsecNotifier {
 
   static const _calcChannelId = 'sys_calc_cache_v1';
   static const _honestChannelId = 'murmure_mesh';
-  static const _notificationId = 4144; // distinct de CallOpsecNotifier (4143)
+  // 4143/4144 : appels (CallOpsecNotifier), 4145 : messages (MessageNotifier), 4150 : service de
+  // premier plan du maillage (MeshForegroundService.kt). Avant : 4144, en collision avec l'appel
+  // entrant (une notification écrasait/annulait l'autre).
+  static const _notificationId = 4146;
 
   static final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   static bool _initialized = false;

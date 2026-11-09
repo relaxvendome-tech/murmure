@@ -56,12 +56,15 @@ contrôle client en clair — jamais le relais UDP lui-même (voir le commentair
 
 ## Avant de déployer
 
-1. Remplacez tous les `CHANGEME` dans `turnserver.conf` (domaine, certificat, secret) — le secret
-   doit être **identique** à `turn_secret` dans `../conduit.toml`.
-2. Vérifiez que le certificat référencé (`cert=`/`pkey=`) existe réellement à ce chemin sur la
-   machine (généré par Caddy ou par votre propre Let's Encrypt, selon votre installation — ce
-   dépôt suppose Let's Encrypt classique via `/etc/letsencrypt`, à adapter si Caddy gère déjà vos
-   certificats autrement).
+1. `deploy.sh` configure ce service automatiquement (domaine, secret identique à `turn_secret`
+   dans `../conduit.toml`, chemin du certificat obtenu par Caddy) et le démarre — ou, si le
+   certificat n'est pas encore disponible, désactive `turn_uris` dans `conduit.toml` (appels
+   indisponibles, jamais de relais mal configuré) jusqu'à la relance du script. En configuration
+   manuelle : remplacez tous les `CHANGEME` dans `turnserver.conf`, avec un secret **identique** à
+   `turn_secret` dans `../conduit.toml`.
+2. Le certificat est celui de Caddy (volume `caddy-data`, monté en lecture seule dans le
+   conteneur coturn). coturn ne recharge pas un certificat renouvelé : `deploy.sh` installe
+   `/etc/cron.weekly/murmure-coturn` qui redémarre le service chaque semaine.
 3. Vérifiez le tag de l'image coturn avant de déployer (voir le commentaire dans
    `docker-compose.yml` — je n'ai pas tiré l'image moi-même dans ce bac à sable, seulement vérifié
    la liste des tags publiés).

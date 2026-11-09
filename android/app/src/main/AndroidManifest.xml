@@ -32,12 +32,13 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <!-- Appels audio/vidéo (voir lib/calls/ et docs/CALLS_ARCHITECTURE.md). Pas de permission
-         distincte pour les données WebRTC elles-mêmes : contrairement à ce qu'une note reçue
-         pendant le développement suggérait, `android:allowBackup="false"` (déjà réglé ci-dessous,
-         au niveau <application>) couvre déjà TOUTES les données de l'appli, y compris tout cache
-         créé par le plugin d'appel — il n'existe pas de drapeau "allowBackup" séparé par
-         fonctionnalité ou par bibliothèque en Android. -->
+    <!-- Appels audio/vidéo (voir lib/calls/ et docs/CALLS_ARCHITECTURE.md). Pas de réglage de
+         sauvegarde distinct par bibliothèque : les données du plugin d'appel sont couvertes par les
+         règles de l'<application> ci-dessous. ATTENTION : `android:allowBackup="false"` seul ne
+         suffit PAS à partir d'Android 12 (API 31) — il n'empêche plus le transfert d'appareil à
+         appareil (D2D). C'est `android:dataExtractionRules` (res/xml/data_extraction_rules.xml,
+         qui exclut tout pour cloud-backup ET device-transfer) qui le couvre sur Android 12+ ;
+         allowBackup/fullBackupContent restent pour Android 11 et moins. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
@@ -63,6 +64,8 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:targetApi="s"
         android:networkSecurityConfig="@xml/network_security_config">
 
         <!-- Activité principale et point d'entrée direct : icône et nom de lancement toujours

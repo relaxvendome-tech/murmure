@@ -388,4 +388,131 @@ void main() {
       expect(rootsFromAlice.$1, isNot(equals(rootsFromAlice.$2)));
     });
   });
+
+  group('meshPlanRecvAdvance (cliquet de réception sans effet de bord)', () {
+    test('rang attendu : clé = un cran de cliquet, aucune clé sautée', () async {
+      final ck = randomBytes(32);
+      final plan = await meshPlanRecvAdvance(
+          chainKey: ck, nextCounter: 3, targetCounter: 3, maxSkipAhead: 200);
+      final step = await meshRatchetStep(ck);
+      expect(plan, isNotNull);
+      expect(plan!.messageKey, equals(step.messageKey));
+      expect(plan.newChainKey, equals(step.nextChainKey));
+      expect(plan.newNextCounter, 4);
+      expect(plan.skippedKeys, isEmpty);
+    });
+
+    test('saut : les rangs intermédiaires sont mis de côté avec leurs clés exactes', () async {
+      final ck = randomBytes(32);
+      final plan = await meshPlanRecvAdvance(
+          chainKey: ck, nextCounter: 0, targetCounter: 2, maxSkipAhead: 200);
+      final s0 = await meshRatchetStep(ck);
+      final s1 = await meshRatchetStep(s0.nextChainKey);
+      final s2 = await meshRatchetStep(s1.nextChainKey);
+      expect(plan!.skippedKeys.map((e) => e.$1).toList(), [0, 1]);
+      expect(plan.skippedKeys[0].$2, equals(s0.messageKey));
+      expect(plan.skippedKeys[1].$2, equals(s1.messageKey));
+      expect(plan.messageKey, equals(s2.messageKey));
+      expect(plan.newChainKey, equals(s2.nextChainKey));
+      expect(plan.newNextCounter, 3);
+    });
+
+    test('rang déjà franchi ou saut excessif : null', () async {
+      final ck = randomBytes(32);
+      expect(
+          await meshPlanRecvAdvance(chainKey: ck, nextCounter: 5, targetCounter: 4, maxSkipAhead: 200),
+          isNull);
+      expect(
+          await meshPlanRecvAdvance(chainKey: ck, nextCounter: 0, targetCounter: 201, maxSkipAhead: 200),
+          isNull);
+    });
+
+    test('un message forgé au compteur élevé ne détruit pas le canal : plan rejeté par le GCM, '
+        'état intact, le vrai message suivant se déchiffre', () async {
+      // État de réception simulé (ce que mesh.dart garde en base) : clé de chaîne + prochain rang.
+      final root = randomBytes(32);
+      var recvChain = Uint8List.fromList(root);
+      var recvNext = 0;
+      final sender = randomBytes(32);
+      final hint = randomBytes(32);
+
+      // Faux message (clé inconnue de l'attaquant) au rang 150.
+      final forged = await meshEncryptWithKey(
+        messageKey: randomBytes(32),
+        chainCounter: 150,
+        senderPublicKey: sender,
+        recipientHint: hint,
+        plaintext: 'faux',
+      );
+      final forgedPlan = await meshPlanRecvAdvance(
+          chainKey: recvChain, nextCounter: recvNext, targetCounter: 150, maxSkipAhead: 200);
+      expect(forgedPlan, isNotNull);
+      final forgedClear =
+          await meshDecryptWithKey(messageKey: forgedPlan!.messageKey, envelope: forged);
+      expect(forgedClear, isNull);
+      // Échec => rien n'est appliqué : l'état reste celui d'avant.
+      expect(recvChain, equals(root));
+      expect(recvNext, 0);
+
+      // Le vrai expéditeur envoie son rang 0 avec la même chaîne.
+      final real = await meshRatchetStep(root);
+      final env = await meshEncryptWithKey(
+        messageKey: real.messageKey,
+        chainCounter: 0,
+        senderPublicKey: sender,
+        recipientHint: hint,
+        plaintext: 'vrai',
+      );
+      final plan = await meshPlanRecvAdvance(
+          chainKey: recvChain, nextCounter: recvNext, targetCounter: 0, maxSkipAhead: 200);
+      final clear = await meshDecryptWithKey(messageKey: plan!.messageKey, envelope: env);
+      expect(clear, 'vrai');
+      // Succès => application du plan.
+      recvChain = plan.newChainKey;
+      recvNext = plan.newNextCounter;
+      expect(recvNext, 1);
+    });
+  });
+
+  group('meshValidateIncoming (anti-inondation)', () {
+    MeshEnvelope env({required DateTime createdAt, int ttl = MeshEnvelope.maxTtl}) => MeshEnvelope(
+          id: randomBytes(16),
+          senderPublicKey: randomBytes(32),
+          recipientHint: randomBytes(32),
+          chainCounter: 0,
+          nonce: randomBytes(12),
+          ciphertext: randomBytes(4),
+          mac: randomBytes(16),
+          ttl: ttl,
+          createdAt: createdAt,
+        );
+    final now = DateTime.utc(2026, 1, 1, 12);
+
+    test('enveloppe normale acceptée (y compris légère avance d\'horloge)', () {
+      expect(meshValidateIncoming(env(createdAt: now), now: now), isNull);
+      expect(
+          meshValidateIncoming(env(createdAt: now.add(const Duration(minutes: 9))), now: now),
+          isNull);
+    });
+
+    test('horodatage au-delà de now + 10 min rejeté', () {
+      expect(meshValidateIncoming(env(createdAt: now.add(const Duration(minutes: 11))), now: now),
+          MeshEnvelopeRejection.futureTimestamp);
+    });
+
+    test('ttl > maxTtl rejeté', () {
+      expect(meshValidateIncoming(env(createdAt: now, ttl: MeshEnvelope.maxTtl + 1), now: now),
+          MeshEnvelopeRejection.ttlTooHigh);
+    });
+
+    test('expirée (âge ou ttl épuisé) rejetée', () {
+      expect(
+          meshValidateIncoming(
+              env(createdAt: now.subtract(const Duration(hours: MeshEnvelope.maxAgeHours + 1))),
+              now: now),
+          MeshEnvelopeRejection.expired);
+      expect(meshValidateIncoming(env(createdAt: now, ttl: 0), now: now),
+          MeshEnvelopeRejection.expired);
+    });
+  });
 }

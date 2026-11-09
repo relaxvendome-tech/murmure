@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:matrix/matrix.dart';
 
 import '../account.dart';
+import '../config.dart';
 import '../network.dart';
 import 'qr_screens.dart';
 import 'security_info_screen.dart';
@@ -20,6 +21,12 @@ class OnboardingScreen extends StatefulWidget {
 class _OnboardingScreenState extends State<OnboardingScreen> {
   NetConfig? _config;
   bool _loading = true;
+
+  /// Vrai quand l'utilisateur, depuis l'écran de création de compte, a demandé à revenir à la
+  /// configuration du serveur (jeton d'inscription faux ou absent, mauvaise adresse…). Sans ce
+  /// retour, une configuration enregistrée mais inutilisable était une impasse : seule la
+  /// réinstallation de l'appli permettait d'en sortir.
+  bool _editingServer = false;
 
   @override
   void initState() {
@@ -39,28 +46,50 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   /// qui suit immédiatement passe réellement par Tor ou le proxy choisi, sans attendre un
   /// redémarrage de l'appli.
   Future<void> _applyConfig(NetConfig c) async {
-    widget.client.httpClient = await c.httpClient();
+    // Même enveloppe que celle posée par le constructeur de `Client` (matrix-dart-sdk :
+    // `FixedTimeoutHttpClient(httpClient ?? http.Client(), Duration(seconds: 35))`) : sans elle,
+    // une connexion Tor/proxy bloquée ne serait jamais interrompue. L'ancien client interne est
+    // fermé pour ne pas laisser de sockets (éventuellement directs) ouverts.
+    final previous = widget.client.httpClient;
+    widget.client.httpClient = FixedTimeoutHttpClient(await c.httpClient(), kHttpTimeout);
+    _closeHttpClient(previous);
     if (!mounted) return;
-    setState(() => _config = c);
+    setState(() {
+      _config = c;
+      _editingServer = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    if (_config == null || !_config!.isConfigured) {
+    final configured = _config != null && _config!.isConfigured;
+    if (!configured || _editingServer) {
       return _ServerSetupScreen(
+        // `ValueKey` : un nouvel état (donc des contrôleurs relus depuis `initial`) à chaque
+        // retour sur cet écran, jamais l'état périmé d'un affichage précédent.
+        key: ValueKey(_config),
         initial: _config,
         onConfigured: _applyConfig,
+        onCancel: configured ? () => setState(() => _editingServer = false) : null,
       );
     }
-    return _CreateAccountScreen(client: widget.client, config: _config!);
+    return _CreateAccountScreen(
+      client: widget.client,
+      config: _config!,
+      onChangeServer: () => setState(() => _editingServer = true),
+    );
   }
 }
 
 class _ServerSetupScreen extends StatefulWidget {
-  const _ServerSetupScreen({required this.initial, required this.onConfigured});
+  const _ServerSetupScreen({super.key, required this.initial, required this.onConfigured, this.onCancel});
   final NetConfig? initial;
   final Future<void> Function(NetConfig) onConfigured;
+
+  /// Non nul quand une configuration valide existe déjà (retour depuis la création de compte) :
+  /// permet de revenir sans rien changer.
+  final VoidCallback? onCancel;
 
   @override
   State<_ServerSetupScreen> createState() => _ServerSetupScreenState();
@@ -74,6 +103,21 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
   NetMode _mode = NetMode.direct;
   bool _testing = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    // Pré-remplit le formulaire avec la configuration déjà enregistrée (retour via « Changer de
+    // serveur ») : l'utilisateur corrige seulement le champ fautif, typiquement le jeton.
+    final c = widget.initial;
+    if (c != null && c.isConfigured) {
+      _urlCtrl.text = c.homeserver.toString();
+      _tokenCtrl.text = c.registrationToken;
+      _mode = c.mode;
+      _proxyHostCtrl.text = c.proxyHost ?? '';
+      if (c.proxyPort != null) _proxyPortCtrl.text = c.proxyPort.toString();
+    }
+  }
 
   /// Trouvé en audit interne (revue multi-IA croisée — ChatGPT, Qwen et Perplexity ont chacune
   /// signalé, indépendamment, que taper à la main une URL de serveur et un jeton d'inscription
@@ -261,6 +305,13 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
                   ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Continuer'),
             ),
+            if (widget.onCancel != null) ...[
+              const SizedBox(height: 4),
+              TextButton(
+                onPressed: _testing ? null : widget.onCancel,
+                child: const Text('Annuler'),
+              ),
+            ],
             const SizedBox(height: 8),
             Text(
               'Pas de réseau pour l\'instant ? Le mode Bluetooth hors-ligne reste disponible depuis '
@@ -284,9 +335,12 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
 }
 
 class _CreateAccountScreen extends StatefulWidget {
-  const _CreateAccountScreen({required this.client, required this.config});
+  const _CreateAccountScreen({required this.client, required this.config, required this.onChangeServer});
   final Client client;
   final NetConfig config;
+
+  /// Revient à l'écran serveur pré-rempli (jeton faux/absent, mauvaise adresse).
+  final VoidCallback onChangeServer;
 
   @override
   State<_CreateAccountScreen> createState() => _CreateAccountScreenState();
@@ -333,7 +387,7 @@ class _CreateAccountScreenState extends State<_CreateAccountScreen> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _error = describeMatrixError('$e');
+        _error = _describeRegistrationError(e, widget.config);
       });
     }
   }
@@ -369,9 +423,55 @@ class _CreateAccountScreenState extends State<_CreateAccountScreen> {
                   ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Créer mon compte'),
             ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: _busy ? null : widget.onChangeServer,
+              icon: const Icon(Icons.dns_outlined),
+              label: const Text('Changer de serveur'),
+            ),
           ],
         ),
       ),
     );
+  }
+}
+
+/// Message d'échec d'inscription compréhensible, sans jamais afficher de pile ou d'objet brut.
+String _describeRegistrationError(Object e, NetConfig config) {
+  if (e is MatrixException) {
+    switch (e.error) {
+      case MatrixError.M_FORBIDDEN:
+      case MatrixError.M_UNAUTHORIZED:
+        return config.registrationToken.isEmpty
+            ? 'Ce serveur exige un jeton d\'inscription. Touchez « Changer de serveur » pour le '
+                'saisir (ou scanner le code du serveur).'
+            : 'Jeton d\'inscription refusé (invalide, expiré ou déjà épuisé). Touchez « Changer de '
+                'serveur » pour le corriger.';
+      case MatrixError.M_USER_IN_USE:
+        return 'Cet identifiant est déjà pris sur ce serveur. Réessayez : un nouvel identifiant '
+            'sera tiré au hasard.';
+      case MatrixError.M_INVALID_USERNAME:
+        return 'Identifiant refusé par le serveur. Réessayez.';
+      case MatrixError.M_LIMIT_EXCEEDED:
+        return 'Trop de tentatives. Patientez quelques minutes avant de réessayer.';
+      default:
+        return describeMatrixError(e.errorMessage);
+    }
+  }
+  return 'Inscription impossible : serveur injoignable ou réponse inattendue. Vérifiez la '
+      'connexion, ou touchez « Changer de serveur ».';
+}
+
+/// Ferme le client HTTP interne remplacé (la classe d'enveloppe du SDK, [TimeoutHttpClient],
+/// n'implémente pas `close()` elle-même : c'est son `inner` qui détient les sockets).
+void _closeHttpClient(http.Client old) {
+  try {
+    if (old is TimeoutHttpClient) {
+      old.inner.close();
+    } else {
+      old.close();
+    }
+  } catch (_) {
+    // Best-effort : un client déjà fermé ne doit pas bloquer le changement de configuration.
   }
 }

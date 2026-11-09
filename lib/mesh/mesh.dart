@@ -86,6 +86,11 @@ class Mesh {
   /// Vrai si le relais Bluetooth tourne (lecture seule, pour l'affichage d'état).
   bool get isRunning => _running;
 
+  /// Vrai si le rôle périphérique natif (serveur GATT + annonce BLE) a confirmé son démarrage.
+  /// Faux si l'annonce a été refusée par Android : le maillage tourne alors en rôle central seul.
+  bool get peripheralActive => _peripheralActive;
+  bool _peripheralActive = false;
+
   /// Appareils avec lesquels un échange GATT (connexion → écriture → lecture → déconnexion, voir
   /// [_tryExchange]) est déjà en cours, et horodatage du dernier échange terminé avec chacun.
   ///
@@ -150,14 +155,15 @@ class Mesh {
     _db = await sqlcipher.openDatabase(
       dbPath,
       password: await Account.dbKey(),
-      version: 4,
+      version: 5,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE outbox (
             id BLOB PRIMARY KEY,
             recipient BLOB NOT NULL,
             payload BLOB NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            own INTEGER NOT NULL DEFAULT 0
           )
         ''');
         await db.execute('''
@@ -221,6 +227,22 @@ class Mesh {
         // seulement une maladresse d'ergonomie. Ajoute la table qui manquait ; voir
         // ui/mesh_screen.dart pour l'écran de contacts/envoi qui l'utilise désormais.
         if (oldV < 4) await _createContactsTable(db);
+        // v4 -> v5 : colonne `own` (1 = message que NOUS avons écrit, 0 = enveloppe d'un tiers que
+        // l'on relaie). Sert à plafonner la file de relais ([_maxRelayedEnvelopes]) sans jamais
+        // évincer nos propres messages. Les lignes existantes sont marquées `own = 1` si
+        // l'expéditeur inscrit dans l'enveloppe (octets 17..48 du payload sérialisé, voir
+        // MeshEnvelope.serialize) est notre propre clé publique.
+        if (oldV < 5) {
+          await db.execute('ALTER TABLE outbox ADD COLUMN own INTEGER NOT NULL DEFAULT 0');
+          try {
+            final me = await identity();
+            await db.rawUpdate(
+                'UPDATE outbox SET own = 1 WHERE substr(payload, 17, 32) = ?', [me.publicKeyBytes]);
+          } catch (_) {
+            // Sans identité lisible, les anciennes lignes restent `own = 0` : au pire, elles
+            // deviennent évinçables par le plafond de relais, jamais une panne de migration.
+          }
+        }
       },
     );
     return _db!;
@@ -324,12 +346,18 @@ class Mesh {
       await _database();
       await identity();
       final calcMode = await Account.read('calc_mode') == '1';
-      unawaited(MeshForegroundService.start(calcMode: calcMode));
+      // Corrigé : plus de `timeout` (était 1 jour) — à l'échéance, flutter_blue_plus arrêtait le
+      // scan EN SILENCE alors que `_running` restait vrai (interrupteur « activé », plus aucun
+      // relais). Sans timeout, le scan tourne jusqu'à [stop] (ou coupure de l'adaptateur, gérée
+      // plus bas). Vérifié dans flutter_blue_plus 1.36.x : `Duration? timeout`, null = illimité.
       await FlutterBluePlus.startScan(
         withServices: [serviceUuid],
         continuousUpdates: true,
-        timeout: const Duration(days: 1),
       );
+      // Corrigé : le service de premier plan (notification persistante) n'est lancé qu'APRÈS le
+      // succès de startScan — avant, il démarrait d'abord, et un échec du scan laissait
+      // brièvement une notification pour un mode qui n'a jamais tourné.
+      unawaited(MeshForegroundService.start(calcMode: calcMode));
       _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
       // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : ce timer ne fait QUE
       // purger (_purgeExpired ne touche que des lignes expirées depuis au moins maxAgeHours = 72 h),
@@ -342,7 +370,7 @@ class Mesh {
       // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
       // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
       // est indisponible — le mode reste alors limité au rôle central, comme avant cette extension.
-      await MeshGattServerBridge.start();
+      _peripheralActive = await MeshGattServerBridge.start();
       _gattSub = MeshGattServerBridge.incoming().listen(_onGattWrite);
       _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
       unawaited(_rotateReadValue());
@@ -390,6 +418,7 @@ class Mesh {
   /// `true`, qui préserve le comportement existant.
   Future<void> stop({bool emitStoppedEvent = true}) async {
     _running = false;
+    _peripheralActive = false;
     await _scanSub?.cancel();
     _scanSub = null;
     _relayTimer?.cancel();
@@ -490,7 +519,10 @@ class Mesh {
         final bytes = env.serialize();
         if (bytes.length > 512) continue; // au-delà du MTU négocié ci-dessus, on laisse de côté
         try {
-          await char.write(bytes, withoutResponse: false);
+          // allowLongWrite (vérifié dans flutter_blue_plus 1.36.x, `write(..., allowLongWrite:)`) :
+          // si la négociation MTU a échoué, l'enveloppe part en « Write Long » (Prepare/Execute
+          // Write), que MeshGattServer.kt réassemble, au lieu d'échouer sur une écriture simple.
+          await char.write(bytes, withoutResponse: false, allowLongWrite: true);
         } catch (_) {
           continue;
         }
@@ -516,44 +548,101 @@ class Mesh {
 
   Future<void> _handleIncoming(MeshEnvelope env) => _serialized(() => _handleIncomingLocked(env));
 
+  /// Nombre maximal d'enveloppes de TIERS conservées pour relais (`outbox.own = 0`). Corrigé
+  /// (inondation) : la file de relais n'avait aucune borne — n'importe quel appareil à portée
+  /// pouvait la remplir sans limite (disque, temps de rotation GATT, batterie). Nos propres
+  /// messages (`own = 1`) ne sont jamais évincés par ce plafond.
+  static const _maxRelayedEnvelopes = 300;
+
   Future<void> _handleIncomingLocked(MeshEnvelope env) async {
+    // Corrigé (inondation) : rejet AVANT toute écriture des enveloppes datées dans le futur
+    // (au-delà de la tolérance d'horloge), au ttl supérieur au maximum ou déjà expirées — voir
+    // [meshValidateIncoming]. Sans ce filtre, un horodatage lointain dans le futur rendait une
+    // enveloppe indéfiniment « fraîche » (jamais purgée) et un ttl de 255 la propageait 255 sauts.
+    if (meshValidateIncoming(env) != null) return;
+
     final db = await _database();
     final already = await db.query('seen', where: 'id = ?', whereArgs: [env.id], limit: 1);
     if (already.isNotEmpty) return;
-    await db.insert('seen', {'id': env.id, 'seen_at': DateTime.now().millisecondsSinceEpoch});
 
     final me = await identity();
     if (_bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes))) {
-      final msgKey = await _recvKeyFor(env.senderPublicKey, env.chainCounter);
-      final plain = msgKey == null ? null : await meshDecryptWithKey(messageKey: msgKey, envelope: env);
-      if (plain != null) {
-        // Voir [_consumeSkippedKey] : ne retirer la clé de la réserve des rangs sautés que
-        // maintenant que le déchiffrement est confirmé réussi, jamais avant.
-        await _consumeSkippedKey(env.senderPublicKey, env.chainCounter);
-        await db.insert('inbox', {
-          'id': env.id,
-          'sender': env.senderPublicKey,
-          'plaintext': plain,
-          'received_at': DateTime.now().millisecondsSinceEpoch,
-        });
-        _eventsController.add(MeshEvent.messageReceived(env.senderPublicKey, plain));
-        return;
+      // Corrigé (usurpation) : on ne déchiffre/affiche que les messages d'expéditeurs présents
+      // dans `mesh_contacts`. La clé publique de l'expéditeur voyage en clair : sans ce filtre,
+      // n'importe qui pouvait ouvrir un canal avec nous sous une identité jamais validée par QR.
+      if (await _isContact(db, env.senderPublicKey)) {
+        // Corrigé (CRITIQUE) : la clé est d'abord seulement CALCULÉE (plan, aucune écriture), le
+        // déchiffrement AES-GCM l'authentifie, et ce n'est qu'en cas de succès que l'état du
+        // cliquet est modifié (transaction), puis l'id marqué `seen`. Avant, le cliquet avançait
+        // (et `seen` était écrit) avant toute authentification : une seule fausse écriture GATT
+        // avec un compteur élevé détruisait le canal de réception de ce contact.
+        final plan = await _planRecvKey(env.senderPublicKey, env.chainCounter);
+        final plain =
+            plan == null ? null : await meshDecryptWithKey(messageKey: plan.messageKey, envelope: env);
+        if (plan != null && plain != null) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          final committed = await db.transaction((txn) async {
+            if (!await _commitRecvPlan(txn, env.senderPublicKey, env.chainCounter, plan)) {
+              return false;
+            }
+            await txn.insert('seen', {'id': env.id, 'seen_at': now},
+                conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
+            await txn.insert(
+              'inbox',
+              {'id': env.id, 'sender': env.senderPublicKey, 'plaintext': plain, 'received_at': now},
+              conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+            );
+            return true;
+          });
+          if (committed) {
+            _eventsController.add(MeshEvent.messageReceived(env.senderPublicKey, plain));
+          }
+          return;
+        }
       }
+      // Pour nous mais non authentifié (falsifié, corrompu) ou d'un expéditeur inconnu : surtout
+      // PAS marqué `seen` — sinon une copie forgée portant l'id d'un vrai message bloquerait ce
+      // dernier à son arrivée. Relayé comme n'importe quelle enveloppe (un relais qui s'abstient
+      // révélerait à un observateur que l'enveloppe nous était destinée).
+      await _storeForRelay(db, env);
+      return;
     }
-    // Pas pour nous (ou déchiffrement impossible, ce qui revient au même pour un relais) :
-    // on le garde dans notre propre file pour le repasser au prochain appareil croisé.
-    if (!env.expired) {
-      await db.insert(
-        'outbox',
-        {
-          'id': env.id,
-          'recipient': env.recipientHint,
-          'payload': env.relayed().serialize(),
-          'created_at': env.createdAt.millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
-      );
-    }
+
+    await db.insert('seen', {'id': env.id, 'seen_at': DateTime.now().millisecondsSinceEpoch},
+        conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
+    // Pas pour nous : on le garde dans notre propre file pour le repasser au prochain appareil.
+    await _storeForRelay(db, env);
+  }
+
+  Future<bool> _isContact(sqlcipher.DatabaseExecutor db, Uint8List peer) async {
+    final rows = await db.query('mesh_contacts',
+        columns: ['peer'], where: 'peer = ?', whereArgs: [peer], limit: 1);
+    return rows.isNotEmpty;
+  }
+
+  /// Met une enveloppe de tiers en file de relais (`own = 0`), puis applique le plafond
+  /// [_maxRelayedEnvelopes] en évinçant les plus anciennes par ordre d'INSERTION (rowid), jamais
+  /// par `created_at`, que l'expéditeur choisit librement.
+  Future<void> _storeForRelay(sqlcipher.Database db, MeshEnvelope env) async {
+    final relayed = env.relayed();
+    if (relayed.expired) return;
+    await db.insert(
+      'outbox',
+      {
+        'id': env.id,
+        'recipient': env.recipientHint,
+        'payload': relayed.serialize(),
+        'created_at': env.createdAt.millisecondsSinceEpoch,
+        'own': 0,
+      },
+      conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+    );
+    await db.delete(
+      'outbox',
+      where: 'own = 0 AND rowid NOT IN '
+          '(SELECT rowid FROM outbox WHERE own = 0 ORDER BY rowid DESC LIMIT ?)',
+      whereArgs: [_maxRelayedEnvelopes],
+    );
   }
 
   /// Met un message en file pour un contact, à relayer dès qu'un appareil Murmure est croisé.
@@ -586,6 +675,7 @@ class Mesh {
       'recipient': env.recipientHint,
       'payload': env.serialize(),
       'created_at': env.createdAt.millisecondsSinceEpoch,
+      'own': 1,
     });
   }
 
@@ -652,91 +742,99 @@ class Mesh {
     return (messageKey: step.messageKey, counter: counter);
   }
 
-  /// Retrouve la clé de message pour déchiffrer un message de rang [counter] de [peerPublicKey] :
-  /// soit déjà en réserve (message arrivé après un autre plus récent), soit en avançant la chaîne
-  /// de réception jusqu'à ce rang (en mettant en réserve les rangs sautés au passage). Retourne
-  /// null si la clé n'est plus disponible : rang déjà consommé et oublié (comportement attendu —
-  /// confidentialité persistante, pas une panne), ou saut trop grand pour être raisonnable.
-  /// À appeler uniquement après un déchiffrement RÉUSSI avec une clé obtenue via [_recvKeyFor] —
-  /// voir le commentaire dans cette méthode sur la branche « clé déjà en réserve ». Ne retire la
-  /// clé de [ratchet_skipped] qu'ici, jamais avant d'avoir confirmé que le déchiffrement a abouti.
-  /// Sans effet (et sans erreur) si [counter] ne correspond à aucune ligne — c'est le cas normal
-  /// quand la clé provenait de l'avancée directe du cliquet plutôt que de la réserve.
-  Future<void> _consumeSkippedKey(Uint8List peerPublicKey, int counter) async {
-    final db = await _database();
-    await db.delete('ratchet_skipped',
-        where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter]);
-  }
-
-  Future<Uint8List?> _recvKeyFor(Uint8List peerPublicKey, int counter) async {
-    await _ensureRatchetSeeded(peerPublicKey);
+  /// Calcule, SANS RIEN ÉCRIRE en base, la clé de message pour le rang [counter] de
+  /// [peerPublicKey] : soit une clé déjà en réserve (`ratchet_skipped`, message arrivé après un
+  /// plus récent), soit l'avancée de la chaîne de réception jusqu'à ce rang (calculée en mémoire
+  /// par [meshPlanRecvAdvance]). Retourne null si la clé n'est plus disponible : rang déjà
+  /// consommé et oublié (confidentialité persistante, comportement attendu) ou saut supérieur à
+  /// [_maxRatchetSkipAhead]. Le plan n'est appliqué que par [_commitRecvPlan], et seulement
+  /// après un déchiffrement AES-GCM réussi avec [_RecvKeyPlan.messageKey].
+  Future<_RecvKeyPlan?> _planRecvKey(Uint8List peerPublicKey, int counter) async {
     final db = await _database();
 
     final skipped = await db.query('ratchet_skipped',
         where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter], limit: 1);
     if (skipped.isNotEmpty) {
-      // Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : cette clé était
-      // supprimée de la réserve ICI, avant même la tentative de déchiffrement par l'appelant. Un
-      // paquet corrompu en transit (collision Bluetooth, retransmission partielle) fait échouer
-      // l'authentification GCM côté [_handleIncomingLocked] — la clé était alors déjà perdue, alors
-      // qu'un exemplaire valide du MÊME message (même rang de cliquet) pouvait très bien arriver
-      // plus tard par un autre chemin du maillage (relais store-and-forward multi-chemins, c'est le
-      // scénario normal, pas un cas limite) : ce second exemplaire valide devenait alors
-      // définitivement indéchiffrable (« clé perdue pour de bon »), pour rien. La clé n'est
-      // maintenant retirée de la réserve qu'après un déchiffrement confirmé réussi, voir
-      // [_consumeSkippedKey] et son appel dans [_handleIncomingLocked].
-      return Uint8List.fromList(skipped.first['message_key'] as List<int>);
+      return _RecvKeyPlan.fromSkipped(Uint8List.fromList(skipped.first['message_key'] as List<int>));
     }
 
     final rows = await db.query('ratchet_chain',
         where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'recv'], limit: 1);
-    final row = rows.first;
-    var chainKey = Uint8List.fromList(row['chain_key'] as List<int>);
-    final next = row['counter'] as int;
-
-    if (counter < next) return null; // déjà passé, pas en réserve : clé perdue pour de bon.
-    final steps = counter - next;
-    if (steps > _maxRatchetSkipAhead) return null; // saut déraisonnable, on abandonne.
-
-    Uint8List? wanted;
-    for (var i = 0; i <= steps; i++) {
-      final step = await meshRatchetStep(chainKey);
-      if (i == steps) {
-        wanted = step.messageKey;
-      } else {
-        await db.insert(
-          'ratchet_skipped',
-          {
-            'peer': peerPublicKey,
-            'counter': next + i,
-            'message_key': step.messageKey,
-            'created_at': DateTime.now().millisecondsSinceEpoch,
-          },
-          conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace,
-        );
-      }
-      chainKey = step.nextChainKey;
+    Uint8List chainKey;
+    int next;
+    ({Uint8List send, Uint8List recv})? seed;
+    if (rows.isEmpty) {
+      // Cliquet jamais amorcé avec ce contact : amorçage calculé en mémoire, écrit seulement au
+      // commit (voir [_commitRecvPlan]).
+      final me = await identity();
+      final (chainA, chainB) = await meshRatchetRoots(await me.sharedSecretWith(peerPublicKey));
+      final iSendOnA = meshSendsOnChainA(me.publicKeyBytes, peerPublicKey);
+      seed = (send: iSendOnA ? chainA : chainB, recv: iSendOnA ? chainB : chainA);
+      chainKey = seed.recv;
+      next = 0;
+    } else {
+      chainKey = Uint8List.fromList(rows.first['chain_key'] as List<int>);
+      next = rows.first['counter'] as int;
     }
-    await db.update(
-      'ratchet_chain',
-      {'chain_key': chainKey, 'counter': counter + 1},
-      where: 'peer = ? AND direction = ?',
-      whereArgs: [peerPublicKey, 'recv'],
+
+    final advance = await meshPlanRecvAdvance(
+      chainKey: chainKey,
+      nextCounter: next,
+      targetCounter: counter,
+      maxSkipAhead: _maxRatchetSkipAhead,
     );
-    await _trimSkipped(peerPublicKey);
-    return wanted;
+    if (advance == null) return null;
+    return _RecvKeyPlan.ratchet(advance, expectedNext: next, seed: seed);
+  }
+
+  /// Applique atomiquement (dans [txn]) un plan validé par un déchiffrement réussi : retrait de
+  /// la clé de réserve consommée, OU amorçage éventuel + mise en réserve des rangs sautés +
+  /// avancée du cliquet + élagage. Vérifie que l'état n'a pas bougé depuis le plan (compteur
+  /// attendu, clé de réserve toujours présente) ; sinon ne fait rien et renvoie false.
+  Future<bool> _commitRecvPlan(
+      sqlcipher.Transaction txn, Uint8List peerPublicKey, int counter, _RecvKeyPlan plan) async {
+    final advance = plan.advance;
+    if (advance == null) {
+      final n = await txn.delete('ratchet_skipped',
+          where: 'peer = ? AND counter = ?', whereArgs: [peerPublicKey, counter]);
+      return n == 1;
+    }
+    final seed = plan.seed;
+    if (seed != null) {
+      await txn.insert(
+        'ratchet_chain',
+        {'peer': peerPublicKey, 'direction': 'send', 'chain_key': seed.send, 'counter': 0},
+        conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+      );
+      await txn.insert(
+        'ratchet_chain',
+        {'peer': peerPublicKey, 'direction': 'recv', 'chain_key': seed.recv, 'counter': 0},
+        conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore,
+      );
+    }
+    final updated = await txn.update(
+      'ratchet_chain',
+      {'chain_key': advance.newChainKey, 'counter': advance.newNextCounter},
+      where: 'peer = ? AND direction = ? AND counter = ?',
+      whereArgs: [peerPublicKey, 'recv', plan.expectedNext],
+    );
+    if (updated != 1) return false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final (skippedCounter, key) in advance.skippedKeys) {
+      await txn.insert(
+        'ratchet_skipped',
+        {'peer': peerPublicKey, 'counter': skippedCounter, 'message_key': key, 'created_at': now},
+        conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace,
+      );
+    }
+    await _trimSkipped(txn, peerPublicKey);
+    return true;
   }
 
   /// Ne garde que les [_maxSkippedPerPeer] rangs sautés les plus récents par contact (les plus
-  /// anciens ont le moins de chances d'être un jour réclamés par un message très en retard).
-  ///
-  /// Trouvé en audit interne (revue croisée IA, vérifiée contre ce code) : cette méthode lisait
-  /// toutes les lignes du contact puis supprimait l'excédent une par une (une requête DELETE par
-  /// ligne en trop). Appelée après CHAQUE message reçu qui avance le cliquet (voir [_recvKeyFor]),
-  /// donc potentiellement très souvent en maillage dense — un simple gaspillage d'I/O SQLite, pas
-  /// une faille, mais une requête unique suffit et évite l'aller-retour en boucle.
-  Future<void> _trimSkipped(Uint8List peerPublicKey) async {
-    final db = await _database();
+  /// anciens ont le moins de chances d'être un jour réclamés par un message très en retard). Une
+  /// seule requête DELETE, exécutée dans la transaction de [_commitRecvPlan].
+  Future<void> _trimSkipped(sqlcipher.DatabaseExecutor db, Uint8List peerPublicKey) async {
     await db.delete(
       'ratchet_skipped',
       where: 'peer = ? AND counter NOT IN '
@@ -877,4 +975,20 @@ class MeshMessageReceived extends MeshEvent {
 
 extension FirstOrNullExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
+}
+
+/// Clé de réception calculée sans effet de bord (voir `Mesh._planRecvKey`) : soit une clé de
+/// réserve existante, soit une avancée de chaîne à appliquer seulement après déchiffrement réussi.
+class _RecvKeyPlan {
+  _RecvKeyPlan.fromSkipped(this.messageKey)
+      : advance = null,
+        expectedNext = -1,
+        seed = null;
+  _RecvKeyPlan.ratchet(MeshRecvPlan this.advance, {required this.expectedNext, this.seed})
+      : messageKey = advance.messageKey;
+
+  final Uint8List messageKey;
+  final MeshRecvPlan? advance;
+  final int expectedNext;
+  final ({Uint8List send, Uint8List recv})? seed;
 }

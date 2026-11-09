@@ -1,16 +1,29 @@
 name: Build Murmure (AAB + APK)
 
-# Se déclenche sur chaque push vers main, et manuellement. Les secrets de signature ne transitent
-# jamais par du texte en clair dans les logs : ils sont écrits dans des fichiers temporaires que
-# GitHub masque automatiquement, et supprimés en fin de job.
+# Deux types de build :
+# - push sur main (et lancement manuel sans play_release) : build de DÉVELOPPEMENT, signé avec la
+#   clé debug, artefact « murmure-DEBUG-non-publiable ». Les secrets de signature ne sont même pas
+#   lus : la clé d'upload ne sort jamais pour un build non publié.
+# - release Play : tag `v*`, ou lancement manuel avec play_release=true. La signature release est
+#   alors OBLIGATOIRE (MURMURE_REQUIRE_RELEASE_SIGNING=true) : échec clair si un secret manque ou si
+#   l'AAB produit est signé debug — jamais de repli silencieux.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      play_release:
+        description: 'Release Google Play (signature upload obligatoire)'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      MURMURE_REQUIRE_RELEASE_SIGNING: ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.play_release)) && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,14 +34,16 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          # Épinglé (plutôt que "stable" flottant) : les versions de Flutter plus récentes que
-          # celle-ci basculent par défaut sur Gradle 9, qui a supprimé l'API `Project.exec()`
-          # dont dépend encore le script Gradle de cargokit (utilisé par flutter_vodozemac pour
-          # compiler sa partie Rust/vodozemac) — voir l'échec du run avec Flutter 3.47.9. 3.29.0
-          # reste sur Gradle 8.x par défaut tout en embarquant un Dart assez récent pour
-          # flutter_vodozemac (qui exige Dart >=3.6.2).
+          # Épinglé (plutôt que "stable" flottant) : les versions de Flutter plus récentes basculent
+          # par défaut sur Gradle 9, qui a supprimé des API encore utilisées par certains plugins.
+          # 3.29.0 reste sur Gradle 8.x (AGP 8.7.0, voir android/settings.gradle.kts).
           flutter-version: '3.29.0'
           channel: 'stable'
+
+      - name: Type de build
+        run: |
+          echo "Release Play : $MURMURE_REQUIRE_RELEASE_SIGNING (ref=$GITHUB_REF, event=$GITHUB_EVENT_NAME)"
+          echo "versionCode : $((100 + GITHUB_RUN_NUMBER))"
 
       - name: Installer les dépendances
         run: flutter pub get
@@ -37,37 +52,60 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: Tests automatisés (logique pure, sans homeserver ni matériel Bluetooth)
-        # Trouvé en audit interne : zéro test automatisé n'existait avant ce commit (CI ne
-        # vérifiait que la compilation et le lint, jamais le comportement). Place avant les builds
-        # de release pour qu'un test cassé bloque la publication d'un binaire défaillant plutôt que
-        # d'être découvert après coup. Volontairement limité pour l'instant au code pur et
-        # déterministe (cliquet cryptographique du mesh, dépouillement EXIF) qui ne demande rien de
-        # plus que ce que ce runner fournit déjà ; les tests d'intégration (Matrix, BLE réel)
-        # demanderaient une infrastructure encore absente de ce pipeline (serveur Synapse/Dendrite,
-        # matériel ou émulation Bluetooth), volontairement pas abordés dans ce commit.
+        # Avant les builds de release : un test cassé bloque la publication d'un binaire défaillant.
         run: flutter test
 
-      - name: Reconstituer le keystore de signature
+      - name: Reconstituer le keystore de signature (release Play uniquement)
+        if: env.MURMURE_REQUIRE_RELEASE_SIGNING == 'true'
         env:
           UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
           UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
           UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
           UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
         run: |
-          if [ -z "$UPLOAD_KEYSTORE_BASE64" ]; then
-            echo "Pas de secret de signature configuré : build non signé (debug). Voir README."
-            exit 0
+          missing=""
+          for v in UPLOAD_KEYSTORE_BASE64 UPLOAD_STORE_PASSWORD UPLOAD_KEY_PASSWORD UPLOAD_KEY_ALIAS; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Release Play demandée mais secret(s) GitHub manquant(s) :$missing. Ajoutez-les (Settings > Secrets and variables > Actions) puis relancez."
+            exit 1
           fi
-          echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
-          cat > android/key.properties <<EOF
-          storePassword=$UPLOAD_STORE_PASSWORD
-          keyPassword=$UPLOAD_KEY_PASSWORD
-          keyAlias=$UPLOAD_KEY_ALIAS
-          storeFile=../upload-keystore.jks
-          EOF
+          umask 077
+          printf '%s' "$UPLOAD_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+          # Format .properties : `\` est un caractère d'échappement, on le double pour qu'un mot
+          # de passe qui en contient soit relu à l'identique par Gradle.
+          esc() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
+          {
+            printf 'storePassword=%s\n' "$(esc "$UPLOAD_STORE_PASSWORD")"
+            printf 'keyPassword=%s\n' "$(esc "$UPLOAD_KEY_PASSWORD")"
+            printf 'keyAlias=%s\n' "$(esc "$UPLOAD_KEY_ALIAS")"
+            printf 'storeFile=../upload-keystore.jks\n'
+          } > android/key.properties
 
       - name: Construire l'AAB (Play Store)
-        run: flutter build appbundle --release
+        run: flutter build appbundle --release --build-number=$((100 + GITHUB_RUN_NUMBER))
+
+      - name: Vérifier la signature de l'AAB
+        run: |
+          aab=build/app/outputs/bundle/release/app-release.aab
+          test -f "$aab" || { echo "::error::AAB introuvable : $aab"; exit 1; }
+          cert="$(keytool -printcert -jarfile "$aab" 2>&1 || true)"
+          if echo "$cert" | grep -q 'CN=Android Debug'; then
+            if [ "$MURMURE_REQUIRE_RELEASE_SIGNING" = "true" ]; then
+              echo "::error::L'AAB de release Play est signé avec la clé DEBUG : refusé."
+              exit 1
+            fi
+            echo "::warning::Build de développement signé DEBUG : NON publiable sur Google Play."
+          elif [ "$MURMURE_REQUIRE_RELEASE_SIGNING" = "true" ]; then
+            if ! echo "$cert" | grep -q 'Owner:'; then
+              echo "::error::Impossible de lire le certificat de signature de l'AAB."
+              echo "$cert"
+              exit 1
+            fi
+            echo "AAB signé avec la clé d'upload :"
+            echo "$cert" | grep -E 'Owner:|SHA256:'
+          fi
 
       - name: Garde-fou policy Play (aucune permission d'installation dans l'AAB)
         run: |
@@ -86,15 +124,59 @@ jobs:
           echo "OK : $m sans REQUEST_INSTALL_PACKAGES"
 
       - name: Construire l'APK universel (installation manuelle sur tablette de test)
-        run: flutter build apk --release
+        run: flutter build apk --release --build-number=$((100 + GITHUB_RUN_NUMBER))
+
+      - name: Vérifier l'alignement 16 Ko des bibliothèques natives (arm64-v8a, x86_64)
+        # Google Play exige des .so alignés sur des pages de 16 Ko (Android 15+). ÉCHEC pour une
+        # release Play, simple avertissement pour un build de développement.
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          test -f "$apk" || { echo "::error::APK introuvable : $apk"; exit 1; }
+          work="$(mktemp -d)"
+          unzip -q "$apk" 'lib/arm64-v8a/*.so' 'lib/x86_64/*.so' -d "$work" || true
+          bad=0; total=0
+          while IFS= read -r -d '' so; do
+            total=$((total + 1))
+            # Colonne « Align » de chaque segment LOAD ; 16 Ko = 0x4000 (2**14).
+            for a in $(readelf -lW "$so" | awk '$1 == "LOAD" { print $NF }'); do
+              if [ $((a)) -lt 16384 ]; then
+                echo "Non aligné 16 Ko : ${so#"$work"/} (LOAD align $a)"
+                bad=$((bad + 1))
+                break
+              fi
+            done
+          done < <(find "$work/lib" -name '*.so' -print0 2>/dev/null)
+          rm -rf "$work"
+          echo "$total bibliothèque(s) vérifiée(s), $bad non alignée(s)."
+          if [ "$total" -eq 0 ]; then
+            echo "::warning::Aucune .so arm64-v8a/x86_64 trouvée dans l'APK."
+          elif [ "$bad" -gt 0 ]; then
+            if [ "$MURMURE_REQUIRE_RELEASE_SIGNING" = "true" ]; then
+              echo "::error::$bad bibliothèque(s) native(s) non alignée(s) sur 16 Ko : refusé pour Google Play."
+              exit 1
+            fi
+            echo "::warning::$bad bibliothèque(s) native(s) non alignée(s) sur 16 Ko (bloquant pour une release Play)."
+          fi
 
       - name: Nettoyer les secrets du disque
         if: always()
         run: rm -f android/key.properties android/upload-keystore.jks
 
-      - uses: actions/upload-artifact@v4
+      - name: Publier l'artefact (release Play)
+        if: env.MURMURE_REQUIRE_RELEASE_SIGNING == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          name: murmure-release
+          name: murmure-release-play
+          path: |
+            build/app/outputs/bundle/release/*.aab
+            build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      - name: Publier l'artefact (développement, signé debug)
+        if: env.MURMURE_REQUIRE_RELEASE_SIGNING != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: murmure-DEBUG-non-publiable
           path: |
             build/app/outputs/bundle/release/*.aab
             build/app/outputs/flutter-apk/app-release.apk

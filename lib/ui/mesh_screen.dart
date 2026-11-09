@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
+import '../mesh/mesh_foreground_service.dart';
 import '../mesh/mesh_opsec_notifier.dart';
 import 'qr_screens.dart';
 import 'theme.dart';
@@ -23,7 +25,9 @@ class MeshScreen extends StatefulWidget {
 }
 
 class _MeshScreenState extends State<MeshScreen> {
-  bool _active = false;
+  /// Corrigé : initialisé depuis l'état réel du singleton [Mesh] — avant, `false` en dur :
+  /// rouvrir l'écran pendant que le relais tournait en arrière-plan affichait « désactivé ».
+  bool _active = Mesh.instance.isRunning;
   bool _busy = false;
   StreamSubscription<MeshEvent>? _sub;
   final _log = <_LogEntry>[];
@@ -58,11 +62,8 @@ class _MeshScreenState extends State<MeshScreen> {
     //
     // Deuxième correction, dans le même esprit : le journal affichait seulement le TEXTE du
     // message (`'Message reçu : $text'`), jamais l'expéditeur — illisible dès que plusieurs
-    // contacts envoient par Bluetooth, exactement le scénario visé (plusieurs téléphones croisés
-    // en manifestation). On affiche maintenant les premiers caractères de la clé publique BLE de
-    // l'expéditeur (même encodage que « Mon code de contact Bluetooth » ci-dessous) à côté de
-    // chaque message, pour pouvoir au moins les distinguer entre eux — pas un nom lisible (le mode
-    // Bluetooth n'a pas de carnet de contacts nommés), mais un identifiant stable et comparable.
+    // contacts envoient par Bluetooth. On affiche maintenant le NOM local du contact (voir
+    // [_labelFor]) ; un message dont l'expéditeur n'est pas dans les contacts n'est pas affiché.
     Mesh.instance.inbox().then((rows) {
       if (!mounted) return;
       setState(() {
@@ -79,7 +80,13 @@ class _MeshScreenState extends State<MeshScreen> {
       setState(() {
         switch (e) {
           case MeshStarted():
+            _active = Mesh.instance.isRunning;
             _log.insert(0, _LogEntry.status('Écoute Bluetooth démarrée'));
+            if (!Mesh.instance.peripheralActive) {
+              _log.insert(0, _LogEntry.status(
+                  'Annonce Bluetooth indisponible — ce téléphone peut joindre les autres, mais ne '
+                  'sera pas découvert par eux'));
+            }
           case MeshStopped():
             // `_active` est déjà remis à `false` par `_toggle` dans le cas normal (arrêt par
             // l'interrupteur) — refaire la même affectation ici est sans effet dans ce cas, mais
@@ -109,6 +116,31 @@ class _MeshScreenState extends State<MeshScreen> {
       if (mounted) setState(() => _myCode = meshB64(id.publicKeyBytes));
     });
     _loadContacts();
+    // Rattrape un démarrage/arrêt survenu entre la construction de l'état et l'abonnement.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_busy && _active != Mesh.instance.isRunning) {
+        setState(() => _active = Mesh.instance.isRunning);
+      }
+    });
+  }
+
+  /// Nom local du contact Bluetooth dont la clé publique est [sender], ou null si cet expéditeur
+  /// n'est pas (ou plus) dans les contacts. Corrigé (usurpation) : le journal affichait avant un
+  /// simple préfixe de clé publique, que n'importe qui peut choisir ; seuls les messages d'un
+  /// contact validé par QR sont désormais affichés, sous le nom qu'on lui a donné.
+  String? _labelFor(List<int> sender) {
+    for (final c in _contacts) {
+      if (c.peer.length != sender.length) continue;
+      var same = true;
+      for (var i = 0; i < sender.length; i++) {
+        if (c.peer[i] != sender[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return c.label;
+    }
+    return null;
   }
 
   Future<void> _loadContacts() async {
@@ -332,11 +364,18 @@ class _MeshScreenState extends State<MeshScreen> {
   Future<void> _toggle(bool on) async {
     setState(() => _busy = true);
     if (on) {
+      // Corrigé (Android 12+) : la localisation n'est déclarée dans le manifeste que jusqu'à
+      // l'API 30 (`maxSdkVersion="30"`, BLUETOOTH_SCAN en `neverForLocation` au-delà). La demander
+      // sur Android 12+ renvoyait un refus systématique, donc « Permissions Bluetooth refusées »
+      // et un mode hors-ligne impossible à activer. On ne la demande que si SDK <= 30 (ou si la
+      // version est inconnue sur Android, par prudence).
+      final sdk = Platform.isAndroid ? await MeshForegroundService.sdkInt() : null;
+      final needsLocation = Platform.isAndroid && (sdk == null || sdk <= 30);
       final granted = await [
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
         Permission.bluetoothAdvertise,
-        Permission.locationWhenInUse, // requis par Android pour le scan BLE sur certaines versions
+        if (needsLocation) Permission.locationWhenInUse, // scan BLE sur Android <= 11
       ].request();
       final ok = granted.values.every((s) => s.isGranted || s.isLimited);
       if (!ok) {
@@ -369,10 +408,17 @@ class _MeshScreenState extends State<MeshScreen> {
       await Mesh.instance.stop();
     }
     if (mounted) setState(() {
-      _active = on;
+      _active = Mesh.instance.isRunning;
       _busy = false;
     });
   }
+
+  /// Journal affiché : statuts + messages dont l'expéditeur est un contact connu (voir
+  /// [_labelFor]) ; les autres ne sont jamais affichés.
+  List<_LogEntry> get _visibleLog =>
+      _log.where((l) => l.isStatus || _labelFor(l.sender!) != null).toList();
+
+  static String _initial(String label) => label.isEmpty ? '?' : label.characters.first.toUpperCase();
 
   @override
   Widget build(BuildContext context) {
@@ -464,7 +510,7 @@ class _MeshScreenState extends State<MeshScreen> {
               Expanded(
                 child: Text('Journal', style: Theme.of(context).textTheme.titleMedium),
               ),
-              if (_log.any((l) => !l.isStatus))
+              if (_visibleLog.any((l) => !l.isStatus))
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
                   tooltip: 'Effacer le journal',
@@ -473,7 +519,7 @@ class _MeshScreenState extends State<MeshScreen> {
             ],
           ),
           const SizedBox(height: 4),
-          if (_log.isEmpty)
+          if (_visibleLog.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
@@ -485,7 +531,7 @@ class _MeshScreenState extends State<MeshScreen> {
               ),
             )
           else
-            ..._log.map((l) => Card(
+            ..._visibleLog.map((l) => Card(
                   child: ListTile(
                     leading: l.isStatus
                         ? Icon(
@@ -499,7 +545,7 @@ class _MeshScreenState extends State<MeshScreen> {
                             foregroundColor: Colors.white,
                             radius: 16,
                             child: Text(
-                              meshB64(l.sender!).substring(0, 1).toUpperCase(),
+                              _initial(_labelFor(l.sender!)!),
                               style: const TextStyle(fontSize: 13),
                             ),
                           ),
@@ -510,7 +556,7 @@ class _MeshScreenState extends State<MeshScreen> {
                     ),
                     subtitle: l.isStatus
                         ? null
-                        : Text('De ${meshB64(l.sender!).substring(0, 8)}…'),
+                        : Text('De ${_labelFor(l.sender!)!}'),
                     trailing: l.ts == 0
                         ? null
                         : Text(

@@ -113,12 +113,15 @@ class NetConfig {
         if (proxyHost == null || proxyHost!.isEmpty || proxyPort == null) {
           throw const ProxyConfigError('Adresse ou port du proxy SOCKS5 manquant');
         }
-        final addr = InternetAddress.tryParse(proxyHost!) ??
-            (await InternetAddress.lookup(proxyHost!)).firstOrNull;
-        if (addr == null) {
-          throw ProxyConfigError('Impossible de résoudre l\'adresse du proxy : $proxyHost');
-        }
-        return _socksClient(addr, proxyPort!);
+        final literal = InternetAddress.tryParse(proxyHost!);
+        if (literal != null) return _socksClient(literal, proxyPort!);
+        // Corrigé : la résolution DNS du nom d'hôte du proxy se faisait ICI, au démarrage
+        // (main.dart appelle httpClient() avant d'afficher quoi que ce soit) — hors ligne, la
+        // résolution levait et l'appli ne démarrait plus du tout (pas même le mode Bluetooth).
+        // Elle est maintenant paresseuse : faite au premier envoi de requête, et retentée au
+        // suivant en cas d'échec. Toujours « fail closed » : un échec de résolution lève
+        // ProxyConfigError, jamais de repli vers une connexion directe.
+        return _LazySocksClient(proxyHost!, proxyPort!);
     }
   }
 
@@ -126,6 +129,60 @@ class NetConfig {
     final inner = HttpClient();
     SocksTCPClient.assignToHttpClient(inner, [ProxySettings(host, port)]);
     return io.IOClient(inner);
+  }
+}
+
+/// Client SOCKS5 dont le proxy est désigné par NOM D'HÔTE : la résolution DNS n'a lieu qu'au
+/// premier [send] (voir [NetConfig.httpClient]). Toutes les requêtes passent par le client SOCKS
+/// interne ; si la résolution échoue, [send] lève [ProxyConfigError] — aucun chemin ne mène
+/// jamais à une connexion directe.
+class _LazySocksClient extends http.BaseClient {
+  _LazySocksClient(this._host, this._port);
+
+  final String _host;
+  final int _port;
+  Future<http.Client>? _inner;
+  bool _closed = false;
+
+  Future<http.Client> _resolve() async {
+    List<InternetAddress> addrs;
+    try {
+      addrs = await InternetAddress.lookup(_host);
+    } on SocketException {
+      throw ProxyConfigError('Impossible de résoudre l\'adresse du proxy : $_host');
+    }
+    if (addrs.isEmpty) {
+      throw ProxyConfigError('Impossible de résoudre l\'adresse du proxy : $_host');
+    }
+    return NetConfig._socksClient(addrs.first, _port);
+  }
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (_closed) throw http.ClientException('Client fermé', request.url);
+    final pending = _inner ??= _resolve();
+    http.Client inner;
+    try {
+      inner = await pending;
+    } catch (_) {
+      // Échec de résolution : on oublie la tentative pour réessayer au prochain envoi (le réseau
+      // peut revenir), et on remonte l'erreur telle quelle (ProxyConfigError).
+      if (identical(_inner, pending)) _inner = null;
+      rethrow;
+    }
+    if (_closed) {
+      inner.close();
+      throw http.ClientException('Client fermé', request.url);
+    }
+    return inner.send(request);
+  }
+
+  @override
+  void close() {
+    _closed = true;
+    final pending = _inner;
+    _inner = null;
+    pending?.then((c) => c.close(), onError: (_) {});
   }
 }
 
@@ -137,10 +194,6 @@ class ProxyConfigError implements Exception {
   final String message;
   @override
   String toString() => message;
-}
-
-extension _FirstOrNull<T> on List<T> {
-  T? get firstOrNull => isEmpty ? null : first;
 }
 
 /// Test simple de blocage : si la connexion au homeserver échoue en mode direct, Murmure propose
