@@ -174,6 +174,19 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         // bac à sable (qui n'a pas de matériel Bluetooth), et aucune comparaison chiffrée face à
         // une autre application (dont Bitchat) n'a été vérifiée. Ce correctif demande au système
         // le maximum que l'API publique autorise, rien de plus garanti que cela.
+        //
+        // ARBITRAGE OPSEC NON TRIVIAL, trouvé en revue indépendante et volontairement documenté
+        // ici plutôt que passé sous silence : annoncer à la puissance maximale augmente aussi la
+        // distance à laquelle un scanner BLE tiers (hypothèse de menace de ce projet : surveillance
+        // DGSI/type étatique en manifestation) peut détecter, mesurer le RSSI et triangulariser la
+        // position de CE téléphone — ce correctif échange donc de la portée de relais contre une
+        // détectabilité/traçabilité physique plus grande, pas un gain sans contrepartie. L'UUID de
+        // service reste le seul identifiant annoncé (voir plus bas) et aucun nom d'appareil n'est
+        // exposé, ce qui limite la traçabilité une fois détecté, mais ne réduit pas la distance de
+        // détection elle-même. Resté volontairement à `ADVERTISE_TX_POWER_HIGH` malgré cela, à la
+        // demande explicite de l'utilisateur de maximiser la portée — mais ce compromis doit rester
+        // un choix humain explicite et informé, pas une évidence technique, si le modèle de menace
+        // de ce projet venait à être reconsidéré.
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)

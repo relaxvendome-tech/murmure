@@ -363,7 +363,13 @@ class Mesh {
       _adapterSub = FlutterBluePlus.adapterState.listen((state) {
         if (_running && state != BluetoothAdapterState.on) {
           _eventsController.add(const MeshEvent.adapterOff());
-          unawaited(stop());
+          // Trouvé en audit interne (revue indépendante) : `stop()` émet toujours
+          // `MeshEvent.stopped()` à la fin, quelle que soit la raison de l'arrêt. Sans le
+          // paramètre ci-dessous, ce chemin ajoutait DEUX lignes au journal pour un seul
+          // événement réel (« Bluetooth désactivé... » suivie immédiatement de la générique
+          // « Écoute Bluetooth arrêtée », côté ui/mesh_screen.dart) — `MeshEvent.adapterOff()`
+          // explique déjà entièrement l'arrêt, la seconde ligne n'ajoutait aucune information.
+          unawaited(stop(emitStoppedEvent: false));
         }
       });
 
@@ -374,7 +380,12 @@ class Mesh {
     }
   }
 
-  Future<void> stop() async {
+  /// [emitStoppedEvent] : `false` uniquement quand l'appelant a déjà notifié l'UI d'une raison
+  /// d'arrêt plus précise (voir l'appel depuis le listener `adapterState` ci-dessus) — pour éviter
+  /// que l'UI reçoive deux événements pour un seul arrêt réel. Tous les autres appelants (arrêt
+  /// volontaire via l'interrupteur, effacement d'urgence via [reset]) gardent la valeur par défaut
+  /// `true`, qui préserve le comportement existant.
+  Future<void> stop({bool emitStoppedEvent = true}) async {
     _running = false;
     await _scanSub?.cancel();
     _scanSub = null;
@@ -393,7 +404,7 @@ class Mesh {
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
-    _eventsController.add(const MeshEvent.stopped());
+    if (emitStoppedEvent) _eventsController.add(const MeshEvent.stopped());
   }
 
   /// Un autre téléphone vient d'écrire une enveloppe sur notre caractéristique (rôle
