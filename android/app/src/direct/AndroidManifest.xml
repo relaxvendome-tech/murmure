@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Saveur `direct` (APK hors Play Store) : seule à pouvoir télécharger et installer une mise à
+     jour d'elle-même (voir lib/update/, MainActivity.kt et docs/UPDATES.md). Fusionné au manifeste
+     principal par Gradle. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Requise depuis Android 8 (API 26) pour proposer l'installation d'un APK. N'accorde AUCUN
+         droit d'installation silencieuse : Android affiche son propre écran de confirmation et
+         vérifie lui-même que la signature du nouvel APK correspond à celle déjà installée. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application>
+        <!-- Accès en lecture, temporaire et limité à l'URI précise transmise par MainActivity.kt,
+             à l'APK téléchargé (file:// interdit depuis l'API 24). Chemins : res/xml/file_paths.xml. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

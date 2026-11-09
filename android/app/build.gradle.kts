@@ -64,6 +64,22 @@ android {
         }
     }
 
+    // Deux saveurs, MÊME applicationId (pas de suffixe) et MÊME signature (buildTypes.release
+    // ci-dessous s'applique aux deux) :
+    //  - play   : AAB pour le Play Store. Sans REQUEST_INSTALL_PACKAGES ni FileProvider
+    //             d'installation (policy Google Play : pas de mise à jour hors Play).
+    //  - direct : APK distribué hors Play, avec auto-mise à jour (voir src/direct/ et
+    //             docs/UPDATES.md). Se compile avec --dart-define=MURMURE_SELF_UPDATE=true.
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("play") {
+            dimension = "distribution"
+        }
+        create("direct") {
+            dimension = "distribution"
+        }
+    }
+
     buildTypes {
         release {
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else signingConfigs.getByName("debug")

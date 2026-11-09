@@ -1,5 +1,12 @@
 # Mises à jour
 
+> **La version Play Store ne se met jamais à jour toute seule hors Play.** Seule la saveur Gradle
+> `direct` (APK hors Play, `--dart-define=MURMURE_SELF_UPDATE=true`) contient l'écran « Mises à
+> jour », `REQUEST_INSTALL_PACKAGES` et le FileProvider (`android/app/src/direct/`). La saveur
+> `play` (même `applicationId`, même signature) n'a rien de tout cela, exigence de la policy
+> Google Play ; ses mises à jour passent uniquement par le Play Store. Tout ce qui suit ne
+> concerne que la saveur `direct`.
+
 ## Le mode discret et le Play Store
 
 Une version antérieure de ce dépôt faisait basculer l'**icône et le nom de l'appli dans le

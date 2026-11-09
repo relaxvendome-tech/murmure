@@ -586,15 +586,17 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
               ),
             ),
           ],
-          const Divider(height: 32),
-          ListTile(
-            leading: const Icon(Icons.system_update_outlined),
-            title: const Text('Mises à jour'),
-            subtitle: const Text('Vérifier et installer une nouvelle version de Murmure'),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const UpdateScreen()),
+          if (kSelfUpdateEnabled) ...[
+            const Divider(height: 32),
+            ListTile(
+              leading: const Icon(Icons.system_update_outlined),
+              title: const Text('Mises à jour'),
+              subtitle: const Text('Vérifier et installer une nouvelle version de Murmure'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const UpdateScreen()),
+              ),
             ),
-          ),
+          ],
           if (widget.onDeleteAccount != null) ...[
             const Divider(height: 32),
             Padding(

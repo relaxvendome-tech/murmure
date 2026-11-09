@@ -18,3 +18,10 @@ const int kMaxMediaBytes = 50 * 1024 * 1024;
 
 /// Durée avant reverrouillage automatique de l'appli en arrière-plan.
 const Duration kRelockAfter = Duration(seconds: 30);
+
+/// Auto-mise à jour (écran « Mises à jour », téléchargement/installation d'APK, voir lib/update/
+/// et docs/UPDATES.md). Désactivée par défaut : la version Play Store (saveur Gradle `play`) ne
+/// doit JAMAIS se mettre à jour hors Play (policy Google Play). Seule la saveur `direct` est
+/// compilée avec `--dart-define=MURMURE_SELF_UPDATE=true`. Constante de compilation : le code
+/// derrière est éliminé de la version Play par le tree-shaking.
+const bool kSelfUpdateEnabled = bool.fromEnvironment('MURMURE_SELF_UPDATE', defaultValue: false);

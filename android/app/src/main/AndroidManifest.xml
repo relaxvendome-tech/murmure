@@ -6,14 +6,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Mises à jour (voir lib/update/ et docs/UPDATES.md) : requise depuis Android 8 (API 26)
-         pour qu'une appli installée hors Play Store puisse en proposer l'installation d'une
-         autre (ici, une nouvelle version d'elle-même). N'accorde AUCUN droit d'installation
-         silencieuse : Android affiche toujours son propre écran de confirmation, et vérifie
-         lui-même que la signature du nouvel APK correspond à celle déjà installée avant
-         d'autoriser quoi que ce soit — voir MainActivity.kt (installApk) et
+    <!-- REQUEST_INSTALL_PACKAGES n'est volontairement PAS déclarée ici : elle n'existe que dans
+         la saveur `direct` (src/direct/AndroidManifest.xml), jamais dans la saveur `play` (policy
+         Google Play : une appli distribuée sur Play ne se met pas à jour hors Play). Voir
          docs/UPDATES.md. -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Mode Bluetooth maillé (hors-ligne). BLUETOOTH_ADVERTISE est annoté `usesPermissionFlags`
          "neverForLocation" : Murmure n'utilise jamais le Bluetooth pour géolocaliser qui que ce
@@ -104,23 +100,6 @@
             android:name=".MeshForegroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
-
-        <!-- Mises à jour (voir lib/update/, MainActivity.kt et docs/UPDATES.md) : nécessaire pour
-             donner à l'installeur système un accès en lecture, temporaire et révocable, à l'APK
-             téléchargé — Android interdit depuis l'API 24 de partager directement un chemin
-             file:// avec une autre appli (dont l'installeur lui-même). Jamais exportée au sens où
-             d'autres applis pourraient l'interroger librement : `grantUriPermissions` limite
-             l'accès à l'URI précise transmise par MainActivity.kt, pour la seule durée de
-             l'intent d'installation. -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
 
     </application>
 </manifest>
