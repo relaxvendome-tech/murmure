@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:matrix/matrix.dart';
+import 'package:permission_handler/permission_handler.dart';
 // Type attendu par `WebRTCDelegate.mediaDevices` (matrix-dart-sdk) : celui de la couche
 // d'abstraction `webrtc_interface`, PAS le `MediaDevices` propre à `flutter_webrtc` lui-même
 // (deux classes distinctes pour l'analyseur Dart, même si `flutter_webrtc` implémente et
@@ -217,16 +218,33 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
 
   /// Démarre le service de premier plan quand l'appel devient « vivant » (sortant ou décroché, voir
   /// [hasLiveCall]) ; idempotent. Jamais d'exception : un échec ne doit pas casser l'appel.
+  bool _fgStarting = false;
+
+  /// Démarre le service seulement si RECORD_AUDIO est DÉJÀ accordée : sur Android 14+, un service
+  /// de type microphone démarré sans elle lève une SecurityException (et, faute de nouvelle
+  /// tentative, le premier appel après installation perdait le micro en arrière-plan). Au premier
+  /// appel, la permission est demandée par getUserMedia ; on retente donc à chaque changement
+  /// d'état (kConnecting/kConnected surviennent après getUserMedia). Le type caméra n'est demandé
+  /// que si CAMERA est accordée, pour ne jamais perdre le micro à cause de la caméra.
   void _syncForeground() {
-    try {
-      final s = _active;
-      if (s == null || _fgSession == s || !hasLiveCall) return;
-      _fgSession = s;
-      unawaited(CallForegroundService.start(
-        video: s.type == CallType.kVideo,
-        calcMode: AppLock.lastKnownCalc,
-      ));
-    } catch (_) {}
+    final s = _active;
+    if (s == null || _fgSession == s || _fgStarting || !hasLiveCall) return;
+    _fgStarting = true;
+    unawaited(() async {
+      try {
+        final mic = await Permission.microphone.isGranted;
+        if (!mic || _active != s || !hasLiveCall || _fgSession == s) return;
+        final wantVideo = s.type == CallType.kVideo;
+        final cam = wantVideo && await Permission.camera.isGranted;
+        if (_active != s || !hasLiveCall) return;
+        _fgSession = s;
+        await CallForegroundService.start(video: cam, calcMode: AppLock.lastKnownCalc);
+      } catch (_) {
+        // Jamais d'exception qui casse l'appel.
+      } finally {
+        _fgStarting = false;
+      }
+    }());
   }
 
   /// Arrête le service de premier plan s'il a été démarré. Idempotent, sans exception.

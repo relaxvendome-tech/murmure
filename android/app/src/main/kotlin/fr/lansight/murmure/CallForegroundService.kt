@@ -1,10 +1,12 @@
 package fr.lansight.murmure
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -74,8 +76,14 @@ class CallForegroundService : Service() {
 
     private fun startForegroundCompat(notification: Notification, video: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Défense en profondeur (le côté Dart ne démarre qu'avec RECORD_AUDIO accordée) : ne
+            // jamais demander le type caméra sans CAMERA accordée, sinon SecurityException sur
+            // Android 14+ et perte du micro avec.
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            if (video) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            if (video && checkSelfPermission(Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
         } else {
             @Suppress("DEPRECATION")

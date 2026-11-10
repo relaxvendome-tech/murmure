@@ -162,11 +162,13 @@ class _RoomsScreenState extends State<RoomsScreen> {
   Future<void> _deleteAccount() async {
     while (true) {
       if (!mounted) return;
-      final nav = Navigator.of(context, rootNavigator: true);
+      BuildContext? progressCtx;
       unawaited(showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder: (_) => const PopScope(
+        builder: (dctx) {
+          progressCtx = dctx;
+          return const PopScope(
           canPop: false,
           child: AlertDialog(
             content: Row(children: [
@@ -175,7 +177,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
               Expanded(child: Text('Suppression du compte sur le serveur…')),
             ]),
           ),
-        ),
+        );
+        },
       ));
       Object? failure;
       try {
@@ -183,7 +186,13 @@ class _RoomsScreenState extends State<RoomsScreen> {
       } catch (e) {
         failure = e;
       }
-      nav.pop(); // ferme le dialogue de progression
+      // Ferme CE dialogue précisément : un écran d'appel ou un reverrouillage a pu se poser
+      // au-dessus pendant l'attente, et pop() aurait fermé le mauvais écran.
+      final pc = progressCtx;
+      if (pc != null && pc.mounted) {
+        final r = ModalRoute.of(pc);
+        if (r != null && r.isActive) Navigator.of(pc).removeRoute(r);
+      }
       if (failure == null) {
         try {
           await Account.wipeLocal(client);
