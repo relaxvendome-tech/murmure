@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-import '../account.dart';
 import '../lock.dart';
 import 'mesh.dart';
 

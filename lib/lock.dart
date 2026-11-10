@@ -343,7 +343,7 @@ class AppLock {
     final duressHash = await Account.read('duress_hash');
     // Le code de contrainte est testé en premier et de la même façon : même durée de calcul.
     if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;
-    if (pinHash != null && _same(h, pinHash)) {
+    if (_same(h, pinHash)) {
       await Account.write('pin_fails', '0');
       return PinResult.ok;
     }

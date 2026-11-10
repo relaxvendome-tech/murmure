@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-import '../../account.dart';
 import '../../lock.dart';
 
 /// MISE À JOUR (Google Play) : en mode discret, le texte est désormais NEUTRE (« Rappel —

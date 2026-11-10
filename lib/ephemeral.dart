@@ -205,7 +205,7 @@ Future<void> refreshEphemeralState(Room room) async {
           parseTtlSeconds(prev) > 0 &&
           prev?['enabled_at_ms'] is! int &&
           st.content['enabled_at_ms'] is int;
-      if (needsPrevTs && prevId != null) {
+      if (needsPrevTs) {
         try {
           final ev = await room.client.getOneRoomEvent(room.id, prevId);
           EphemeralFloors._prevTs[prevId] = ev.originServerTs;
