@@ -123,12 +123,20 @@ jobs:
           import sys, xml.etree.ElementTree as ET
           A = '{http://schemas.android.com/apk/res/android}name'
           root = ET.parse(sys.argv[1]).getroot()
-          bad = [e.get(A) for e in root.iter() if e.tag in ('uses-permission', 'uses-permission-sdk-23')
-                 and e.get(A) == 'android.permission.REQUEST_INSTALL_PACKAGES']
+          # Permissions refusées ou soumises à déclaration spéciale par Google Play, qu'un plugin
+          # pourrait ajouter par fusion sans qu'on le voie (revue croisée DeepSeek, vérifiée).
+          FORBIDDEN = {'REQUEST_INSTALL_PACKAGES', 'QUERY_ALL_PACKAGES', 'MANAGE_EXTERNAL_STORAGE',
+                       'ACCESS_BACKGROUND_LOCATION', 'READ_SMS', 'SEND_SMS', 'RECEIVE_SMS',
+                       'READ_CALL_LOG', 'WRITE_CALL_LOG', 'PROCESS_OUTGOING_CALLS', 'READ_CONTACTS',
+                       'READ_MEDIA_IMAGES', 'READ_MEDIA_VIDEO', 'SYSTEM_ALERT_WINDOW',
+                       'BIND_ACCESSIBILITY_SERVICE', 'USE_FULL_SCREEN_INTENT'}
+          bad = sorted({e.get(A).rsplit('.', 1)[-1] for e in root.iter()
+                        if e.tag in ('uses-permission', 'uses-permission-sdk-23')
+                        and (e.get(A) or '').rsplit('.', 1)[-1] in FORBIDDEN})
           if bad:
-              sys.exit('REQUEST_INSTALL_PACKAGES présente dans la version Play : refusé.')
+              sys.exit('Permissions interdites/sensibles dans la version Play : ' + ', '.join(bad))
           PY
-          echo "OK : $m sans REQUEST_INSTALL_PACKAGES"
+          echo "OK : $m sans permission interdite"
 
       - name: Construire l'APK universel (installation manuelle sur tablette de test)
         run: flutter build apk --release --build-number=$((100 + GITHUB_RUN_NUMBER))

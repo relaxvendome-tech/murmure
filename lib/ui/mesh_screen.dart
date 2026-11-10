@@ -11,6 +11,7 @@ import '../mesh/mesh.dart';
 import '../mesh/mesh_crypto.dart';
 import '../mesh/mesh_foreground_service.dart';
 import '../mesh/mesh_opsec_notifier.dart';
+import 'mesh_qr_screen.dart';
 import 'qr_screens.dart';
 import 'theme.dart';
 
@@ -481,10 +482,22 @@ class _MeshScreenState extends State<MeshScreen> {
               child: ListTile(
                 title: const Text('Mon code de contact Bluetooth'),
                 subtitle: Text(_myCode!, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-                trailing: IconButton(
-                  icon: const Icon(Icons.copy),
-                  tooltip: 'Copier',
-                  onPressed: _copyMyCode,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.qr_code_2),
+                      tooltip: 'Afficher en QR',
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => MeshQrScreen(code: _myCode!)),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.copy),
+                      tooltip: 'Copier',
+                      onPressed: _copyMyCode,
+                    ),
+                  ],
                 ),
               ),
             ),

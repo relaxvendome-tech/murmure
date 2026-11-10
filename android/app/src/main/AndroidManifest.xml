@@ -17,6 +17,10 @@
     <!-- Mode Bluetooth maillé (hors-ligne). BLUETOOTH_ADVERTISE est annoté `usesPermissionFlags`
          "neverForLocation" : Murmure n'utilise jamais le Bluetooth pour géolocaliser qui que ce
          soit, seulement pour échanger des messages chiffrés de proche en proche. -->
+    <!-- Android 8 à 11 (API 26-30) : permissions historiques indispensables au scan BLE et au
+         serveur GATT ; sans elles, SecurityException et mode hors-ligne inutilisable. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />

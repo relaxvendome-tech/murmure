@@ -530,14 +530,33 @@ class Mesh {
   /// périphérique) : on la traite exactement comme une enveloppe récupérée en scannant (rôle
   /// central) — même déduplication, même logique de déchiffrement ou de relais.
   Future<void> _onGattWrite(Uint8List bytes) async {
+    final rg = _resetGen;
+    if (_stale(rg)) return;
     final env = MeshEnvelope.deserialize(bytes);
-    if (env != null) await _handleIncoming(env);
+    if (env == null || _stale(rg)) return;
+    try {
+      await _handleIncoming(env);
+    } catch (_) {
+      // Effacement d'urgence en cours (StateError « mesh reset ») ou base fermée : on abandonne.
+    }
   }
+
+  /// Vrai si le relais est arrêté ou si un effacement d'urgence a eu lieu depuis la capture de
+  /// [rg] (valeur de [_resetGen]) : l'appelant doit alors sortir sans toucher à la base.
+  bool _stale(int rg) => !_running || rg != _resetGen;
 
   /// Fait tourner la valeur que le serveur GATT natif renvoie à la prochaine lecture, parmi notre
   /// file d'attente (voir la limite documentée en tête de fichier).
   Future<void> _rotateReadValue() async {
-    final queue = await _allOutbox();
+    final rg = _resetGen;
+    if (_stale(rg)) return;
+    final List<MeshEnvelope> queue;
+    try {
+      queue = await _allOutbox();
+    } catch (_) {
+      return;
+    }
+    if (_stale(rg)) return;
     if (queue.isEmpty) {
       await MeshGattServerBridge.setReadValue(Uint8List(0));
       return;
@@ -569,7 +588,9 @@ class Mesh {
   }
 
   Future<void> _tryExchange(BluetoothDevice device) async {
+    final rg = _resetGen;
     try {
+      if (_stale(rg)) return;
       await device.connect(timeout: const Duration(seconds: 8), autoConnect: false);
 
       // Trouvé en audit interne — un défaut sérieux, pas cosmétique : le commentaire ci-dessous
@@ -601,8 +622,10 @@ class Mesh {
       if (char == null) return;
 
       // On pousse chaque enveloppe de notre file d'attente, une par écriture GATT (limite MTU).
+      if (_stale(rg)) return;
       final queue = await _allOutbox();
       for (final env in queue) {
+        if (_stale(rg)) return;
         final bytes = env.serialize();
         if (bytes.length > 512) continue; // au-delà du MTU négocié ci-dessus, on laisse de côté
         try {
@@ -620,6 +643,7 @@ class Mesh {
       // documentée en tête de fichier : ceci suppose un pair qui implémente déjà le serveur).
       if (char.properties.read) {
         final incoming = await char.read();
+        if (_stale(rg)) return;
         final env = MeshEnvelope.deserialize(Uint8List.fromList(incoming));
         if (env != null) await _handleIncoming(env);
       }
@@ -646,9 +670,12 @@ class Mesh {
     // (au-delà de la tolérance d'horloge), au ttl supérieur au maximum ou déjà expirées — voir
     // [meshValidateIncoming]. Sans ce filtre, un horodatage lointain dans le futur rendait une
     // enveloppe indéfiniment « fraîche » (jamais purgée) et un ttl de 255 la propageait 255 sauts.
+    if (!_running) return;
     if (meshValidateIncoming(env) != null) return;
 
+    final rg = _resetGen;
     final db = await _database();
+    if (_stale(rg)) return;
     final me = await identity();
     final forMe = _bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes));
     // Clé de déduplication : id seul pour un message qui NOUS est destiné (écrit seulement après
@@ -658,6 +685,7 @@ class Mesh {
     // contrainte de longueur ; les anciennes lignes (id seul, 16 octets) expirent d'elles-mêmes
     // par [_purgeExpired] et ne peuvent pas entrer en collision avec les nouvelles (32 octets).
     final seenKey = await meshSeenKey(id: env.id, recipientHint: env.recipientHint, forMe: forMe);
+    if (_stale(rg)) return;
     final already = await db.query('seen', where: 'id = ?', whereArgs: [seenKey], limit: 1);
     if (already.isNotEmpty) return;
 
@@ -675,6 +703,7 @@ class Mesh {
         final plain =
             plan == null ? null : await meshDecryptWithKey(messageKey: plan.messageKey, envelope: env);
         if (plan != null && plain != null) {
+          if (_stale(rg)) return;
           final now = DateTime.now().millisecondsSinceEpoch;
           final committed = await db.transaction((txn) async {
             if (!await _commitRecvPlan(txn, env.senderPublicKey, env.chainCounter, plan)) {
@@ -682,6 +711,7 @@ class Mesh {
             }
             await txn.insert('seen', {'id': seenKey, 'seen_at': now},
                 conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
+            await _capSeen(txn);
             await txn.insert(
               'inbox',
               {'id': env.id, 'sender': env.senderPublicKey, 'plaintext': plain, 'received_at': now},
@@ -699,8 +729,10 @@ class Mesh {
       // PAS marqué `seen` — sinon une copie forgée portant l'id d'un vrai message bloquerait ce
       // dernier à son arrivée. Relayé comme n'importe quelle enveloppe (un relais qui s'abstient
       // révélerait à un observateur que l'enveloppe nous était destinée), sous la clé de relais.
-      await _storeForRelay(
-          db, env, await meshSeenKey(id: env.id, recipientHint: env.recipientHint, forMe: false));
+      final relayKey =
+          await meshSeenKey(id: env.id, recipientHint: env.recipientHint, forMe: false);
+      if (_stale(rg)) return;
+      await db.transaction((txn) => _storeForRelay(txn, env, relayKey));
       return;
     }
 
@@ -710,11 +742,21 @@ class Mesh {
     // LIMITE RESTANTE : une copie forgée au même id ET au même hint mais à ttl réduit (≥ 2) est
     // encore acceptée en premier et raccourcit la portée de l'original chez ce relais.
     if (env.relayed().expired) return;
-    await db.insert('seen', {'id': seenKey, 'seen_at': DateTime.now().millisecondsSinceEpoch},
-        conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
-    // On le garde dans notre propre file pour le repasser au prochain appareil.
-    await _storeForRelay(db, env, seenKey);
+    if (_stale(rg)) return;
+    await db.transaction((txn) async {
+      await txn.insert('seen', {'id': seenKey, 'seen_at': DateTime.now().millisecondsSinceEpoch},
+          conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
+      await _capSeen(txn);
+      // On le garde dans notre propre file pour le repasser au prochain appareil.
+      await _storeForRelay(txn, env, seenKey);
+    });
   }
+
+  /// Plafond de la table `seen` (anti-inondation : sinon bornée seulement par l'âge, 72 h).
+  static const _maxSeen = 20000;
+
+  Future<void> _capSeen(sqlcipher.DatabaseExecutor db) => db.execute(
+      'DELETE FROM seen WHERE rowid NOT IN (SELECT rowid FROM seen ORDER BY rowid DESC LIMIT $_maxSeen)');
 
   Future<bool> _isContact(sqlcipher.DatabaseExecutor db, Uint8List peer) async {
     final rows = await db.query('mesh_contacts',
@@ -730,7 +772,7 @@ class Mesh {
   /// enveloppes de tiers (au lieu de l'id seul), sinon une copie forgée au hint modifié, insérée
   /// la première, occuperait la ligne et le vrai message serait ignoré (`ConflictAlgorithm.ignore`)
   /// à son tour. Nos propres messages (`own = 1`) gardent leur id de 16 octets : pas de collision.
-  Future<void> _storeForRelay(sqlcipher.Database db, MeshEnvelope env, Uint8List relayKey) async {
+  Future<void> _storeForRelay(sqlcipher.DatabaseExecutor db, MeshEnvelope env, Uint8List relayKey) async {
     final relayed = env.relayed();
     if (relayed.expired) return;
     await db.insert(
@@ -768,21 +810,27 @@ class Mesh {
 
   Future<void> _queueMessageLocked({required Uint8List recipientPublicKey, required String text}) async {
     final me = await identity();
-    final next = await _nextSendKey(recipientPublicKey);
-    final env = await meshEncryptWithKey(
-      messageKey: next.messageKey,
-      chainCounter: next.counter,
-      senderPublicKey: me.publicKeyBytes,
-      recipientHint: await meshRecipientHint(recipientPublicKey),
-      plaintext: text,
-    );
+    final hint = await meshRecipientHint(recipientPublicKey);
     final db = await _database();
-    await db.insert('outbox', {
-      'id': env.id,
-      'recipient': env.recipientHint,
-      'payload': env.serialize(),
-      'created_at': env.createdAt.millisecondsSinceEpoch,
-      'own': 1,
+    // Atomique : amorçage éventuel + avance du cliquet d'envoi + insertion en file. Si l'insertion
+    // échoue, le cliquet n'avance pas (pas de rang consommé pour un message jamais mis en file).
+    // Uniquement `txn` dans la transaction (jamais `db`, sinon interblocage sqflite).
+    await db.transaction((txn) async {
+      final next = await _nextSendKey(txn, recipientPublicKey);
+      final env = await meshEncryptWithKey(
+        messageKey: next.messageKey,
+        chainCounter: next.counter,
+        senderPublicKey: me.publicKeyBytes,
+        recipientHint: hint,
+        plaintext: text,
+      );
+      await txn.insert('outbox', {
+        'id': env.id,
+        'recipient': env.recipientHint,
+        'payload': env.serialize(),
+        'created_at': env.createdAt.millisecondsSinceEpoch,
+        'own': 1,
+      });
     });
   }
 
@@ -816,8 +864,7 @@ class Mesh {
 
   /// Amorce les deux chaînes (envoi/réception) avec [peerPublicKey] depuis le secret ECDH, SI ce
   /// n'est pas déjà fait — idempotent, ignore silencieusement si l'état existe déjà.
-  Future<void> _ensureRatchetSeeded(Uint8List peerPublicKey) async {
-    final db = await _database();
+  Future<void> _ensureRatchetSeeded(sqlcipher.DatabaseExecutor db, Uint8List peerPublicKey) async {
     final existing = await db.query('ratchet_chain',
         where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'send'], limit: 1);
     if (existing.isNotEmpty) return;
@@ -842,9 +889,9 @@ class Mesh {
   /// Avance la chaîne d'ENVOI vers [peerPublicKey] d'un cran et retourne la clé du message à
   /// chiffrer maintenant, avec son rang. L'ancienne clé de chaîne est écrasée en base : elle ne
   /// peut plus jamais être recalculée (confidentialité persistante).
-  Future<({Uint8List messageKey, int counter})> _nextSendKey(Uint8List peerPublicKey) async {
-    await _ensureRatchetSeeded(peerPublicKey);
-    final db = await _database();
+  Future<({Uint8List messageKey, int counter})> _nextSendKey(
+      sqlcipher.DatabaseExecutor db, Uint8List peerPublicKey) async {
+    await _ensureRatchetSeeded(db, peerPublicKey);
     final rows = await db.query('ratchet_chain',
         where: 'peer = ? AND direction = ?', whereArgs: [peerPublicKey, 'send'], limit: 1);
     final row = rows.first;
