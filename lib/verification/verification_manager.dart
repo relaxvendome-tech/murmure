@@ -23,9 +23,8 @@ import '../ui/sas_verification_screen.dart';
 /// flux hors widget-tree s'empile TOUJOURS par-dessus [LockGate], verrouillé ou pas, puisque ce
 /// dernier n'est pas une frontière de navigation. Une demande de vérification affichée par-dessus
 /// l'écran de verrou/calculatrice révélerait l'appli réelle en mode discret, même sans toucher au
-/// chiffrement lui-même. Tant que l'appli est verrouillée, la demande est donc purement ignorée
-/// ici : elle expire de son côté selon le délai normal du protocole `m.key.verification.request`
-/// (géré entièrement par le SDK, pas par ce fichier), exactement comme un appel non décroché.
+/// chiffrement lui-même. Tant que l'appli est verrouillée, la demande n'affiche rien et est
+/// annulée proprement (`cancel('m.user')`) : le demandeur n'attend pas indéfiniment.
 class VerificationManager {
   VerificationManager({required this.client, this.navigatorKey});
 
@@ -61,7 +60,15 @@ class VerificationManager {
       } catch (_) {}
       return;
     }
-    if (!AppLock.isUnlocked) return; // voir le commentaire de classe ci-dessus
+    if (!AppLock.isUnlocked) {
+      // Voir le commentaire de classe ci-dessus : aucune UI tant que verrouillé. La demande est en
+      // plus annulée proprement (code utilisateur du SDK, comme [KeyVerification.rejectVerification])
+      // au lieu de rester pendante côté demandeur jusqu'à expiration.
+      try {
+        await request.cancel('m.user');
+      } catch (_) {}
+      return;
+    }
 
     final nav = navigatorKey?.currentState;
     final context = nav?.overlay?.context;

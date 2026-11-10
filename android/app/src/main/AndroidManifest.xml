@@ -61,6 +61,11 @@
          BLUETOOTH_SCAN/CONNECT/ADVERTISE, déjà demandés en exécution avant le démarrage du mode). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Service de premier plan des appels (voir CallForegroundService.kt) : sans lui, Android coupe
+         micro et caméra dès l'appli en arrière-plan ou l'écran éteint. Démarré uniquement pendant
+         un appel lancé ou décroché par l'utilisateur. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
     <application
         android:label="Murmure"
@@ -110,6 +115,13 @@
             android:name=".MeshForegroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Voir CallForegroundService.kt : garde micro/caméra actifs pendant un appel en arrière-plan.
+             Jamais exportée : démarrée uniquement par MainActivity. -->
+        <service
+            android:name=".CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
 
     </application>
 </manifest>

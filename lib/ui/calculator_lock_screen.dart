@@ -150,18 +150,19 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
       String? next = pin;
       while (next != null) {
         // AppLock.check (pas classify) : compte cette tentative, voir le commentaire de classe.
+        final onWipe = widget.onWipe; // capturé : l'effacement ne dépend pas de `mounted`
         final r = await AppLock.check(next);
+        if (r == PinResult.duress || r == PinResult.exhausted) {
+          _pendingPins.clear();
+          if (mounted) _set('', '0');
+          await onWipe();
+          return;
+        }
         if (!mounted) return;
         if (r == PinResult.ok) {
           _pendingPins.clear();
           _set('', '0');
           widget.onUnlocked();
-          return;
-        }
-        if (r == PinResult.duress || r == PinResult.exhausted) {
-          _pendingPins.clear();
-          _set('', '0');
-          await widget.onWipe();
           return;
         }
         // PinResult.wrong : rien, reste affiché comme un calcul normal (pas d'indice d'échec).

@@ -77,7 +77,7 @@ class CallOpsecStore {
   }
 
   /// Détruit le fichier de cette base (et ses fragments `-wal`/`-shm`/`-journal` éventuels) sur le
-  /// disque — appelé par `Account.wipeLocal()` (donc par `panic()` et `deleteEverything()`).
+  /// disque — appelé par `Account.wipeLocal()` (donc par `panic()` et la suppression de compte).
   ///
   /// Corrige une lacune trouvée en audit interne (pas une proposition externe) : cette base a été
   /// créée dans une passe ultérieure à l'écriture de `Account.wipeLocal()`, qui ne connaissait donc

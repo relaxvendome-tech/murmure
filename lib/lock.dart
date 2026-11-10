@@ -28,8 +28,7 @@ enum PinResult {
 ///
 /// Les codes ne sont jamais stockés : seule une empreinte PBKDF2-SHA256 salée est gardée dans
 /// le Keystore Android (via flutter_secure_storage). Sous la contrainte (contrôle, arrestation),
-/// donner le code de contrainte efface clés, messages et médias, puis ouvre une appli vierge,
-/// indiscernable d'une installation neuve.
+/// donner le code de contrainte efface toutes les données et ferme l'application.
 ///
 /// La clé SQLCipher des bases locales N'EST PAS dérivée du PIN : elle est aléatoire, générée une
 /// fois et gardée dans le Keystore (voir [Account.dbKey]). Un PIN à 4 chiffres ferait une clé de
@@ -146,6 +145,11 @@ class AppLock {
   /// attendre une lecture Keystore.
   static bool lastKnownEnabled = false;
 
+  /// Dernière valeur connue du mode discret (calculatrice), mise à jour à chaque lecture/écriture
+  /// de `calc_mode`, pour que [LockGate] affiche directement la bonne façade de verrou de façon
+  /// synchrone (sans passer par l'écran « Murmure » le temps d'une lecture Keystore).
+  static bool lastKnownCalc = false;
+
   /// Un code est-il configuré ? Échec FERMÉ sur panne Keystore : si `pin_hash` est lu `null`
   /// alors que le marqueur fichier [Account.kLockOnMarker] (créé par [setPin], supprimé par
   /// [disable] et par l'effacement) existe, la valeur est illisible et non absente — on lève
@@ -182,9 +186,15 @@ class AppLock {
       try {
         await Account.setMarker(Account.kCalcOnMarker);
       } catch (_) {}
+      lastKnownCalc = true;
       return true;
     }
-    if (v == null) return Account.markerExists(Account.kCalcOnMarker);
+    if (v == null) {
+      final marked = await Account.markerExists(Account.kCalcOnMarker);
+      lastKnownCalc = marked;
+      return marked;
+    }
+    lastKnownCalc = false;
     return false;
   }
 
@@ -194,9 +204,11 @@ class AppLock {
     if (on) {
       await Account.write('calc_mode', '1');
       await Account.setMarker(Account.kCalcOnMarker);
+      lastKnownCalc = true;
     } else {
       await Account.clearMarker(Account.kCalcOnMarker);
       await Account.write('calc_mode', '0');
+      lastKnownCalc = false;
     }
   }
 

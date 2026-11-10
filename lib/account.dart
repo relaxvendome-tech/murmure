@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
+import 'calls/services/call_foreground_service.dart';
 import 'calls/services/call_opsec_store.dart';
 import 'config.dart';
 import 'media.dart';
@@ -316,40 +317,30 @@ class Account {
   static Future<void> setDisplayName(Client client, String name) =>
       client.setDisplayName(client.userID!, name);
 
-  /// Supprime le compte sur le serveur, puis efface tout de ce téléphone.
+  /// Supprime le compte sur le serveur (désactivation Matrix), SANS toucher aux données locales.
   ///
-  /// Trouvé en audit interne (revue croisée IA, confirmé en relisant ce fichier) : le `rethrow`
-  /// ci-dessous (erreur serveur/réseau NE nécessitant PAS d'authentification supplémentaire —
-  /// timeout, 500, serveur injoignable) remontait directement à l'appelant, et `wipeLocal(client)`
-  /// n'était alors JAMAIS atteint. Quelqu'un demandant explicitement la suppression de son compte
-  /// pendant une coupure réseau se retrouvait donc avec absolument RIEN effacé localement — clés,
-  /// messages, médias intacts — alors que l'intention explicite était de tout détruire. La
-  /// suppression côté serveur peut légitimement échouer (c'est un appel réseau comme un autre),
-  /// mais l'effacement local, lui, ne doit jamais dépendre de ce succès : c'est exactement ce que
-  /// [panic] garantit déjà sans aucun réseau. `try/finally` plutôt que `catch` générique : on
-  /// propage toujours l'erreur serveur à l'appelant (pour qu'il puisse prévenir l'utilisateur que
-  /// la suppression côté serveur a échoué), mais `wipeLocal` s'exécute dans tous les cas avant que
-  /// cette propagation n'ait lieu.
-  static Future<void> deleteEverything(Client client) async {
+  /// LÈVE en cas d'échec (hors ligne, timeout, erreur serveur, mot de passe introuvable, client non
+  /// connecté) : l'appelant (voir `ui/rooms_screen.dart`) doit alors prévenir l'utilisateur que le
+  /// compte existe toujours sur le serveur et lui laisser choisir (réessayer, n'effacer que ce
+  /// téléphone, annuler) — avant, un échec réseau effaçait le téléphone en laissant croire que le
+  /// compte était supprimé. En cas de succès, l'appelant enchaîne avec [wipeLocal].
+  static Future<void> deactivateRemote(Client client) async {
+    final password = await _storage.read(key: 'password');
+    if (password == null || !client.isLogged()) {
+      throw StateError('Suppression sur le serveur impossible');
+    }
     try {
-      final password = await _storage.read(key: 'password');
-      if (password != null && client.isLogged()) {
-        try {
-          await client.deactivateAccount();
-        } on MatrixException catch (e) {
-          if (!e.requireAdditionalAuthentication) rethrow;
-          await client.deactivateAccount(
-            auth: AuthenticationData.fromJson({
-              'type': 'm.login.password',
-              'identifier': {'type': 'm.id.user', 'user': client.userID},
-              'password': password,
-              'session': e.session,
-            }),
-          );
-        }
-      }
-    } finally {
-      await wipeLocal(client);
+      await client.deactivateAccount();
+    } on MatrixException catch (e) {
+      if (!e.requireAdditionalAuthentication) rethrow;
+      await client.deactivateAccount(
+        auth: AuthenticationData.fromJson({
+          'type': 'm.login.password',
+          'identifier': {'type': 'm.id.user', 'user': client.userID},
+          'password': password,
+          'session': e.session,
+        }),
+      );
     }
   }
 
@@ -401,6 +392,9 @@ class Account {
     'murmure_mesh_fg',
     'sys_calc_bg_v1',
     'discreet_fg_v2',
+    // Service de premier plan des appels (CallForegroundService.kt, notification id 4151).
+    'murmure_call_fg',
+    'discreet_call_fg_v1',
   ];
 
   /// Détruit tout ce que Murmure stocke sur ce téléphone (sans réseau).
@@ -425,11 +419,14 @@ class Account {
     try {
       await Mesh.reset();
     } catch (_) {}
+    try {
+      await CallForegroundService.stop(); // notification 4151 + micro/caméra d'un appel en cours
+    } catch (_) {}
     // Trouvé en audit interne (pas une proposition externe) : cette base a été ajoutée dans une
     // passe postérieure à l'écriture de la boucle ci-dessous, qui ne connaissait donc que les deux
     // bases historiques — `murmure_calls.db` (salons, identifiants Matrix des correspondants et
     // horodatages des appels manqués) survivait sinon à la fois à `panic()` et à
-    // `deleteEverything()`, contredisant la garantie documentée juste au-dessus. Voir
+    // la suppression de compte, contredisant la garantie documentée juste au-dessus. Voir
     // `CallOpsecStore.wipe()` pour le détail.
     try {
       await CallOpsecStore.wipe();

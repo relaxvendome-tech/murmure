@@ -180,8 +180,9 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
         AppLock.obscured.value = false; // l'écran d'appel en cours doit rester visible
         return;
       }
-      _lockSync();
-      AppLock.obscured.value = false; // l'écran de verrou est maintenant ce qui est affiché
+      // Si des transitions de sortie sont en cours, [_lockSync] garde l'écran opaque jusqu'à leur
+      // fin et le retire lui-même ; sinon l'écran de verrou est déjà ce qui est affiché.
+      if (!_lockSync()) AppLock.obscured.value = false;
       unawaited(_relock());
     }
   }
@@ -190,13 +191,45 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   /// (fail closed pour tout code hors widgets, voir [_relock]) et, si un code est connu comme
   /// activé, le contenu est masqué dès cette frame (routes empilées refermées, écran de verrou
   /// affiché) sans attendre la lecture Keystore de [_relock].
-  void _lockSync() {
+  ///
+  /// Trouvé en audit interne (fuite visuelle au retour d'arrière-plan) : `popUntil` est ANIMÉ — la
+  /// route sortante (ex. `ChatScreen`) reste dessinée ~0,3 s au-dessus du verrou. Les futures
+  /// [TransitionRoute.completed] des routes retirées sont donc collectées ; si au moins une existe,
+  /// [AppLock.obscured] reste à `true` jusqu'à la fin des transitions (plafonnée, au cas où une
+  /// animation ne s'achèverait jamais). Renvoie `true` dans ce cas : l'appelant ne doit PAS remettre
+  /// [AppLock.obscured] à `false` (c'est fait ici, à la fin des transitions).
+  bool _lockSync() {
     AppLock.isUnlocked = false;
-    if (!mounted || _unlocked != true) return;
-    if (!(_pinEnabled || AppLock.lastKnownEnabled)) return;
+    if (!mounted || _unlocked != true) return false;
+    if (!(_pinEnabled || AppLock.lastKnownEnabled)) return false;
+    final kept = _popToRootObscured();
+    setState(() {
+      _calcMode = _calcMode || AppLock.lastKnownCalc;
+      _unlocked = false;
+    });
+    return kept;
+  }
+
+  /// Referme toutes les routes empilées au-dessus de la première. Si des transitions de sortie
+  /// sont en cours, masque le contenu ([AppLock.obscured]) jusqu'à leur fin et renvoie `true`.
+  bool _popToRootObscured() {
     final nav = Navigator.of(context);
-    if (nav.canPop()) nav.popUntil((route) => route.isFirst);
-    setState(() => _unlocked = false);
+    if (!nav.canPop()) return false;
+    final pending = <Future<dynamic>>[];
+    nav.popUntil((route) {
+      if (route.isFirst) return true;
+      if (route is TransitionRoute) pending.add(route.completed);
+      return false;
+    });
+    if (pending.isEmpty) return false;
+    AppLock.obscured.value = true;
+    Future.wait<dynamic>(pending)
+        .timeout(const Duration(seconds: 2), onTimeout: () => <dynamic>[])
+        .catchError((Object _) => <dynamic>[])
+        .whenComplete(() {
+      if (mounted) AppLock.obscured.value = false;
+    });
+    return true;
   }
 
   /// Trouvé en audit interne (revue indépendante), deux bugs réels dans l'ancien code inline :
@@ -275,8 +308,7 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
       _presentPendingCallAfterFrame();
       return;
     }
-    final nav = Navigator.of(context);
-    if (nav.canPop()) nav.popUntil((route) => route.isFirst);
+    _popToRootObscured();
     setState(() {
       _calcMode = calc;
       _unlocked = false;
@@ -396,6 +428,8 @@ class _PinScreenState extends State<PinScreen> {
     if (widget.mode == PinScreenMode.unlock) {
       AppLock.remaining().then((r) {
         if (mounted) setState(() => _remaining = r);
+      }).catchError((Object _) {
+        // Keystore illisible : le compteur d'essais restants reste simplement masqué.
       });
       unawaited(_initBiometric());
     }
@@ -506,13 +540,21 @@ class _PinScreenState extends State<PinScreen> {
   Future<void> _handleSubmit() async {
     switch (widget.mode) {
       case PinScreenMode.unlock:
+        final onWipe = widget.onWipe; // capturé : l'effacement ne dépend pas de `mounted`
         final r = await AppLock.check(_pin);
+        // Effacement duress/épuisement AVANT la garde `mounted` : si l'écran est démonté entre-temps
+        // (relock, rotation), l'effacement décidé doit quand même avoir lieu.
+        if (r == PinResult.duress || r == PinResult.exhausted) {
+          await onWipe?.call();
+          return;
+        }
         if (!mounted) return;
         switch (r) {
           case PinResult.ok:
             widget.onSuccess?.call();
           case PinResult.duress:
-            await widget.onWipe?.call();
+          case PinResult.exhausted:
+            break; // déjà traités ci-dessus
           case PinResult.wrong:
             // Trouvé en audit interne (lecture directe, confirmé indépendamment par recherche
             // croisée) : le "if (!mounted) return" ci-dessus ne protège que le premier await
@@ -533,8 +575,6 @@ class _PinScreenState extends State<PinScreen> {
               _error = 'Code incorrect';
               if (!bioStill) _bioOffered = false;
             });
-          case PinResult.exhausted:
-            await widget.onWipe?.call();
         }
       case PinScreenMode.setPin:
         if (!mounted) return;
@@ -709,7 +749,7 @@ class LockSettingsScreen extends StatefulWidget {
   const LockSettingsScreen({super.key, this.onDeleteAccount, this.client});
 
   /// Supprime le compte sur le serveur puis efface tout du téléphone (voir
-  /// [Account.deleteEverything]). Null si aucun compte n'est connecté (ne devrait pas arriver
+  /// [Account.deactivateRemote]). Null si aucun compte n'est connecté (ne devrait pas arriver
   /// depuis RoomsScreen, mais LockSettingsScreen reste utilisable sans compte Matrix, en mode
   /// Bluetooth seul).
   final Future<void> Function()? onDeleteAccount;
@@ -837,7 +877,7 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
             ),
             SwitchListTile(
               title: const Text('Code de contrainte'),
-              subtitle: const Text('Un second code qui efface tout, en silence, ouvre une appli vierge'),
+              subtitle: const Text('Un second code qui efface toutes les données et ferme l\'application'),
               value: _hasDuress,
               onChanged: (v) async {
                 if (v) {

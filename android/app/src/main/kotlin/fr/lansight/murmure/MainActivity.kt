@@ -26,6 +26,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterFragmentActivity() {
 
     private val meshFgChannelName = "fr.lansight.murmure/mesh_fg"
+    private val callFgChannelName = "fr.lansight.murmure/call_fg"
 
     // Serveur GATT du maillage Bluetooth hors-ligne (voir MeshGattServer.kt / lib/mesh/mesh.dart).
     // S'enregistre lui-même ses propres canaux (fr.lansight.murmure/mesh_gatt + _incoming) dans son
@@ -76,6 +77,34 @@ class MainActivity : FlutterFragmentActivity() {
                 else -> result.notImplemented()
             }
         }
+        // Service de premier plan des appels (micro/caméra en arrière-plan, voir
+        // CallForegroundService.kt). Piloté uniquement par lib/calls/services/call_foreground_service.dart.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, callFgChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    val calcMode = call.argument<Boolean>("calcMode") ?: false
+                    val video = call.argument<Boolean>("video") ?: false
+                    try {
+                        val intent = Intent(this, CallForegroundService::class.java)
+                            .putExtra(CallForegroundService.EXTRA_CALC_MODE, calcMode)
+                            .putExtra(CallForegroundService.EXTRA_VIDEO, video)
+                        ContextCompat.startForegroundService(this, intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("CALL_FG", e.message, null)
+                    }
+                }
+                "stop" -> {
+                    try {
+                        stopService(Intent(this, CallForegroundService::class.java))
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("CALL_FG", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     /**
@@ -90,6 +119,11 @@ class MainActivity : FlutterFragmentActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, meshFgChannelName).setMethodCallHandler(null)
         try {
             stopService(Intent(this, MeshForegroundService::class.java))
+        } catch (_: Exception) {
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, callFgChannelName).setMethodCallHandler(null)
+        try {
+            stopService(Intent(this, CallForegroundService::class.java))
         } catch (_: Exception) {
         }
         super.cleanUpFlutterEngine(flutterEngine)

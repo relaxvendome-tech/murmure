@@ -129,11 +129,14 @@ IP non journalisée ; serveur en France ; aucune fédération (`allow_federation
 | RECORD_AUDIO, MODIFY_AUDIO_SETTINGS | Appels audio/vidéo | Faible |
 | POST_NOTIFICATIONS | Notifications sans contenu (nouveau message, appel manqué/entrant), notification du service Bluetooth. Demandée seulement après la création du compte et le déverrouillage, jamais au premier écran | Faible |
 | FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE | Service Bluetooth maillé en arrière-plan | **Moyen/élevé** : la déclaration du type `connectedDevice` demande une explication et une vidéo de démonstration |
+| FOREGROUND_SERVICE_MICROPHONE, FOREGROUND_SERVICE_CAMERA | Service de premier plan `CallForegroundService` (types `microphone`, + `camera` en appel vidéo) : appels VoIP déclenchés par l'utilisateur (il lance ou décroche l'appel). Sans lui, Android coupe micro et caméra dès l'appli en arrière-plan ou l'écran éteint, et l'appel devient muet. Démarré uniquement pendant un appel en cours, arrêté à sa fin, notification persistante « Appel en cours » (neutre « Activité » en mode discret) ; aucune capture hors appel | **Moyen** : la déclaration des types `microphone`/`camera` demande une description et une vidéo (lancer un appel, passer en arrière-plan, la notification, raccrocher) |
 
 Points d'attention :
 1. **REQUEST_INSTALL_PACKAGES** : retirée (Murmure n'est distribuée que sur Google Play ; la CI échoue
    si elle réapparaît dans le manifeste fusionné). Plus de risque de refus sur ce point.
-2. **Foreground service** : prévoir description + vidéo montrant l'activation du mode Bluetooth.
+2. **Foreground service** : prévoir description + vidéo montrant l'activation du mode Bluetooth, et une
+   seconde vidéo pour les types `microphone`/`camera` (appel déclenché par l'utilisateur, passage en
+   arrière-plan, notification visible, fin de l'appel).
 3. **Notifications en mode discret** : texte neutre (« Rappel — Nouvelle activité. »), sans imitation
    d'une autre appli ; Android affiche de toute façon le nom réel « Murmure » dans l'en-tête
    (`call_opsec_notifier.dart`). Seul l'écran de verrou interne a une apparence de calculatrice, ce que la

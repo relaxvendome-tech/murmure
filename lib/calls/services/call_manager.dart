@@ -13,6 +13,7 @@ import 'package:webrtc_interface/webrtc_interface.dart' show MediaDevices;
 import '../../lock.dart';
 import '../../network.dart';
 import '../call_policy.dart';
+import 'call_foreground_service.dart';
 import 'call_opsec_notifier.dart';
 import 'call_opsec_store.dart';
 
@@ -189,6 +190,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
       if (stale) {
         _active = null;
         _activeSince = null;
+        _stopForeground();
         activeCallNotifier.value = false;
         _activeStateSub?.cancel();
         _activeStateSub = null;
@@ -209,6 +211,33 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// polling, inutilement coûteux et potentiellement en retard de plusieurs secondes.
   final ValueNotifier<bool> activeCallNotifier = ValueNotifier(false);
 
+  /// Service de premier plan (micro/caméra en arrière-plan, voir [CallForegroundService]) : vrai
+  /// tant qu'on l'a démarré pour la session [_fgSession].
+  CallSession? _fgSession;
+
+  /// Démarre le service de premier plan quand l'appel devient « vivant » (sortant ou décroché, voir
+  /// [hasLiveCall]) ; idempotent. Jamais d'exception : un échec ne doit pas casser l'appel.
+  void _syncForeground() {
+    try {
+      final s = _active;
+      if (s == null || _fgSession == s || !hasLiveCall) return;
+      _fgSession = s;
+      unawaited(CallForegroundService.start(
+        video: s.type == CallType.kVideo,
+        calcMode: AppLock.lastKnownCalc,
+      ));
+    } catch (_) {}
+  }
+
+  /// Arrête le service de premier plan s'il a été démarré. Idempotent, sans exception.
+  void _stopForeground() {
+    try {
+      if (_fgSession == null) return;
+      _fgSession = null;
+      unawaited(CallForegroundService.stop());
+    } catch (_) {}
+  }
+
   /// Verrou de sûreté, en plus de [handleCallEnded]/[handleMissedCall] : si
   /// [createPeerConnection] refuse l'appel (fail-closed, voir [CallBlockedException]) AVANT que
   /// le SDK n'ait eu l'occasion d'appeler l'un de ces deux callbacks pour nettoyer, [_active]
@@ -228,10 +257,16 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     activeCallNotifier.value = true;
     _startWatchdog();
     _activeStateSub?.cancel();
+    _syncForeground(); // appel sortant : déjà « vivant »
     _activeStateSub = session.onCallStateChanged.stream.listen((state) {
-      if (state == CallState.kEnded && _active == session) {
+      if (state != CallState.kEnded) {
+        if (_active == session) _syncForeground(); // entrant décroché / connexion en cours
+        return;
+      }
+      if (_active == session) {
         _active = null;
         _activeSince = null;
+        _stopForeground();
         activeCallNotifier.value = false;
         _activeStateSub?.cancel();
         _activeStateSub = null;
@@ -408,6 +443,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     if (_active == session) {
       _active = null;
       _activeSince = null;
+      _stopForeground();
       activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;
@@ -419,6 +455,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     if (_active == session) {
       _active = null;
       _activeSince = null;
+      _stopForeground();
       activeCallNotifier.value = false;
       _activeStateSub?.cancel();
       _activeStateSub = null;

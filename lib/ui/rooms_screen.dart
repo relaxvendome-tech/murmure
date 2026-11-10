@@ -127,6 +127,8 @@ String _roomPreview(Room room) {
   return last.text;
 }
 
+enum _DeleteFailedChoice { retry, wipeLocalOnly, cancel }
+
 class _RoomsScreenState extends State<RoomsScreen> {
   Client get client => widget.client;
   CallManager get callManager => widget.callManager;
@@ -151,6 +153,80 @@ class _RoomsScreenState extends State<RoomsScreen> {
   void dispose() {
     _refreshTimer?.cancel();
     super.dispose();
+  }
+
+  /// « Supprimer mon compte » : suppression côté serveur d'abord (dialogue de progression), puis
+  /// effacement local + fermeture. En cas d'échec (hors ligne…), le téléphone n'est PAS effacé sans
+  /// prévenir : l'utilisateur choisit entre réessayer, n'effacer que ce téléphone (le compte reste
+  /// alors sur le serveur) ou annuler. [Account.panic] reste l'effacement inconditionnel.
+  Future<void> _deleteAccount() async {
+    while (true) {
+      if (!mounted) return;
+      final nav = Navigator.of(context, rootNavigator: true);
+      unawaited(showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Row(children: [
+              SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.5)),
+              SizedBox(width: 20),
+              Expanded(child: Text('Suppression du compte sur le serveur…')),
+            ]),
+          ),
+        ),
+      ));
+      Object? failure;
+      try {
+        await Account.deactivateRemote(client).timeout(const Duration(seconds: 45));
+      } catch (e) {
+        failure = e;
+      }
+      nav.pop(); // ferme le dialogue de progression
+      if (failure == null) {
+        try {
+          await Account.wipeLocal(client);
+        } catch (_) {}
+        exit(0);
+      }
+      if (!mounted) return;
+      final choice = await showDialog<_DeleteFailedChoice>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Suppression impossible'),
+          content: const Text('Suppression sur le serveur impossible (pas de connexion ?). '
+              'Votre compte existe toujours sur le serveur.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(_DeleteFailedChoice.cancel),
+              child: const Text('Annuler'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(_DeleteFailedChoice.wipeLocalOnly),
+              child: const Text('Effacer seulement ce téléphone (le compte restera sur le serveur)'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(_DeleteFailedChoice.retry),
+              child: const Text('Réessayer'),
+            ),
+          ],
+        ),
+      );
+      switch (choice) {
+        case _DeleteFailedChoice.retry:
+          continue;
+        case _DeleteFailedChoice.wipeLocalOnly:
+          try {
+            await Account.wipeLocal(client);
+          } catch (_) {}
+          exit(0);
+        case _DeleteFailedChoice.cancel:
+        case null:
+          return;
+      }
+    }
   }
 
   @override
@@ -209,18 +285,9 @@ class _RoomsScreenState extends State<RoomsScreen> {
                 // après : plus simple et plus sûr que de reconstruire l'état en mémoire d'un
                 // client Matrix dont la base locale vient d'être supprimée sous ses pieds.
                 // Au prochain lancement, l'appli redémarre comme neuve (écran d'onboarding).
-                // Hors ligne, `deleteEverything` peut lever après avoir déjà effacé les données
-                // locales : on ferme l'appli dans tous les cas (`finally`), sinon l'appli resterait
-                // ouverte sur un client dont la base vient d'être supprimée.
-                onDeleteAccount: () async {
-                  try {
-                    await Account.deleteEverything(client);
-                  } catch (_) {
-                    // Ignoré volontairement : la fermeture ci-dessous a lieu quoi qu'il arrive.
-                  } finally {
-                    exit(0);
-                  }
-                },
+                // Le téléphone n'est effacé qu'après la suppression CÔTÉ SERVEUR, ou sur choix
+                // explicite de l'utilisateur si elle échoue (voir [_deleteAccount]).
+                onDeleteAccount: _deleteAccount,
               ),
             )),
           ),
