@@ -56,7 +56,7 @@ Uint8List randomBytes(int n) {
 
 /// Identité Bluetooth : paire de clés X25519 longue durée, utilisée pour l'échange de clé
 /// (ECDH) avec un contact ajouté par QR. Distincte de l'identité Matrix (Ed25519/Curve25519,
-/// gérée en interne par le SDK Matrix via libolm, voir le commentaire de main.dart) : le mode
+/// gérée en interne par le SDK Matrix via vodozemac, voir le commentaire de main.dart) : le mode
 /// Bluetooth fonctionne même sans compte Matrix.
 class MeshIdentity {
   MeshIdentity._(this._keyPair, this.publicKeyBytes);

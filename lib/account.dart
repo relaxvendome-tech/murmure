@@ -291,7 +291,7 @@ class Account {
       await client.register(
           username: username, password: password, initialDeviceDisplayName: device, auth: auth);
     }
-    // Trouvé en audit interne : si libolm/vodozemac ne se charge pas, le SDK initialise le client
+    // Trouvé en audit interne : si vodozemac ne s'initialise pas (`vod.init()` en échec, voir main.dart), le SDK initialise le client
     // SANS chiffrement (`client.encryption == null`) et les messages partiraient en clair. Une
     // messagerie chiffrée ne doit jamais fonctionner dans ce mode dégradé : on annule.
     if (!client.encryptionEnabled) {

@@ -4,27 +4,23 @@ publish_to: 'none'
 version: 3.0.0+7
 
 environment:
-  sdk: '>=3.6.2 <4.0.0'
+  sdk: '>=3.11.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  matrix: ^0.29.0
-  # `matrix` 0.29.x (résolu en 0.29.13) chiffre TOUT via `package:olm` (libolm) — vodozemac
-  # n'arrive dans matrix-dart-sdk qu'à partir de v1.0.0. `package:olm` ouvre la bibliothèque native
-  # par `DynamicLibrary.open('libolm.so')` sur Android (lib/src/ffi_base.dart, vérifié aux tags
-  # 2.0.2 et v3.1.0 du dépôt famedly/dart-olm). Déclaré en direct (même contrainte que celle de
-  # matrix 0.29.13 : `olm: ^2.0.2`) parce que c'est NOUS qui fournissons maintenant le .so.
-  #
-  # `flutter_olm` (2.0.0) RETIRÉ : son libolm.so était aligné sur 4 Ko (LOAD align 0x1000 constaté
-  # dans le log CI pour arm64-v8a et x86_64) — refusé par Google Play (pages de 16 Ko, Android 15+)
-  # et par le contrôle readelf de la CI. libolm 3.2.16 est désormais compilée en CI depuis le tag
-  # officiel, commit vérifié, liée avec -z max-page-size=16384 : voir scripts/build_libolm.sh
-  # (sortie : android/app/src/main/jniLibs/<abi>/libolm.so, non versionnée). Sans ce .so l'appli
-  # refuse de démarrer (voir lib/main.dart) : lancez ce script avant `flutter run` en local.
-  # libolm reste dépréciée en amont au profit de vodozemac : migration vers matrix >= v6.1.0 à
-  # mener comme chantier séparé.
-  olm: ^2.0.2
+  # matrix-dart-sdk >= 1.0.0 chiffre TOUT (Olm/Megolm, SAS, sauvegarde de clés, pièces jointes)
+  # via vodozemac (implémentation Rust de Matrix.org, auditée par Least Authority), par le paquet
+  # Dart `vodozemac` qu'il importe lui-même. libolm (dépréciée en amont) n'est plus utilisée nulle
+  # part : `olm`, scripts/build_libolm.sh et les jniLibs ont été retirés.
+  # matrix 16 exige Dart >= 3.11 (Flutter 3.41.x épinglé dans .github/workflows/build.yml).
+  matrix: ^16.0.2
+  # Bibliothèque native de vodozemac pour Android (plugin FFI) : cargokit compile la crate Rust
+  # au build Gradle (rustup requis, voir build.yml) et la lie avec -z max-page-size=16384
+  # (pages de 16 Ko, exigence Play). `vod.init()` DOIT réussir avant `Client.init()` : sinon le
+  # SDK démarre SANS chiffrement (`client.encryptionEnabled == false`) et l'appli refuse alors de
+  # démarrer/s'inscrire (voir lib/main.dart et Account.register).
+  flutter_vodozemac: ^0.9.0
   sqflite_sqlcipher: ^3.1.0
   flutter_secure_storage: ^9.2.2
   # Déverrouillage biométrique optionnel (voir lib/biometric.dart) ; l'UI seulement, jamais les clés.
@@ -69,8 +65,8 @@ dependencies:
   # Déjà utilisé en transitif par `matrix` (génération de vignettes), déclaré en direct ici car
   # lib/media.dart l'importe maintenant explicitement pour dépouiller les EXIF (GPS, horodatage
   # précis, modèle d'appareil) avant tout chiffrement/envoi — voir le threat model documenté en
-  # tête de ce fichier. Version alignée sur celle déjà résolue par matrix-dart-sdk 0.29.x (vérifiée
-  # dans son pubspec.yaml), pour ne pas introduire de contrainte de version concurrente.
+  # tête de ce fichier. Version alignée sur celle déjà résolue par matrix-dart-sdk (`image: ^4.0.15`, inchangée
+  # de 0.29.x à 16.0.2, vérifiée dans son pubspec.yaml), pour ne pas introduire de contrainte de version concurrente.
   image: ^4.0.15
 
 dev_dependencies:

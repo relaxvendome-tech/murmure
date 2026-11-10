@@ -48,18 +48,6 @@ if (hasReleaseSigning) {
     )
 }
 
-// libolm (chiffrement Olm/Megolm, chargée par `package:olm` via DynamicLibrary.open('libolm.so')) :
-// compilée par scripts/build_libolm.sh dans src/main/jniLibs/<abi>/, jamais versionnée. Sans elle
-// l'appli refuse de démarrer — avertissement ici, contrôle bloquant dans la CI (build.yml).
-val missingLibolm = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-    .filterNot { file("src/main/jniLibs/$it/libolm.so").isFile }
-if (missingLibolm.isNotEmpty()) {
-    logger.warn(
-        "ATTENTION : libolm.so absente pour ${missingLibolm.joinToString(", ")} — lancez " +
-            "scripts/build_libolm.sh avant de construire, sinon l'appli ne démarrera pas."
-    )
-}
-
 android {
     namespace = "fr.lansight.murmure"
     // 36 : exigé par flutter_webrtc (checkReleaseAarMetadata) ET par la policy Google Play 2026
@@ -69,8 +57,8 @@ android {
     // pour Android 15+ ; vérifié en CI par readelf, voir build.yml). N'affecte que le code natif
     // compilé par ce build (plugins CMake, ex. flutter_zxing) — les .so précompilés fournis par
     // des plugins restent ce qu'ils sont, d'où la vérification CI. Installé automatiquement par
-    // AGP s'il manque sur la machine. Même version utilisée par scripts/build_libolm.sh (libolm,
-    // liée explicitement avec -z max-page-size=16384).
+    // AGP s'il manque sur la machine. Même NDK utilisé par cargokit (flutter_vodozemac, qui suit
+    // `android.ndkVersion`) pour lier libvodozemac_bindings_dart.so avec -z max-page-size=16384.
     ndkVersion = "28.2.13676358"
 
     compileOptions {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_vodozemac/flutter_vodozemac.dart' as vod;
 import 'package:matrix/matrix.dart';
 // `KeyVerificationMethod` vit dans le barrel séparé `package:matrix/encryption.dart`, pas dans
 // `package:matrix/matrix.dart` (voir le même commentaire dans verification_manager.dart).
@@ -27,32 +28,19 @@ final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Trouvé en audit interne (revue indépendante, croisée avec le code source réel de
-  // matrix-dart-sdk au tag v0.29.13 — version que `matrix: ^0.29.0` résout effectivement ici,
-  // confirmé par le log de CI — et avec FluffyChat, l'app de référence du même éditeur) :
-  // `flutter_vodozemac`/`vod.init()` (précédemment appelé ici) ne servait à RIEN pour cette
-  // version du SDK. `vodozemac` n'a été introduit dans matrix-dart-sdk qu'à partir du tag v1.0.0
-  // (migration majeure, juin 2025) ; à v0.29.13, `cross_signing.dart`, `encryption.dart`,
-  // `key_manager.dart` et `olm_manager.dart` importent tous `package:olm/olm.dart` (libolm, pas
-  // vodozemac) et c'est OlmManager qui appelle lui-même `olm.init()` en interne, à l'intérieur de
-  // `Client.init()` (voir `Encryption.init()` au tag v0.29.13) — jamais l'appli elle-même.
-  // Appeler `vod.init()` ici initialisait donc une bibliothèque (vodozemac) que le SDK ne regarde
-  // jamais à cette version, pendant que celle qu'il utilise réellement (`olm`, via
-  // `DynamicLibrary.open('libolm.so')` sur Android, voir `ffi_base.dart` du paquet `olm`) n'avait
-  // aucun `.so` fourni dans l'APK : aucun paquet de ce dépôt ne livrait `libolm.so` (`flutter_olm`
-  // n'était pas déclaré). Résultat réel, non testé sur appareil faute de toolchain Flutter dans ce
-  // bac à sable mais déduit du code source des deux paquets : `DynamicLibrary.open` échoue dès le
-  // premier accès aux bindings `olm`, donc dès `client.init()` plus bas, pour CHAQUE lancement —
-  // chiffrement de bout en bout indisponible, pas seulement affaibli. Corrigé en ajoutant
-  // `flutter_olm` à pubspec.yaml (fournit `libolm.so` pour Android/iOS, le pairing documenté par
-  // le paquet `olm` lui-même) et en retirant `flutter_vodozemac`, dépendance morte à cette version
-  // du SDK. LIMITE HONNÊTE, et ouverte comme chantier séparé : `libolm`/`flutter_olm` sont tous
-  // deux dépréciés en amont (flutter_olm sans publication depuis ~2 ans) au profit de vodozemac ;
-  // une migration délibérée vers une version de matrix-dart-sdk >= v6.1.0 (la plus ancienne dont
-  // la contrainte `vodozemac` reste compatible avec `flutter_vodozemac: ^0.5.0`) serait la
-  // correction propre à terme, mais implique des changements d'API cassants cumulés sur les appels
-  // WebRTC (migrations VoIP des versions 2.0.0 à 6.1.0) qu'il serait irresponsable de faire à
-  // l'aveugle, sans compilateur Flutter local pour les valider un par un.
+  // Chiffrement de bout en bout : matrix-dart-sdk 16.x utilise vodozemac (Rust, audité), via le
+  // paquet Dart `vodozemac`, dont la bibliothèque native Android est fournie par
+  // `flutter_vodozemac` (libvodozemac_bindings_dart.so, compilée par cargokit). Le SDK ne
+  // l'initialise PAS lui-même : `Client.init()` ne crée `Encryption` que si `vod.isInitialized()`
+  // (vérifié dans `client.dart` au tag v16.0.2) et, sinon, continue SANS chiffrement. Un échec
+  // ici n'est donc jamais ignoré en silence : il laisse `encryptionEnabled` à faux, et le
+  // garde-fou de `_boot`/`_Home`/`Account.register` refuse alors de démarrer ou de s'inscrire.
+  // Aucun détail d'exception n'est journalisé (chemin de bibliothèque, etc.).
+  try {
+    await vod.init();
+  } catch (_) {
+    // Fail-closed : voir ci-dessus (encryptionEnabled restera faux).
+  }
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
   // Initialise le plugin de notifications d'appel et purge les anciens canaux, SANS demander la
   // permission POST_NOTIFICATIONS : une fenêtre système avant l'onboarding (ou par-dessus l'écran
@@ -134,7 +122,7 @@ class _MurmureAppState extends State<MurmureApp> {
       // partir de ces objets, à quelque niveau que ce soit.
       //
       // LIMITE HONNÊTE : `Level.wtf` reste le niveau le plus restrictif que ce paquet expose, pas
-      // une suppression totale — ses 4 appels `Logs().wtf(...)` dans ce dépôt (tag v0.29.0)
+      // une suppression totale — ses 6 appels `Logs().wtf(...)` dans ce dépôt (tag v16.0.2)
       // continueront de s'imprimer sur `adb logcat` en cas d'échec grave (ex. l'exception brute
       // d'une connexion HTTP, dont le contenu exact n'a pas été audité ligne à ligne pour toutes les
       // erreurs réseau possibles). Un `print()` en version publiée reste de toute façon lisible par
@@ -144,27 +132,21 @@ class _MurmureAppState extends State<MurmureApp> {
       // pour l'OPSEC.
       final client = Client(
         'Murmure',
-        // Trouvé en audit interne (revue indépendante), confirmé contre le code source réel de
-        // matrix-dart-sdk (tag v0.29.13, `matrix_sdk_database.dart`) : le constructeur de
-        // `MatrixSdkDatabase` ne fait qu'enregistrer ses paramètres — `_collection` (champ `late`)
-        // n'est affecté que dans `open()`, une méthode SÉPARÉE que `Client.init()` n'appelle
-        // JAMAIS lui-même pour vous (vérifié : aucun `.open()` dans `client.dart`). C'est l'appli
-        // qui doit le faire, exactement comme le fait l'exemple officiel du SDK
-        // (`example/main.dart`) et sa propre suite de tests (`test/fake_database.dart`) — les deux
-        // appellent `await db.open()` juste après l'avoir construite. Sans cet appel, le premier
-        // accès à la base par `Client.init()` (`database?.getClient(...)`) levait une
-        // `LateInitializationError` sur `_collection` — crash au tout premier lancement, avant même
-        // l'écran d'onboarding, à chaque fois.
-        databaseBuilder: (_) async {
-          final database = MatrixSdkDatabase('murmure', database: db);
-          await database.open();
-          return database;
-        },
+        // matrix-dart-sdk >= 1.0.0 : le constructeur exige une base DÉJÀ ouverte
+        // (`databaseBuilder` supprimé). `MatrixSdkDatabase.init` construit puis appelle `open()`
+        // (qui crée/migre les tables) — même base SQLCipher qu'avant (`murmure_matrix.db`, clé
+        // Keystore de [Account.dbKey]). Une base créée par l'ancien SDK 0.29 est migrée par
+        // `_migrateFromVersion` du SDK (au pire vidage du cache + resynchronisation) ; les comptes
+        // Olm/sessions Megolm picklés par libolm sont relus par vodozemac
+        // (`fromOlmPickleEncrypted`, vérifié dans olm_manager.dart/session_key.dart au tag v16.0.2).
+        // `secureStorage` volontairement NON renseigné : le jeton d'accès et le compte Olm ne sont
+        // pas dupliqués hors de la base chiffrée.
+        database: await MatrixSdkDatabase.init('murmure', database: db),
         logLevel: Level.wtf,
         httpClient: await net.httpClient(),
         // Trouvé en audit interne (revue indépendante) : sans ce paramètre, `Client` retombe sur
         // `verificationMethods ?? <KeyVerificationMethod>{}` (voir `client.dart` du SDK, tag
-        // v0.29.0) — un ensemble VIDE. Conséquence vérifiée dans le SDK réel : côté demande
+        // v0.29.0, inchangé au tag v16.0.2) — un ensemble VIDE. Conséquence vérifiée dans le SDK réel : côté demande
         // entrante, `KeyVerification.handlePayload(request)` calcule
         // `possibleMethods = payload['methods'].intersect(client.verificationMethods)` ; vide,
         // il annule immédiatement en `m.unknown_method` AVANT d'atteindre l'état `askAccept` —
@@ -182,8 +164,8 @@ class _MurmureAppState extends State<MurmureApp> {
       );
       await client.init(waitForFirstSync: false, waitUntilLoadCompletedLoaded: true);
 
-      // CRITIQUE (vérifié dans matrix-dart-sdk 0.29.x, `Client.init`) : si libolm ne se charge pas,
-      // le SDK journalise l'erreur, met `encryption = null` et CONTINUE — `encryptionEnabled`
+      // CRITIQUE (vérifié dans matrix-dart-sdk v16.0.2, `Client.init`) : si vodozemac n'est pas
+      // initialisé (ou si `Encryption` lève), le SDK met `encryption = null` et CONTINUE — `encryptionEnabled`
       // devient faux et les messages partiraient en clair, sans aucune erreur visible. Fail closed :
       // une session connectée sans chiffrement fonctionnel ne démarre jamais.
       if (client.isLogged() && !client.encryptionEnabled) {
@@ -317,7 +299,7 @@ class _Home extends StatelessWidget {
         if (!loggedIn) {
           return OnboardingScreen(client: client);
         }
-        // Même garde-fou que dans `_boot` (libolm absent => SDK silencieusement sans chiffrement),
+        // Même garde-fou que dans `_boot` (vodozemac absent => SDK silencieusement sans chiffrement),
         // couvrant aussi la session ouverte juste après l'inscription, qui ne repasse pas par
         // `_boot`. Rien n'est envoyable tant que ce test échoue.
         if (!client.encryptionEnabled) {
@@ -329,7 +311,7 @@ class _Home extends StatelessWidget {
   }
 }
 
-/// Session connectée mais chiffrement de bout en bout indisponible (libolm non chargé) : on
+/// Session connectée mais chiffrement de bout en bout indisponible (vodozemac non initialisé) : on
 /// refuse de démarrer plutôt que d'envoyer en clair. Message volontairement neutre à l'écran.
 class _EncryptionUnavailable implements Exception {
   const _EncryptionUnavailable();

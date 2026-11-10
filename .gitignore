@@ -31,9 +31,6 @@ android/captures/
 # macOS
 .DS_Store
 
-# libolm compilée par scripts/build_libolm.sh (CI, avant `flutter build`) : jamais versionnée.
-android/app/src/main/jniLibs/**/*.so
-
 # Copies locales générées par scripts/server/deploy.sh (jeton d'inscription, secret TURN) : les
 # modèles suivis par git (conduit.toml, coturn/turnserver.conf) ne sont plus jamais modifiés.
 scripts/server/conduit.local.toml

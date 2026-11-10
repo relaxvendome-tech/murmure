@@ -631,8 +631,8 @@ class _AddContactScreenState extends State<AddContactScreen> {
   }
 }
 
-/// Conversation chiffrée (Olm/Megolm via libolm, géré en interne par le SDK Matrix — voir le
-/// commentaire détaillé dans main.dart sur le choix libolm/flutter_olm à cette version du SDK).
+/// Conversation chiffrée (Olm/Megolm via vodozemac, géré en interne par le SDK Matrix — voir le
+/// commentaire détaillé dans main.dart sur vodozemac et le refus de démarrer sans chiffrement).
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.room, required this.callManager});
   final Room room;
