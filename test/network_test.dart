@@ -66,7 +66,7 @@ void main() {
       expect(withHomeserver(Uri.parse('https://')).isConfigured, isFalse);
     });
 
-    test('faux pour le homeserver invalide par défaut de NetConfig.load()', () {
+    test('vrai pour le homeserver invalide par défaut de NetConfig.load() (hôte présent)', () {
       // Uri.parse('https://invalid.invalid') a bien un hôte ("invalid.invalid") : ce n'est pas
       // isConfigured qui protège contre ce cas-là mais canReach(), qui échouera simplement à
       // joindre ce nom. On fige ici le comportement réel plutôt que celui qu'on pourrait

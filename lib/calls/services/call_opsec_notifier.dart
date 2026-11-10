@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../account.dart';
+import '../../lock.dart';
 
 /// MISE À JOUR (Google Play) : en mode discret, le texte est désormais NEUTRE (« Rappel —
 /// Nouvelle activité. ») au lieu d'imiter une calculatrice, pour ne pas enfreindre la policy
@@ -65,20 +66,42 @@ class CallOpsecNotifier {
   static const _honestRingChannelId = 'murmure_incoming_calls';
   static const _ringingNotificationId = 4144;
 
+  /// Tous les identifiants de canaux d'appel connus de ce fichier : canaux actuels puis anciens
+  /// (supprimés par [init]). Exposé pour qu'un autre module (purge globale, tests) n'ait pas à
+  /// dupliquer ces chaînes.
+  static const List<String> allChannelIds = <String>[
+    _calcChannelId,
+    _honestChannelId,
+    _calcRingChannelId,
+    _honestRingChannelId,
+    ..._legacyChannelIds,
+  ];
+
   static final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
 
-  /// À appeler une fois au démarrage (voir `main.dart`). Best-effort : une notification ratée ne
-  /// doit jamais faire planter l'appli, seulement priver l'utilisateur de ce confort.
-  static Future<void> init() async {
-    if (_initialized) return;
+  static Future<void>? _initFuture;
+
+  /// À appeler une fois au démarrage, dans `main()` avant `runApp` : initialise le plugin et
+  /// purge les anciens canaux, SANS demander la permission POST_NOTIFICATIONS (une boîte de
+  /// dialogue système par-dessus l'écran de verrou/calculatrice trahirait l'appli — voir
+  /// [requestPermission], appelée après déverrouillage). Idempotent et sûr en appels
+  /// concurrents (un seul `initialize`). Best-effort : ne lève jamais.
+  static Future<void> init() {
+    if (_initialized) return Future<void>.value();
+    return _initFuture ??= _doInit();
+  }
+
+  static Future<void> _doInit() async {
     try {
       await _plugin.initialize(const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       ));
+      // Prêt dès que le plugin est initialisé : la purge des anciens canaux ci-dessous n'est
+      // qu'un nettoyage et ne doit pas retarder ni empêcher les notifications.
+      _initialized = true;
       final android = _plugin
           .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-      await android?.requestNotificationsPermission();
       for (final id in _legacyChannelIds) {
         try {
           await android?.deleteNotificationChannel(id);
@@ -86,16 +109,40 @@ class CallOpsecNotifier {
           // Best-effort, canal déjà absent ou API indisponible.
         }
       }
-      _initialized = true;
     } catch (_) {
       // Pas de notification possible sur cet appareil/cette version d'Android : tant pis, le
-      // reste de l'appli (et le fail-closed de CallPolicy) n'en dépend pas.
+      // reste de l'appli (et le fail-closed de CallPolicy) n'en dépend pas. On autorise une
+      // nouvelle tentative au prochain appel.
+      if (!_initialized) _initFuture = null;
     }
   }
 
-  static Future<void> notifyMissedCall() async {
+  /// Demande POST_NOTIFICATIONS (Android 13+). À appeler APRÈS un déverrouillage réussi, jamais
+  /// avant : la boîte de dialogue système nomme l'appli réelle. Initialise d'abord le plugin si
+  /// nécessaire. Best-effort : ne lève jamais.
+  static Future<void> requestPermission() async {
+    await init();
     if (!_initialized) return;
-    final calcMode = await Account.read('calc_mode') == '1';
+    try {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await android?.requestNotificationsPermission();
+    } catch (_) {
+      // Permission refusée ou API indisponible : les notifications resteront muettes.
+    }
+  }
+
+  /// Garantit que le plugin est prêt avant un `show` : si [init] a été lancé sans être attendu
+  /// (ou pas lancé du tout), on l'attend ici plutôt que de perdre la notification.
+  static Future<bool> _ensureReady() async {
+    if (_initialized) return true;
+    await init();
+    return _initialized;
+  }
+
+  static Future<void> notifyMissedCall() async {
+    if (!await _ensureReady()) return;
+    final calcMode = await AppLock.calcMode();
     try {
       if (calcMode) {
         await _plugin.show(
@@ -155,8 +202,8 @@ class CallOpsecNotifier {
   /// LIMITE HONNÊTE : le son d'un canal Android est figé à sa création ; le rendu réel (sonnerie,
   /// boucle, Ne pas déranger) n'a pas été vérifié sur un appareil depuis ce bac à sable.
   static Future<void> notifyIncomingCall() async {
-    if (!_initialized) return;
-    final calcMode = await Account.read('calc_mode') == '1';
+    if (!await _ensureReady()) return;
+    final calcMode = await AppLock.calcMode();
     try {
       if (calcMode) {
         await _plugin.show(

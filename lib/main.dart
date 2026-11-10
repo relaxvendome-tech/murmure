@@ -9,6 +9,7 @@ import 'calls/services/call_manager.dart';
 import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
 import 'ephemeral.dart';
+import 'lock.dart';
 import 'media.dart';
 import 'message_notifier.dart';
 import 'mesh/mesh_opsec_notifier.dart';
@@ -53,10 +54,11 @@ Future<void> main() async {
   // WebRTC (migrations VoIP des versions 2.0.0 à 6.1.0) qu'il serait irresponsable de faire à
   // l'aveugle, sans compilateur Flutter local pour les valider un par un.
   await purgeMediaCache(); // nettoie les restes d'une lecture de média interrompue
-  // CallOpsecNotifier.init() n'est PLUS appelé ici : il demande POST_NOTIFICATIONS, et une
-  // fenêtre système de permission avant même l'onboarding (ou par-dessus l'écran de verrou) est à
-  // la fois mauvaise pour l'UX et révélatrice en mode discret. Appelé après l'onboarding et le
-  // premier déverrouillage, voir [_PostUnlockInit].
+  // Initialise le plugin de notifications d'appel et purge les anciens canaux, SANS demander la
+  // permission POST_NOTIFICATIONS : une fenêtre système avant l'onboarding (ou par-dessus l'écran
+  // de verrou) serait mauvaise pour l'UX et révélatrice en mode discret. La demande est faite
+  // après l'onboarding et le premier déverrouillage, voir [_PostUnlockInit]. Best-effort.
+  await CallOpsecNotifier.init();
   await MessageNotifier.init(); // notifications de nouveaux messages (sans contenu), best-effort
   // Trouvé en audit interne (revue multi-IA croisée) : sans cet appel, un message reçu en mode
   // maillé Bluetooth (voir mesh/mesh.dart) n'était signalé que si `MeshScreen` était déjà ouvert
@@ -81,6 +83,10 @@ class _MurmureAppState extends State<MurmureApp> {
   VerificationManager? _verificationManager;
   bool _booting = true;
   bool _bootError = false;
+
+  /// Échec de démarrage dû à une panne Keystore ([KeystoreUnavailable]) : rien n'a été écrit ni
+  /// supprimé ; « Réessayer » bouclerait dans le même processus (bascule collante du plugin).
+  bool _keystoreDown = false;
 
   @override
   void initState() {
@@ -213,13 +219,14 @@ class _MurmureAppState extends State<MurmureApp> {
         _verificationManager = verificationManager;
         _booting = false;
       });
-    } catch (_) {
+    } catch (e) {
       // Jamais le texte de l'exception à l'écran : cet écran s'affiche AVANT le verrou (il n'y a
       // pas encore de client pour construire LockGate), donc lisible par quiconque tient le
       // téléphone — un chemin de fichier, une adresse de serveur ou un identifiant y fuiraient.
       if (!mounted) return;
       setState(() {
         _bootError = true;
+        _keystoreDown = e is KeystoreUnavailable;
         _booting = false;
       });
     }
@@ -244,16 +251,34 @@ class _MurmureAppState extends State<MurmureApp> {
       theme: murmureTheme(brightness: Brightness.light),
       darkTheme: murmureTheme(brightness: Brightness.dark),
       themeMode: ThemeMode.system,
+      // Écran opaque PAR-DESSUS toutes les routes (pas seulement LockGate, simple `home:`) quand
+      // l'appli passe en `inactive`/`hidden`/arrière-plan avec un code actif : voir
+      // [AppLock.obscured] et `LockGate.didChangeAppLifecycleState`. Noir uni, neutre en mode
+      // discret comme en mode normal.
+      builder: (context, child) => ValueListenableBuilder<bool>(
+        valueListenable: AppLock.obscured,
+        child: child,
+        builder: (context, obscured, child) => Stack(
+          alignment: Alignment.topLeft,
+          fit: StackFit.expand,
+          children: [
+            if (child != null) child,
+            if (obscured) const ColoredBox(color: Colors.black),
+          ],
+        ),
+      ),
       home: _booting
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
           : _bootError
-              ? _BootErrorScreen(onRetry: () {
-                  setState(() {
-                    _booting = true;
-                    _bootError = false;
-                  });
-                  _boot();
-                })
+              ? _keystoreDown
+                  ? const _BootErrorScreen(relaunchOnly: true)
+                  : _BootErrorScreen(onRetry: () {
+                      setState(() {
+                        _booting = true;
+                        _bootError = false;
+                      });
+                      _boot();
+                    })
               : LockGate(
                   onWiped: _panic,
                   callManager: _callManager!,
@@ -312,7 +337,8 @@ class _EncryptionUnavailable implements Exception {
 
 /// Tâches à ne lancer qu'une fois l'onboarding terminé ET l'appli déverrouillée (ce widget n'est
 /// construit que sous LockGate, une fois connecté) : demande de permission de notifications
-/// (POST_NOTIFICATIONS, via [CallOpsecNotifier.init]). Une seule fois par processus.
+/// (POST_NOTIFICATIONS, via [CallOpsecNotifier.requestPermission] ; le plugin lui-même est
+/// initialisé sans demande dans `main()`). Une seule fois par processus.
 class _PostUnlockInit extends StatefulWidget {
   const _PostUnlockInit({required this.child});
   final Widget child;
@@ -331,7 +357,7 @@ class _PostUnlockInitState extends State<_PostUnlockInit> {
     _done = true;
     // Après le premier rendu : la fenêtre système ne doit pas interrompre la construction.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      CallOpsecNotifier.init(); // best-effort, ne lève jamais (voir cette méthode)
+      CallOpsecNotifier.requestPermission(); // best-effort, voir cette méthode
     });
   }
 
@@ -340,14 +366,28 @@ class _PostUnlockInitState extends State<_PostUnlockInit> {
 }
 
 class _BootErrorScreen extends StatelessWidget {
-  const _BootErrorScreen({this.onRetry});
+  const _BootErrorScreen({this.onRetry, this.relaunchOnly = false});
 
   /// Nul quand réessayer ne peut rien changer dans cette session (chiffrement indisponible après
   /// inscription) : l'appli doit être relancée.
   final VoidCallback? onRetry;
 
+  /// Panne Keystore ([KeystoreUnavailable]) : écran neutre, seul message « relancez », pas de
+  /// « Réessayer » (il bouclerait dans le même processus).
+  final bool relaunchOnly;
+
   @override
   Widget build(BuildContext context) {
+    if (relaunchOnly) {
+      return const Scaffold(
+        body: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(kRelaunchMessage, textAlign: TextAlign.center),
+          ),
+        ),
+      );
+    }
     return Scaffold(
       body: Center(
         child: Padding(
@@ -359,6 +399,17 @@ class _BootErrorScreen extends StatelessWidget {
               const SizedBox(height: 12),
               const Text('Démarrage impossible. Réessayez.',
                   textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold)),
+              // Raison d'un échec bloquant connu (ex. inscription annulée faute de chiffrement,
+              // voir [Account.register]) : texte fixe, jamais un message d'exception brut.
+              ValueListenableBuilder<String?>(
+                valueListenable: fatalErrorReason,
+                builder: (context, reason, _) => reason == null
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(reason, textAlign: TextAlign.center),
+                      ),
+              ),
               if (onRetry != null) ...[
                 const SizedBox(height: 16),
                 FilledButton(onPressed: onRetry, child: const Text('Réessayer')),

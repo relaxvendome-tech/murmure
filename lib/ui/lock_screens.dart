@@ -39,16 +39,19 @@ class LockGate extends StatefulWidget {
 class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   bool? _unlocked; // null = en cours de vérification du réglage « verrou activé »
   bool _calcMode = false;
-  DateTime? _backgroundedAt;
 
   /// Dernier état connu « code PIN activé » (mémorisé par [_init]/[_relock]) : permet de masquer
   /// le contenu de façon SYNCHRONE au retour au premier plan, sans attendre la lecture Keystore de
   /// [_relock] — sinon la conversation ouverte restait brièvement visible avant le verrou.
   bool _pinEnabled = false;
 
-  /// Échec de lecture du réglage au démarrage (Keystore indisponible…) : écran d'erreur avec
-  /// bouton « Réessayer » plutôt qu'un splash bloqué indéfiniment.
+  /// Échec de lecture du réglage au démarrage : écran d'erreur (verrouillé) plutôt qu'un splash
+  /// bloqué indéfiniment.
   bool _initFailed = false;
+
+  /// L'échec vient d'une panne Keystore ([KeystoreUnavailable]) : réessayer dans le même
+  /// processus est inutile (bascule collante du plugin), l'écran demande de relancer l'appli.
+  bool _keystoreDown = false;
 
   /// Vrai si un `didChangeAppLifecycleState(resumed)` a dépassé [kRelockAfter] PENDANT qu'un
   /// appel était actif (voir [_relock]) : le reverrouillage n'a donc pas été appliqué sur le
@@ -69,7 +72,15 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.callManager.activeCallListenable.removeListener(_onActiveCallChanged);
+    AppLock.obscured.value = false;
     super.dispose();
+  }
+
+  /// Aucun code : l'appli est ouverte, un appel entrant arrivé pendant la vérification (non
+  /// affiché tant que [AppLock.isUnlocked] était faux) doit être présenté.
+  void _presentPendingCallAfterFrame() {
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => widget.callManager.delegate.presentPendingCall());
   }
 
   void _onActiveCallChanged() {
@@ -84,19 +95,24 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
     if (_initFailed) setState(() => _initFailed = false);
     try {
       final enabled = await AppLock.enabled();
-      final calc = await Account.read('calc_mode');
+      final calc = await AppLock.calcMode();
       if (!mounted) return;
       _pinEnabled = enabled;
       setState(() {
-        _calcMode = calc == '1';
+        _calcMode = calc;
         _unlocked = !enabled;
       });
       AppLock.isUnlocked = !enabled;
-    } catch (_) {
-      // Échec fermé : l'appli reste verrouillée (isUnlocked == false) et propose de réessayer.
+      if (!enabled) _presentPendingCallAfterFrame();
+    } catch (e) {
+      // Échec fermé : l'appli reste verrouillée (isUnlocked == false). Panne Keystore (code
+      // configuré mais illisible) : pas de « Réessayer », qui bouclerait dans le même processus.
       AppLock.isUnlocked = false;
       if (!mounted) return;
-      setState(() => _initFailed = true);
+      setState(() {
+        _initFailed = true;
+        _keystoreDown = e is KeystoreUnavailable;
+      });
     }
   }
 
@@ -120,30 +136,52 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   // descendant, jamais en remontant vers `resumed`.
   //
   // Trouvé en audit interne (contournement du verrou par appel entrant) : l'instant de mise en
-  // arrière-plan est maintenant AUSSI publié dans [AppLock.backgroundedAt], pour que
-  // [AppLock.isUnlocked] devienne `false` dès [kRelockAfter] écoulé EN ARRIÈRE-PLAN — et non
+  // arrière-plan est maintenant tenu par [AppLock] lui-même ([AppLock.markBackgrounded]), pour
+  // que [AppLock.isUnlocked] devienne `false` dès [kRelockAfter] écoulé EN ARRIÈRE-PLAN — et non
   // seulement au retour au premier plan. Au `resumed`, l'horodatage est consommé (remis à
   // `null`) : un `resumed` sans `paused` préalable (volet de notifications, boîte de dialogue
   // système) ne peut donc jamais reverrouiller sur la base d'un ancien horodatage.
+  //
+  // Trouvé en audit interne (contournement du reverrouillage en reculant l'horloge) : l'écart
+  // était mesuré à l'heure murale seule, réglable par l'utilisateur. La mesure est maintenant
+  // faite par [AppLock.markBackgrounded]/[AppLock.markForeground]/[AppLock.backgroundExpired]
+  // (heure murale + chronomètre monotone, source unique — plus de `_backgroundedAt` dupliqué ici).
+  //
+  // Trouvé en audit interne (aperçu de la dernière conversation) : dès `inactive`/`hidden`, quand
+  // un code est actif et l'appli ouverte, un écran opaque ([AppLock.obscured], dessiné par
+  // `MaterialApp.builder` dans main.dart, donc PAR-DESSUS toutes les routes) masque le contenu —
+  // la vignette des applis récentes et le retour au premier plan ne montrent plus la conversation
+  // avant le verrou. Retiré à `resumed` si le délai n'est pas écoulé ; sinon le verrou prend le
+  // relais (l'écran opaque reste jusqu'à ce que [_lockSync] ait affiché l'écran de verrou).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.hidden) {
+      if (_unlocked == true && (_pinEnabled || AppLock.lastKnownEnabled)) {
+        AppLock.obscured.value = true;
+      }
+      return;
+    }
     if (state == AppLifecycleState.paused) {
-      final now = DateTime.now();
-      _backgroundedAt = now;
-      AppLock.backgroundedAt = now;
+      AppLock.markBackgrounded();
+      if (_unlocked == true && (_pinEnabled || AppLock.lastKnownEnabled)) {
+        AppLock.obscured.value = true;
+      }
     } else if (state == AppLifecycleState.resumed) {
-      final since = _backgroundedAt;
-      _backgroundedAt = null;
-      AppLock.backgroundedAt = null;
-      if (since == null || DateTime.now().difference(since) <= kRelockAfter) return;
+      final expired = AppLock.markForeground();
+      if (!expired) {
+        AppLock.obscured.value = false;
+        return;
+      }
       // Report du verrou UNIQUEMENT pour un appel réellement en cours (micro ouvert) et si
       // l'appli était déverrouillée : ne jamais raccrocher un appel décroché pour reverrouiller.
       // Un appel qui sonne seulement, ou une appli déjà verrouillée, ne retarde rien.
       if (_unlocked == true && widget.callManager.delegate.hasLiveCall) {
         _relockPendingCallEnd = true;
+        AppLock.obscured.value = false; // l'écran d'appel en cours doit rester visible
         return;
       }
       _lockSync();
+      AppLock.obscured.value = false; // l'écran de verrou est maintenant ce qui est affiché
       unawaited(_relock());
     }
   }
@@ -216,26 +254,31 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
   Future<void> _relock() async {
     AppLock.isUnlocked = false;
     bool enabled;
-    String? calc;
+    bool calc;
     try {
       enabled = await AppLock.enabled();
-      calc = await Account.read('calc_mode');
-    } catch (_) {
-      // Keystore illisible : on garde le dernier état connu (verrouillé si un code existait).
-      enabled = _pinEnabled || AppLock.lastKnownEnabled;
-      calc = _calcMode ? '1' : '0';
+      calc = await AppLock.calcMode();
+    } catch (e) {
+      // Échec FERMÉ : panne Keystore avérée, ou tout indice qu'un code existe (état mémorisé,
+      // marqueur fichier) => verrouillé. Mode discret conservé s'il était actif ou marqué.
+      enabled = e is KeystoreUnavailable ||
+          _pinEnabled ||
+          AppLock.lastKnownEnabled ||
+          await AppLock.lockMarkerPresent();
+      calc = _calcMode || await Account.markerExists(Account.kCalcOnMarker);
     }
     if (!mounted) return;
     _pinEnabled = enabled;
     if (!enabled) {
       AppLock.isUnlocked = true; // relock annulé : rien n'est verrouillé, on restaure l'état réel.
       if (_unlocked != true) setState(() => _unlocked = true);
+      _presentPendingCallAfterFrame();
       return;
     }
     final nav = Navigator.of(context);
     if (nav.canPop()) nav.popUntil((route) => route.isFirst);
     setState(() {
-      _calcMode = calc == '1';
+      _calcMode = calc;
       _unlocked = false;
     });
   }
@@ -263,7 +306,9 @@ class _LockGateState extends State<LockGate> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    if (_initFailed) return _InitError(onRetry: () => unawaited(_init()));
+    if (_initFailed) {
+      return _InitError(onRetry: _keystoreDown ? null : () => unawaited(_init()));
+    }
     if (_unlocked == null) return const _Splash();
     if (_unlocked == true) return widget.child;
     if (_calcMode) {
@@ -286,17 +331,29 @@ class _Splash extends StatelessWidget {
   Widget build(BuildContext context) => const Scaffold(body: Center(child: CircularProgressIndicator()));
 }
 
+/// Message neutre affiché sur panne Keystore ([KeystoreUnavailable]) : rien sur l'appli ni sur
+/// la cause, et pas de « Réessayer » (la bascule du plugin est collante pour le processus).
+const kRelaunchMessage = 'Fermez complètement l\'appli puis relancez-la.';
+
 class _InitError extends StatelessWidget {
-  const _InitError({required this.onRetry});
-  final VoidCallback onRetry;
+  const _InitError({this.onRetry});
+
+  /// Nul sur panne Keystore : seule une relance complète de l'appli peut aider.
+  final VoidCallback? onRetry;
   @override
   Widget build(BuildContext context) => Scaffold(
         body: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Text('Erreur, réessayez'),
-            const SizedBox(height: 16),
-            FilledButton(onPressed: onRetry, child: const Text('Réessayer')),
-          ]),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(onRetry == null ? kRelaunchMessage : 'Erreur, réessayez',
+                  textAlign: TextAlign.center),
+              if (onRetry != null) ...[
+                const SizedBox(height: 16),
+                FilledButton(onPressed: onRetry, child: const Text('Réessayer')),
+              ],
+            ]),
+          ),
         ),
       );
 }
@@ -352,7 +409,7 @@ class _PinScreenState extends State<PinScreen> {
     // réglage (avant que [LockGate._relock] n'ait relu `calc_mode`) : le prompt trahirait l'appli.
     final bool offered;
     try {
-      offered = (await Account.read('calc_mode')) != '1' &&
+      offered = !await AppLock.calcMode() &&
           await Biometric.enabled() &&
           await AppLock.enabled() &&
           await Biometric.available();
@@ -393,6 +450,10 @@ class _PinScreenState extends State<PinScreen> {
             return;
           }
           if (!mounted || _busy) return;
+          // Un déverrouillage légitime remet le compteur d'échecs du PIN à zéro, comme un PIN
+          // juste (voir [AppLock.check]).
+          await AppLock.resetFailures();
+          if (!mounted) return;
           widget.onSuccess?.call();
         case BioResult.fallback:
           break; // retour silencieux au PIN
@@ -429,13 +490,15 @@ class _PinScreenState extends State<PinScreen> {
     setState(() => _busy = true);
     try {
       await _handleSubmit();
-    } catch (_) {
+    } catch (e) {
       // Keystore/isolat indisponible, etc. : ne jamais laisser l'écran bloqué en « occupé ».
+      // [AppLock.check] lève [KeystoreUnavailable] AVANT tout comptage d'échec : aucune tentative
+      // n'est consommée ; seule une relance complète de l'appli peut alors aider.
       if (!mounted) return;
       setState(() {
         _busy = false;
         _pin = '';
-        _error = 'Erreur, réessayez';
+        _error = e is KeystoreUnavailable ? kRelaunchMessage : 'Erreur, réessayez';
       });
     }
   }
@@ -676,16 +739,32 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
   }
 
   Future<void> _load() async {
-    final enabled = await AppLock.enabled();
-    final duress = await AppLock.hasDuress();
-    final calc = await Account.read('calc_mode');
-    final bio = await Biometric.enabled();
-    final bioAvail = enabled && await Biometric.available();
+    final bool enabled;
+    final bool duress;
+    final bool calc;
+    final bool bio;
+    final bool bioAvail;
+    try {
+      enabled = await AppLock.enabled();
+      duress = await AppLock.hasDuress();
+      calc = await AppLock.calcMode();
+      bio = await Biometric.enabled();
+      bioAvail = enabled && await Biometric.available();
+    } catch (e) {
+      // Panne Keystore : aucune modification de réglage ne doit être tentée (elle écraserait les
+      // vraies valeurs au lancement suivant). On referme l'écran avec un message neutre.
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      Navigator.of(context).maybePop();
+      messenger?.showSnackBar(SnackBar(
+          content: Text(e is KeystoreUnavailable ? kRelaunchMessage : 'Erreur, réessayez')));
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _pinEnabled = enabled;
       _hasDuress = duress;
-      _calcMode = calc == '1';
+      _calcMode = calc;
       _bioEnabled = bio && enabled;
       _bioAvailable = bioAvail;
       _loading = false;
@@ -720,7 +799,7 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                 // retrouverait donc à exposer la messagerie en clair au premier appui, sans le
                 // savoir. On efface donc calc_mode AVANT de supprimer le code.
                 if (_calcMode) {
-                  await Account.write('calc_mode', '0');
+                  await AppLock.setCalcMode(false);
                 }
                 await AppLock.disable();
                 await _load();
@@ -788,7 +867,7 @@ class _LockSettingsScreenState extends State<LockSettingsScreen> {
                   'L\'icône de l\'appli reste toujours « Murmure ».'),
               value: _calcMode,
               onChanged: (v) async {
-                await Account.write('calc_mode', v ? '1' : '0');
+                await AppLock.setCalcMode(v);
                 await _load();
               },
             ),

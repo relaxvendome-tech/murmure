@@ -40,3 +40,24 @@ tiers, ou mise en production.
 
 **Ne pas distribuer l'APK à des tiers (au-delà de tests internes directement contrôlés) tant que
 cette question n'est pas tranchée.**
+
+## Composants tiers embarqués dans le binaire
+
+### libolm 3.2.16 — Apache License 2.0
+
+`android/app/src/main/jniLibs/<abi>/libolm.so` est compilée par `scripts/build_libolm.sh` depuis le
+tag `3.2.16` du dépôt officiel `https://gitlab.matrix.org/matrix-org/olm` (commit
+`7e0c8277032e40308987257b711b38af8d77cc69`, vérifié par le script), et livrée dans l'APK/AAB.
+libolm est publiée sous **Apache License 2.0** (fichier `LICENSE` du dépôt source ; en-têtes
+« Copyright 2015-2016 OpenMarket Ltd », « Copyright 2018-2019 New Vector Ltd », constatés sur la
+3.2.15, à reconfirmer sur la 3.2.16 ; pas de fichier NOTICE dans la 3.2.15). Obligations lors de la
+distribution : fournir une copie de la licence Apache-2.0 et conserver ces mentions de copyright
+(à reprendre dans l'écran « Licences » de l'appli ou un fichier livré avec elle — **non encore
+fait côté appli**, à prévoir avant distribution). Aucune modification n'est apportée au code de
+libolm (seules les options de compilation diffèrent). Apache-2.0 est compatible avec une
+distribution sous AGPL-3.0 (voir plus haut) ; elle ne règle pas, à elle seule, la question de
+licence de Murmure.
+
+libolm est dépréciée en amont au profit de vodozemac : la migration vers une version de `matrix`
+basée sur vodozemac reste un chantier séparé.
+

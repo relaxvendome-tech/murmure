@@ -45,6 +45,13 @@ jobs:
           echo "Release Play : $MURMURE_REQUIRE_RELEASE_SIGNING (ref=$GITHUB_REF, event=$GITHUB_EVENT_NAME)"
           echo "versionCode : $((100 + GITHUB_RUN_NUMBER))"
 
+      - name: Compiler libolm 3.2.16 (alignée 16 Ko, commit source vérifié)
+        # Remplace flutter_olm 2.0.0, dont le libolm.so était aligné 4 Ko (refusé par Play). Le
+        # script clone le tag officiel, ÉCHOUE si le commit diffère du hash épinglé, compile pour
+        # arm64-v8a/armeabi-v7a/x86_64 avec le NDK 28.2.13676358 (installé si absent), puis vérifie
+        # SONAME (libolm.so), alignement LOAD >= 0x4000 et symboles exportés de chaque .so.
+        run: bash scripts/build_libolm.sh
+
       - name: Installer les dépendances
         run: flutter pub get
 
@@ -126,9 +133,29 @@ jobs:
       - name: Construire l'APK universel (installation manuelle sur tablette de test)
         run: flutter build apk --release --build-number=$((100 + GITHUB_RUN_NUMBER))
 
+      - name: Vérifier la présence de libolm.so (AAB et APK, 3 ABI)
+        # Sans libolm.so, package:olm ne peut pas s'initialiser et l'appli refuse de démarrer :
+        # ÉCHEC pour tout build (développement comme release), jamais un simple avertissement.
+        run: |
+          aab=build/app/outputs/bundle/release/app-release.aab
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          aab_list="$(unzip -Z1 "$aab")"
+          apk_list="$(unzip -Z1 "$apk")"
+          missing=""
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            grep -qx "base/lib/$abi/libolm.so" <<<"$aab_list" || missing="$missing AAB:$abi"
+            grep -qx "lib/$abi/libolm.so" <<<"$apk_list" || missing="$missing APK:$abi"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::libolm.so absente :$missing (voir l'étape « Compiler libolm »)."
+            exit 1
+          fi
+          echo "OK : libolm.so présente pour arm64-v8a, armeabi-v7a, x86_64 dans l'AAB et l'APK."
+
       - name: Vérifier l'alignement 16 Ko des bibliothèques natives (arm64-v8a, x86_64)
         # Google Play exige des .so alignés sur des pages de 16 Ko (Android 15+). ÉCHEC pour une
-        # release Play, simple avertissement pour un build de développement.
+        # release Play, simple avertissement pour un build de développement. libolm.so (compilée
+        # par scripts/build_libolm.sh avec -z max-page-size=16384) doit désormais passer.
         run: |
           apk=build/app/outputs/flutter-apk/app-release.apk
           test -f "$apk" || { echo "::error::APK introuvable : $apk"; exit 1; }

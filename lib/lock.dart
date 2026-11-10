@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'dart:isolate';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show ValueNotifier;
 
 import 'account.dart';
+export 'account.dart' show KeystoreUnavailable;
 import 'config.dart' show kRelockAfter;
 import 'mesh/mesh_crypto.dart' show meshB64, meshUnB64, randomBytes;
 
@@ -82,43 +84,137 @@ class AppLock {
   /// retour au premier plan. Un appel entrant arrivant téléphone en poche, bien après
   /// [kRelockAfter], voyait donc encore l'appli « déverrouillée » et poussait l'écran d'appel
   /// par-dessus un verrou qui aurait dû être actif. [isUnlocked] est maintenant un getter qui
-  /// renvoie `false` dès que l'appli est en arrière-plan ([backgroundedAt], tenu à jour par
-  /// [LockGate]) depuis plus de [kRelockAfter], quel que soit l'état de session mémorisé.
+  /// renvoie `false` dès que l'appli est en arrière-plan depuis plus de [kRelockAfter]
+  /// ([backgroundExpired], tenu à jour par [LockGate] via [markBackgrounded]/[markForeground]),
+  /// quel que soit l'état de session mémorisé.
   static bool _sessionUnlocked = false;
 
-  /// Instant du passage en arrière-plan (`AppLifecycleState.paused`), `null` au premier plan.
-  /// Maintenu exclusivement par [LockGate].
-  static DateTime? backgroundedAt;
+  /// Heure murale du passage en arrière-plan (`AppLifecycleState.paused`), `null` au premier plan.
+  static DateTime? _bgWall;
 
-  static bool get isUnlocked {
-    final since = backgroundedAt;
-    if (since != null && DateTime.now().difference(since) > kRelockAfter) return false;
-    return _sessionUnlocked;
+  /// Chronomètre MONOTONE démarré au passage en arrière-plan. Trouvé en audit interne
+  /// (contournement du reverrouillage) : avec la seule heure murale, reculer l'horloge du
+  /// téléphone pendant que l'appli est en arrière-plan rendait l'écart mesuré négatif ou minuscule,
+  /// et l'appli se rouvrait sans code. Le `Stopwatch` Dart repose sur une horloge monotone que
+  /// l'utilisateur ne peut pas régler. LIMITE : sur Android, cette horloge (CLOCK_MONOTONIC) ne
+  /// progresse pas pendant la veille profonde ; l'heure murale couvre ce cas, et un recul d'horloge
+  /// est détecté (écart négatif). Seul un recul d'horloge plus petit que la durée passée en veille
+  /// profonde reste indétectable sans `SystemClock.elapsedRealtime()` (canal natif).
+  static Stopwatch? _bgWatch;
+
+  /// À appeler au passage en arrière-plan (`paused`). Maintenu exclusivement par [LockGate].
+  static void markBackgrounded() {
+    _bgWall = DateTime.now();
+    _bgWatch = Stopwatch()..start();
   }
+
+  /// À appeler au retour au premier plan (`resumed`) : renvoie [backgroundExpired] tel qu'il
+  /// était à cet instant, puis oublie l'horodatage (un `resumed` sans `paused` préalable — volet
+  /// de notifications, boîte de dialogue système — ne peut donc jamais reverrouiller sur la base
+  /// d'un ancien horodatage).
+  static bool markForeground() {
+    final expired = backgroundExpired;
+    _bgWall = null;
+    _bgWatch = null;
+    return expired;
+  }
+
+  /// Vrai si l'appli est en arrière-plan (depuis [markBackgrounded], jusqu'à [markForeground])
+  /// depuis plus de [kRelockAfter] : heure murale négative (horloge reculée) OU au-delà du délai,
+  /// OU chronomètre monotone au-delà du délai.
+  static bool get backgroundExpired {
+    final wall = _bgWall;
+    if (wall == null) return false;
+    final elapsedWall = DateTime.now().difference(wall);
+    if (elapsedWall.isNegative || elapsedWall > kRelockAfter) return true;
+    final watch = _bgWatch;
+    return watch != null && watch.elapsed > kRelockAfter;
+  }
+
+  static bool get isUnlocked => !backgroundExpired && _sessionUnlocked;
 
   /// État de session (déverrouillé ou non), fixé par [LockGate] uniquement.
   static set isUnlocked(bool value) => _sessionUnlocked = value;
+
+  /// Vrai quand le contenu doit être masqué par un écran opaque (appli en `inactive`/`hidden`/
+  /// arrière-plan alors qu'un code est actif). Tenu par [LockGate], dessiné par-dessus TOUTES les
+  /// routes par `MaterialApp.builder` (main.dart).
+  static final ValueNotifier<bool> obscured = ValueNotifier<bool>(false);
 
   /// Dernière valeur connue de [enabled] (mise à jour à chaque lecture/écriture du code), pour que
   /// [LockGate] puisse masquer le contenu de façon synchrone au retour au premier plan sans
   /// attendre une lecture Keystore.
   static bool lastKnownEnabled = false;
 
+  /// Un code est-il configuré ? Échec FERMÉ sur panne Keystore : si `pin_hash` est lu `null`
+  /// alors que le marqueur fichier [Account.kLockOnMarker] (créé par [setPin], supprimé par
+  /// [disable] et par l'effacement) existe, la valeur est illisible et non absente — on lève
+  /// [KeystoreUnavailable] au lieu de renvoyer `false`, qui aurait ouvert l'appli sans code (voir
+  /// [KeystoreUnavailable] pour le comportement vérifié de flutter_secure_storage).
   static Future<bool> enabled() async {
-    final e = (await Account.read('pin_hash')) != null;
-    lastKnownEnabled = e;
-    return e;
+    final h = await Account.read('pin_hash');
+    if (h == null) {
+      if (await lockMarkerPresent() &&
+          !await Account.markerExists(Account.kWipePendingMarker, onError: false)) {
+        lastKnownEnabled = true;
+        throw const KeystoreUnavailable();
+      }
+      lastKnownEnabled = false;
+      return false;
+    }
+    // Rattrapage des installations antérieures au marqueur (ou d'un [setPin] interrompu).
+    try {
+      await Account.setMarker(Account.kLockOnMarker);
+    } catch (_) {}
+    lastKnownEnabled = true;
+    return true;
+  }
+
+  /// Le marqueur fichier « code configuré » existe (lecture hors Keystore ; `true` si illisible).
+  static Future<bool> lockMarkerPresent() => Account.markerExists(Account.kLockOnMarker);
+
+  /// Mode discret (calculatrice) actif ? Même principe qu'[enabled] avec le marqueur
+  /// [Account.kCalcOnMarker] : lu `null` alors que le marqueur existe => considéré ACTIF (montrer
+  /// la calculatrice ne révèle rien ; montrer l'écran Murmure à la place trahirait l'appli).
+  static Future<bool> calcMode() async {
+    final v = await Account.read('calc_mode');
+    if (v == '1') {
+      try {
+        await Account.setMarker(Account.kCalcOnMarker);
+      } catch (_) {}
+      return true;
+    }
+    if (v == null) return Account.markerExists(Account.kCalcOnMarker);
+    return false;
+  }
+
+  /// Active/désactive le mode discret. Activation : réglage puis marqueur ; désactivation :
+  /// marqueur d'abord (une interruption laisse au pire le mode actif, jamais l'inverse).
+  static Future<void> setCalcMode(bool on) async {
+    if (on) {
+      await Account.write('calc_mode', '1');
+      await Account.setMarker(Account.kCalcOnMarker);
+    } else {
+      await Account.clearMarker(Account.kCalcOnMarker);
+      await Account.write('calc_mode', '0');
+    }
   }
 
   static Future<bool> hasDuress() async => (await Account.read('duress_hash')) != null;
 
-  static Future<String> _salt() async {
-    var s = await Account.read('pin_salt');
-    if (s == null) {
-      s = meshB64(randomBytes(16));
-      await Account.write('pin_salt', s);
-    }
-    return s;
+  /// Sel PBKDF2. Trouvé en audit interne : il était RECRÉÉ dès qu'il était lu `null` — or une
+  /// panne Keystore fait lire `null` sans exception (voir [KeystoreUnavailable]) ; le nouveau sel,
+  /// écrit dans le stockage de repli, écrasait le vrai au lancement suivant et rendait le code
+  /// définitivement invalide (puis effacement après [maxFailures] essais « faux »). Il n'est
+  /// désormais créé que par [setPin] (`create: true`), et seulement si aucun code n'est connu ;
+  /// sinon [KeystoreUnavailable] est levée AVANT tout comptage d'échec.
+  static Future<String> _salt({bool create = false}) async {
+    final s = await Account.read('pin_salt');
+    if (s != null) return s;
+    if (!create || await lockMarkerPresent()) throw const KeystoreUnavailable();
+    final fresh = meshB64(randomBytes(16));
+    await Account.write('pin_salt', fresh);
+    return fresh;
   }
 
   /// Dérivation PBKDF2-SHA256 (120 000 itérations, 256 bits) exécutée dans un isolat séparé :
@@ -152,9 +248,27 @@ class AppLock {
   static bool valid(String pin) => RegExp(r'^\d{4,8}$').hasMatch(pin);
 
   static Future<void> setPin(String pin) async {
-    await Account.write('pin_hash', await _hash(pin, await _salt()));
+    await Account.write('pin_hash', await _hash(pin, await _salt(create: true)));
     await Account.write('pin_fails', '0');
+    // Marqueur APRÈS l'empreinte : s'il ne peut pas être créé, on annule (sans marqueur, une panne
+    // Keystore ouvrirait l'appli sans code). Une interruption entre les deux est rattrapée par
+    // [enabled], qui recrée le marqueur dès qu'il lit l'empreinte.
+    try {
+      await Account.setMarker(Account.kLockOnMarker);
+    } catch (_) {
+      try {
+        await Account.delete('pin_hash');
+      } catch (_) {}
+      rethrow;
+    }
     lastKnownEnabled = true;
+  }
+
+  /// Remet le compteur d'échecs à zéro (déverrouillage biométrique réussi). Best-effort.
+  static Future<void> resetFailures() async {
+    try {
+      await Account.write('pin_fails', '0');
+    } catch (_) {}
   }
 
   /// Le code de contrainte doit différer du code normal (vérifié par l'appelant).
@@ -185,6 +299,10 @@ class AppLock {
   static Future<void> removeDuress() => Account.delete('duress_hash');
 
   static Future<void> disable() async {
+    // Marqueur EN PREMIER : une interruption ensuite laisse `pin_hash` présent (le code reste
+    // actif et le marqueur est recréé par [enabled]) ; l'ordre inverse laisserait un marqueur sans
+    // empreinte, donc un verrou impossible à ouvrir.
+    await Account.clearMarker(Account.kLockOnMarker);
     for (final k in ['pin_hash', 'duress_hash', 'pin_fails', 'bio_enabled']) {
       await Account.delete(k);
     }
@@ -194,9 +312,12 @@ class AppLock {
   static Future<int> remaining() async =>
       maxFailures - (int.tryParse(await Account.read('pin_fails') ?? '0') ?? 0);
 
-  /// Compare un code aux codes enregistrés SANS compter d'échec (écran de réglage, et
-  /// mode calculatrice — voir ui/calculator_lock_screen.dart : un calcul anodin ne doit
-  /// jamais consommer une tentative).
+  /// Compare un code aux codes enregistrés SANS compter d'échec. N'est plus utilisé pour
+  /// déverrouiller : le mode calculatrice passe par [check] (et compte donc les échecs) depuis
+  /// qu'une calculatrice affichée sous le nom « Murmure » ne cache plus qu'il s'agit d'un verrou —
+  /// voir ui/calculator_lock_screen.dart, où seule une saisie ayant la forme d'un code (4 à 8
+  /// chiffres réellement tapés, sans opérateur) est testée, un calcul anodin ne consommant jamais
+  /// de tentative. À réserver à des comparaisons hors déverrouillage (aucun appelant actuel).
   static Future<PinResult> classify(String pin) async {
     final h = await _hash(pin, await _salt());
     final duressHash = await Account.read('duress_hash');
@@ -206,12 +327,19 @@ class AppLock {
     return PinResult.wrong;
   }
 
-  /// Compare un code ET compte les échecs. Utilisé uniquement par l'écran de verrou classique
-  /// (PinScreen), jamais par le mode calculatrice.
+  /// Compare un code ET compte les échecs. Utilisé par l'écran de verrou classique (PinScreen)
+  /// et par le mode calculatrice (voir [classify]).
+  ///
+  /// Lève [KeystoreUnavailable] (sans compter d'échec) si le sel ou l'empreinte est illisible :
+  /// un code juste ne doit jamais être compté faux à cause d'une panne Keystore.
   static Future<PinResult> check(String pin) async {
     final salt = await _salt();
     final h = await _hash(pin, salt);
     final pinHash = await Account.read('pin_hash');
+    if (pinHash == null) {
+      if (await lockMarkerPresent()) throw const KeystoreUnavailable();
+      return PinResult.wrong; // aucun code configuré : rien à comparer, aucun échec compté
+    }
     final duressHash = await Account.read('duress_hash');
     // Le code de contrainte est testé en premier et de la même façon : même durée de calcul.
     if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;

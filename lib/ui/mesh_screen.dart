@@ -283,6 +283,18 @@ class _MeshScreenState extends State<MeshScreen> {
   /// Compose et met en file un message pour [contact] (voir [Mesh.queueMessage]). Le message part
   /// réellement dès le prochain appareil Murmure croisé qui le relaie ou le lui remet directement
   /// — pas forcément tout de suite, c'est le principe même du store-and-forward hors-ligne.
+  ///
+  /// LIMITE DU CLIQUET (200 rangs, voir `Mesh._maxRatchetSkipAhead` dans mesh.dart) : si plus de
+  /// 200 messages écrits pour un contact ne lui parviennent jamais (perdus, expirés après 72 h,
+  /// évincés des files de relais), le message suivant qui arrive est hors fenêtre et ne peut plus
+  /// être déchiffré ; le canal de réception de ce contact reste alors bloqué. Pas de bouton
+  /// « Réinitialiser le canal avec ce contact » : effacer l'état local du cliquet ferait repartir
+  /// les deux chaînes du MÊME secret ECDH statique (refaire l'échange QR redonne les mêmes clés
+  /// publiques), donc des MÊMES clés de message — rejeu possible des anciennes enveloppes encore en
+  /// circulation et réutilisation de clés AES-GCM. Une réinitialisation sûre exige un nouvel
+  /// aléa partagé (nouvelle époque de cliquet), c.-à-d. un changement de protocole, hors de cette
+  /// passe. Contournement actuel : régénérer son identité Bluetooth (effacement du mode maillé) et
+  /// refaire l'échange QR des deux côtés.
   Future<void> _composeAndSend(({Uint8List peer, String label}) contact) async {
     final textCtrl = TextEditingController();
     final sent = await showDialog<bool>(
@@ -386,6 +398,20 @@ class _MeshScreenState extends State<MeshScreen> {
           );
         }
         return;
+      }
+      // Android 13+ : POST_NOTIFICATIONS est nécessaire (1) à la notification du service de
+      // premier plan (sinon invisible, voir MeshForegroundService.kt) et (2) au signal « nouveau
+      // message » de MeshOpsecNotifier. Elle n'est sinon demandée que par CallOpsecNotifier après
+      // connexion Matrix + déverrouillage : un usage « mesh seul » ne l'aurait jamais obtenue.
+      // Demandée ici, au geste explicite de l'utilisateur ; un refus ne bloque PAS le mode
+      // hors-ligne (le relais BLE fonctionne sans, seul le signal de réception manque). Sans effet
+      // (accordée d'office) avant Android 13.
+      if (Platform.isAndroid) {
+        try {
+          await Permission.notification.request();
+        } catch (_) {
+          // Best-effort.
+        }
       }
       try {
         await Mesh.instance.start();

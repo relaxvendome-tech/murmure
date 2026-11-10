@@ -1,5 +1,4 @@
 import java.util.Properties
-import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
@@ -22,7 +21,9 @@ val keyPropertiesFile = rootProject.file("key.properties")
 val keyProperties = Properties()
 val hasReleaseSigning = keyPropertiesFile.exists()
 if (hasReleaseSigning) {
-    FileInputStream(keyPropertiesFile).use { keyProperties.load(it) }
+    // UTF-8 explicite : Properties.load(InputStream) lit en ISO-8859-1, ce qui corromprait un
+    // mot de passe ou un alias non ASCII (accents) écrit en UTF-8 par la CI ou un éditeur.
+    keyPropertiesFile.reader(Charsets.UTF_8).use { keyProperties.load(it) }
     val missing = listOf("storePassword", "keyPassword", "keyAlias", "storeFile")
         .filter { keyProperties.getProperty(it).isNullOrBlank() }
     if (missing.isNotEmpty()) {
@@ -47,6 +48,18 @@ if (hasReleaseSigning) {
     )
 }
 
+// libolm (chiffrement Olm/Megolm, chargée par `package:olm` via DynamicLibrary.open('libolm.so')) :
+// compilée par scripts/build_libolm.sh dans src/main/jniLibs/<abi>/, jamais versionnée. Sans elle
+// l'appli refuse de démarrer — avertissement ici, contrôle bloquant dans la CI (build.yml).
+val missingLibolm = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    .filterNot { file("src/main/jniLibs/$it/libolm.so").isFile }
+if (missingLibolm.isNotEmpty()) {
+    logger.warn(
+        "ATTENTION : libolm.so absente pour ${missingLibolm.joinToString(", ")} — lancez " +
+            "scripts/build_libolm.sh avant de construire, sinon l'appli ne démarrera pas."
+    )
+}
+
 android {
     namespace = "fr.lansight.murmure"
     // 36 : exigé par flutter_webrtc (checkReleaseAarMetadata) ET par la policy Google Play 2026
@@ -56,7 +69,8 @@ android {
     // pour Android 15+ ; vérifié en CI par readelf, voir build.yml). N'affecte que le code natif
     // compilé par ce build (plugins CMake, ex. flutter_zxing) — les .so précompilés fournis par
     // des plugins restent ce qu'ils sont, d'où la vérification CI. Installé automatiquement par
-    // AGP s'il manque sur la machine.
+    // AGP s'il manque sur la machine. Même version utilisée par scripts/build_libolm.sh (libolm,
+    // liée explicitement avec -z max-page-size=16384).
     ndkVersion = "28.2.13676358"
 
     compileOptions {

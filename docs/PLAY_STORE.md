@@ -96,11 +96,12 @@ données chiffrées de bout en bout dont le serveur ne peut pas lire le contenu 
 |---|---|
 | L'appli collecte ou partage-t-elle des données ? | Oui (collecte), aucun partage avec des tiers |
 | Données chiffrées en transit ? | Oui (HTTPS ; Caddy en frontal) |
-| Suppression à la demande ? | Oui : effacement local (PIN de contrainte / réglages) ; suppression du compte côté serveur sur demande à l'administrateur. **À aligner avec la politique de confidentialité et fournir une URL de demande de suppression (obligatoire pour les applis avec création de compte).** |
-| Infos personnelles : nom, e-mail, ID utilisateur | **Nom** : oui, nom affiché choisi (facultatif), fonctionnalité de l'appli, non partagé. **E-mail** : non. **ID utilisateur** : oui, identifiant Matrix aléatoire, fonctionnalité de l'appli + gestion du compte. Adresse/téléphone/autres : non |
+| Suppression à la demande ? | Oui, **dans l'appli** : Réglages (engrenage) > « Zone dangereuse » > « Supprimer mon compte » désactive le compte sur le serveur et efface localement clés, messages, médias et réglages (voir `SUPPRESSION_COMPTE.md`). Sans accès à l'appli (téléphone perdu, échec de la désactivation serveur) : demande par e-mail, décrite à l'URL de suppression déclarée en section 4. Limite à déclarer : les messages déjà envoyés ne sont pas effacés du serveur par l'appli ni des appareils des correspondants. **À aligner avec la politique de confidentialité.** |
+| Infos personnelles : nom, e-mail, ID utilisateur | **Nom** : oui, nom affiché choisi par l'utilisateur (**obligatoire** à la création du compte, pseudonyme libre), fonctionnalité de l'appli, non partagé. **E-mail** : non. **ID utilisateur** : oui, identifiant Matrix aléatoire, fonctionnalité de l'appli + gestion du compte. Adresse/téléphone/autres : non |
 | Localisation | Non (ACCESS_FINE_LOCATION n'est déclarée que jusqu'à Android 11, pour le scan BLE ; jamais lue) |
 | Contacts, calendrier, appels, SMS | Non |
-| Messages (« Messages dans l'appli ») | Oui : messages et photos, **chiffrés de bout en bout** ; le serveur ne stocke que du chiffré. Fonctionnalité de l'appli. Non partagé |
+| Messages (« Messages dans l'appli ») | Oui : messages et photos, **chiffrés de bout en bout** ; le serveur ne stocke que du chiffré, **sauf les réactions emoji** (ligne suivante). Fonctionnalité de l'appli. Non partagé |
+| Réactions (emoji) | **Non chiffrées de bout en bout** (événements Matrix `m.reaction`, envoyés en clair dans le salon chiffré) : le serveur voit l'emoji choisi, son auteur, l'horodatage et l'identifiant du message visé (pas le texte de ce message). Fonctionnalité de l'appli. Non partagé. À citer dans la politique de confidentialité et à ne jamais présenter comme chiffré |
 | Photos et vidéos | Oui : photos envoyées par l'utilisateur, chiffrées E2E. Fonctionnalité de l'appli. Non partagé |
 | Audio | Appels : flux WebRTC chiffré, non enregistré ni stocké. Déclarer « non collecté » (traitement éphémère) |
 | Fichiers/docs | Non |
@@ -108,12 +109,13 @@ données chiffrées de bout en bout dont le serveur ne peut pas lire le contenu 
 | Infos et performances de l'appli | Non (aucun SDK de plantage ni d'analytique) |
 | Identifiants de l'appareil ou autres | Non pour l'ID publicitaire. Le nom d'appareil Matrix (device) est un nom d'affichage de session, à citer dans la politique |
 | Adresse IP | Non journalisée : Caddy masque `remote_ip` / `client_ip`, Conduit en `log = "warn"`. L'IP est néanmoins vue techniquement par le serveur pour établir la connexion. Ne pas écrire « jamais vue ». coturn configuré sans aucun journal (`log-file=/dev/null`, `scripts/server/coturn/turnserver.conf`). **À vérifier : journaux du pare-feu/hébergeur** |
-| Métadonnées Matrix | Oui, à décrire dans la politique : identifiants, salons, membres, horodatages, tailles, versions d'appareil |
+| Métadonnées Matrix | Oui, à décrire dans la politique : identifiants, salons, membres, horodatages, tailles, versions d'appareil, réactions emoji (contenu en clair, voir ci-dessus) |
 | Publicité, analytique, SDK tiers | Aucun |
 | Hébergement | Serveur en France (**à confirmer par l'hébergeur retenu avant publication**) |
 
 Déclarations de cohérence avec la politique de confidentialité (qui n'est pas dans le dépôt : à vérifier) :
-pas de numéro, e-mail, contacts, localisation ; ID aléatoire + nom affiché ; E2E ; métadonnées Matrix ;
+pas de numéro, e-mail, contacts, localisation ; ID aléatoire + nom affiché (obligatoire) ; E2E sauf réactions emoji ;
+métadonnées Matrix ; suppression du compte dans l'appli ;
 IP non journalisée ; serveur en France ; aucune fédération (`allow_federation = false`).
 
 ## 3. Permissions du Manifest
@@ -161,7 +163,11 @@ Points d'attention :
   conformité export US ; en France, la fourniture d'un moyen de cryptologie relève de la LCEN (art. 30) et du décret
   2007-663 : vérifier auprès de l'ANSSI si une déclaration est requise ou si une exemption s'applique.
 - **Cible API** : targetSdk 36 / compileSdk 36 (exigence Google Play 2026) ; bibliothèques natives alignées
-  sur 16 Ko (vérifié par la CI). Fournir l'AAB signé avec la clé d'upload : uniquement l'artefact
+  sur 16 Ko **à partir du correctif qui recompile libolm 3.2.16 en CI** (`scripts/build_libolm.sh`, liée avec
+  `-z max-page-size=16384`, remplace `flutter_olm` 2.0.0 dont le `libolm.so` était aligné 4 Ko). Le contrôle
+  readelf de la CI bloque toute release Play contenant une `.so` arm64-v8a/x86_64 non alignée : vérifier
+  dans le log de la release que « 0 non alignée(s) » est affiché (et ne pas publier un AAB antérieur à ce
+  correctif). Fournir l'AAB signé avec la clé d'upload : uniquement l'artefact
   `murmure-release-play` d'un tag `v*` (ou lancement manuel `play_release=true`) ; l'artefact
   `murmure-DEBUG-non-publiable` des builds de `main` est signé debug et refusé par la Console.
 - **Test ouvert** : pays, quota, adresse e-mail/URL de retour des testeurs. Compte développeur personnel

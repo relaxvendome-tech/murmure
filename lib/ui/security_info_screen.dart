@@ -16,7 +16,8 @@ class SecurityInfoScreen extends StatelessWidget {
       initiallyExpanded: true,
       items: [
         'Le contenu de vos messages, de vos photos et de vos appels est chiffré de bout en bout '
-            '(protocoles Matrix Olm et Megolm) : le serveur ne peut pas le lire.',
+            '(protocoles Matrix Olm et Megolm) : le serveur ne peut pas le lire. Les réactions '
+            '(emoji) ne le sont pas, voir ci-dessous.',
         'La base de données de votre téléphone est chiffrée ; sa clé est gardée dans le coffre '
             "sécurisé d'Android.",
         'Le verrou par code protège l\'accès à l\'appli. Le code de contrainte, s\'il est saisi, '
@@ -38,6 +39,8 @@ class SecurityInfoScreen extends StatelessWidget {
         'Les groupes dont vous faites partie, et leurs membres.',
         'Le réglage des messages éphémères d\'une conversation (la durée choisie, jamais le '
             'contenu).',
+        'Les réactions (emoji, message visé, auteur) ne sont pas chiffrées : le serveur les voit. '
+            'Elles sont désactivées dans les conversations à messages éphémères.',
         'Votre adresse IP en mode direct (sans Tor ni proxy).',
         'Pendant un appel, le relais TURN voit votre adresse IP ; il ne voit pas le contenu, '
             'qui reste chiffré.',

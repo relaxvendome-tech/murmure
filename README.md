@@ -1,6 +1,6 @@
 # Murmure
 
-Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via libolm/`flutter_olm`, le SDK `matrix` 0.29.x n'utilisant pas encore vodozemac ; migration à prévoir), pensée pour
+Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via libolm 3.2.16 compilée par ce dépôt, le SDK `matrix` 0.29.x n'utilisant pas encore vodozemac ; migration à prévoir), pensée pour
 rester utilisable quand le réseau mobile est coupé ou brouillé.
 
 ## État du projet (reconstruction 3.0)
@@ -64,9 +64,30 @@ docs/           documentation (dont ADMIN_KEY.md : architecture prévue de la cl
 ## Démarrer en développement
 
 ```bash
+scripts/build_libolm.sh   # une fois (puis à chaque changement de version de libolm)
 flutter pub get
 flutter run
 ```
+
+### libolm (bibliothèque native de chiffrement)
+
+`matrix` 0.29.x chiffre tout via `package:olm`, qui charge `libolm.so` par
+`DynamicLibrary.open('libolm.so')` : **sans ce fichier dans l'APK, l'appli refuse de démarrer**.
+Il n'est plus fourni par `flutter_olm` (retiré : son `libolm.so` 2.0.0 était aligné sur 4 Ko,
+refusé par Google Play pour Android 15+) mais compilé par `scripts/build_libolm.sh` :
+
+- source : tag `3.2.16` du dépôt officiel `gitlab.matrix.org/matrix-org/olm`, **commit vérifié**
+  (`7e0c8277032e40308987257b711b38af8d77cc69`, échec du build en cas de différence) ;
+- NDK `28.2.13676358` (installé via `sdkmanager` s'il manque), `android-26`, STL statique,
+  `-Wl,-z,max-page-size=16384`, tests désactivés, `strip` ;
+- ABI `arm64-v8a`, `armeabi-v7a`, `x86_64` → `android/app/src/main/jniLibs/<abi>/libolm.so`
+  (SONAME `libolm.so` non versionné, alignement LOAD ≥ 0x4000 et symboles vérifiés par le script) ;
+- ces `.so` ne sont **pas versionnés** (`.gitignore`) : la CI les régénère avant chaque
+  `flutter build`. Prérequis locaux : `git`, `cmake`, `ninja` (ou `make`), SDK Android
+  (`ANDROID_SDK_ROOT`/`ANDROID_HOME`) ou `ANDROID_NDK_HOME` pointant vers ce NDK.
+
+Gradle affiche un avertissement si un `libolm.so` manque ; la CI échoue si `libolm.so` est absente
+de l'AAB ou de l'APK pour l'une des trois ABI.
 
 Au premier lancement, l'appli demande l'adresse d'un serveur Murmure. Voir `scripts/server/README.md`
 pour en déployer un.
@@ -85,8 +106,9 @@ d'auto-mise à jour.
 | AAB | Play Store | `flutter build appbundle --release` | `build/app/outputs/bundle/release/*.aab` |
 | APK universel | Installation manuelle sur une tablette de test | `flutter build apk --release` | `build/app/outputs/flutter-apk/app-release.apk` |
 
-La CI produit les deux et échoue si `REQUEST_INSTALL_PACKAGES` est présente dans le manifeste
-fusionné. Seul l'AAB est envoyé sur Play. `targetSdk`/`compileSdk` 36, `versionCode` = 100 +
+La CI compile d'abord libolm (`scripts/build_libolm.sh`, voir plus haut), produit les deux et
+échoue si `REQUEST_INSTALL_PACKAGES` est présente dans le manifeste fusionné ou si `libolm.so`
+manque pour arm64-v8a, armeabi-v7a ou x86_64. Seul l'AAB est envoyé sur Play. `targetSdk`/`compileSdk` 36, `versionCode` = 100 +
 numéro de run CI (`--build-number`).
 
 | Déclencheur | Signature | Artefact | Publiable |

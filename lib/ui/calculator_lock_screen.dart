@@ -168,7 +168,9 @@ class _CalculatorLockScreenState extends State<CalculatorLockScreen> {
         next = _pendingPins.isEmpty ? null : _pendingPins.removeAt(0);
       }
     } catch (_) {
-      // Keystore indisponible, etc. : la calculatrice reste une calculatrice.
+      // Keystore indisponible ([KeystoreUnavailable], levée par [AppLock.check] AVANT tout
+      // comptage d'échec : aucune tentative consommée), etc. : la calculatrice reste une
+      // calculatrice, sans aucun indice. Une relance complète de l'appli est nécessaire.
       _pendingPins.clear();
     } finally {
       _checking = false;

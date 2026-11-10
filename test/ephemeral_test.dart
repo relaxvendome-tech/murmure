@@ -54,10 +54,43 @@ void main() {
     final stateTs = DateTime.utc(2026, 3, 1, 12);
     final firstOn = DateTime.utc(2026, 2, 1, 8);
 
-    test('resolveEnabledAt : enabled_at_ms valide et antérieur retenu', () {
-      final at = resolveEnabledAt(
-          {'ttl_seconds': 3600, 'enabled_at_ms': firstOn.millisecondsSinceEpoch}, stateTs);
-      expect(at.millisecondsSinceEpoch, firstOn.millisecondsSinceEpoch);
+    test('resolveEnabledAt : retenu si l\'état précédent (TTL > 0) portait la même valeur', () {
+      final ms = firstOn.millisecondsSinceEpoch;
+      final at = resolveEnabledAt({'ttl_seconds': 3600, 'enabled_at_ms': ms}, stateTs,
+          prevContent: {'ttl_seconds': 86400, 'enabled_at_ms': ms});
+      expect(at.millisecondsSinceEpoch, ms);
+    });
+
+    test('resolveEnabledAt : sans état précédent actif → horodatage de l\'événement '
+        '(un contact ne peut pas effacer tout l\'historique)', () {
+      final ancient = DateTime.utc(2000).millisecondsSinceEpoch;
+      final c = {'ttl_seconds': 300, 'enabled_at_ms': ancient};
+      expect(resolveEnabledAt(c, stateTs), stateTs);
+      expect(resolveEnabledAt(c, stateTs, prevContent: {'ttl_seconds': 0}), stateTs);
+      expect(resolveEnabledAt(c, stateTs, prevContent: {}), stateTs);
+    });
+
+    test('resolveEnabledAt : valeur différente de celle de l\'état précédent → rejetée', () {
+      final c = {'ttl_seconds': 300, 'enabled_at_ms': DateTime.utc(2000).millisecondsSinceEpoch};
+      expect(
+          resolveEnabledAt(c, stateTs, prevContent: {
+            'ttl_seconds': 3600,
+            'enabled_at_ms': firstOn.millisecondsSinceEpoch,
+          }),
+          stateTs);
+    });
+
+    test('resolveEnabledAt : état précédent actif sans date → valeur acceptée seulement si '
+        'non antérieure à l\'événement précédent (connu)', () {
+      final prev = {'ttl_seconds': 86400};
+      final c = {'ttl_seconds': 3600, 'enabled_at_ms': firstOn.millisecondsSinceEpoch};
+      expect(resolveEnabledAt(c, stateTs, prevContent: prev, prevEventTs: firstOn), firstOn);
+      expect(
+          resolveEnabledAt(c, stateTs,
+              prevContent: prev, prevEventTs: firstOn.add(const Duration(seconds: 1))),
+          stateTs);
+      // Horodatage précédent inconnu : prudence, horodatage de l'événement.
+      expect(resolveEnabledAt(c, stateTs, prevContent: prev), stateTs);
     });
 
     test('resolveEnabledAt : absent, invalide ou futur → horodatage de l\'événement', () {
@@ -66,7 +99,10 @@ void main() {
       expect(resolveEnabledAt({'enabled_at_ms': 'x'}, stateTs), stateTs);
       expect(resolveEnabledAt({'enabled_at_ms': -1}, stateTs), stateTs);
       final future = stateTs.add(const Duration(days: 1)).millisecondsSinceEpoch;
-      expect(resolveEnabledAt({'enabled_at_ms': future}, stateTs), stateTs);
+      expect(
+          resolveEnabledAt({'enabled_at_ms': future}, stateTs,
+              prevContent: {'ttl_seconds': 60, 'enabled_at_ms': future}),
+          stateTs);
     });
 
     test('changer la durée conserve la date de première activation', () {
@@ -81,7 +117,8 @@ void main() {
               originServerTs: msg,
               ttlSeconds: 3600,
               now: stateTs,
-              enabledAt: resolveEnabledAt(c, stateTs)),
+              enabledAt: resolveEnabledAt(c, stateTs,
+                  prevContent: {'ttl_seconds': 86400}, prevEventTs: firstOn)),
           isTrue);
     });
 
@@ -107,9 +144,84 @@ void main() {
           stateTs.add(const Duration(hours: 1)));
     });
 
+    test('plancher local : la date effective ne recule jamais sous le plancher', () {
+      expect(applyEnabledAtFloor(firstOn, null), firstOn);
+      expect(applyEnabledAtFloor(firstOn, stateTs), stateTs);
+      expect(applyEnabledAtFloor(stateTs, firstOn), stateTs);
+    });
+
+    test('plancher local : écrit au 1er TTL > 0 observé, effacé quand TTL = 0', () {
+      final w = floorUpdate(ttlSeconds: 300, currentFloor: null, resolved: stateTs);
+      expect(w.write, stateTs);
+      expect(w.clear, isFalse);
+      final keep = floorUpdate(ttlSeconds: 300, currentFloor: firstOn, resolved: stateTs);
+      expect(keep.write, isNull);
+      expect(keep.clear, isFalse);
+      final off = floorUpdate(ttlSeconds: 0, currentFloor: firstOn, resolved: stateTs);
+      expect(off.clear, isTrue);
+      expect(off.write, isNull);
+      expect(floorUpdate(ttlSeconds: 0, currentFloor: null, resolved: null).clear, isFalse);
+    });
+
+    test('attaque : enabled_at_ms ancien accepté en chaîne mais borné par le plancher', () {
+      final ancient = DateTime.utc(2000).millisecondsSinceEpoch;
+      final resolved = resolveEnabledAt({'ttl_seconds': 300, 'enabled_at_ms': ancient}, stateTs,
+          prevContent: {'ttl_seconds': 300, 'enabled_at_ms': ancient});
+      final effective = applyEnabledAtFloor(resolved, firstOn);
+      expect(effective, firstOn);
+      final oldMsg = firstOn.subtract(const Duration(days: 1));
+      expect(
+          isExpiredAt(
+              originServerTs: oldMsg,
+              ttlSeconds: 300,
+              now: stateTs,
+              enabledAt: effective),
+          isFalse);
+    });
+
     test('TTL hors bornes borné à la publication', () {
       expect(buildEphemeralContent(ttlSeconds: 1 << 40)['ttl_seconds'], kMaxTtlSeconds);
       expect(buildEphemeralContent(ttlSeconds: -5), {'ttl_seconds': 0});
+    });
+  });
+
+  group('balayage', () {
+    test('shouldSweep : ses propres messages ET réactions expirés, envoyés, non rédigés', () {
+      bool f({String type = 'm.room.message', String sender = '@me:x', bool redacted = false,
+              bool sent = true, bool expired = true}) =>
+          shouldSweep(
+              type: type,
+              senderId: sender,
+              me: '@me:x',
+              redacted: redacted,
+              sent: sent,
+              expired: expired);
+      expect(f(), isTrue);
+      expect(f(type: 'm.reaction'), isTrue);
+      expect(f(type: 'm.room.member'), isFalse);
+      expect(f(sender: '@other:x'), isFalse);
+      expect(f(redacted: true), isFalse);
+      expect(f(sent: false), isFalse);
+      expect(f(expired: false), isFalse);
+    });
+
+    test('sweepStopBefore : borne la plus récente entre activation et déjà traité', () {
+      final a = DateTime.utc(2026, 1, 1);
+      final b = DateTime.utc(2026, 2, 1);
+      expect(sweepStopBefore(), isNull);
+      expect(sweepStopBefore(enabledAt: a), a);
+      expect(sweepStopBefore(handledBefore: b), b);
+      expect(sweepStopBefore(enabledAt: a, handledBefore: b), b);
+      expect(sweepStopBefore(enabledAt: b, handledBefore: a), b);
+    });
+
+    test('handledBeforeAfterSweep : now - TTL - tolérance', () {
+      final now = DateTime.utc(2026, 1, 1, 12);
+      expect(handledBeforeAfterSweep(now, 300),
+          now.subtract(const Duration(seconds: 300) + kClockSkewTolerance));
+      // Un événement plus ancien que cette borne était bien expiré à `now`.
+      final older = handledBeforeAfterSweep(now, 300).subtract(const Duration(seconds: 1));
+      expect(isExpiredAt(originServerTs: older, ttlSeconds: 300, now: now), isTrue);
     });
   });
 }

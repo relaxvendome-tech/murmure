@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:matrix/matrix.dart';
 
+import '../../lock.dart';
+import '../services/call_manager.dart';
 import '../services/call_opsec_notifier.dart';
 import '../services/call_opsec_store.dart';
 
@@ -179,6 +181,11 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   /// déclenche la notification camouflée — sans bloquer sur quoi que ce soit côté UI, l'appel est
   /// de toute façon en train de se terminer.
   Future<void> _recordMissedCall() async {
+    // Aucune trace (historique ni notification) pour un correspondant bloqué.
+    final remote = widget.session.remoteUserId;
+    try {
+      if (remote != null && widget.session.room.client.ignoredUsers.contains(remote)) return;
+    } catch (_) {}
     try {
       await CallOpsecStore.insert(MissedCall(
         roomId: widget.session.room.id,
@@ -241,6 +248,18 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     // aussi une navigation externe forcée (ex. verrouillage automatique qui remplace tout l'arbre
     // de widgets). `unawaited` : dispose() ne peut pas être async, et on ne bloque pas la
     // destruction de l'écran sur la confirmation réseau du raccroché.
+    // Écran fermé par le REVERROUILLAGE alors qu'un appel entrant sonne encore sans avoir été
+    // décroché : on ne raccroche pas (ce serait un refus que l'utilisateur n'a jamais fait). La
+    // session est rendue au chemin verrouillé du delegate : elle continue de sonner, sera
+    // enregistrée comme manquée si elle se termine, et sera de nouveau présentée par
+    // `presentPendingCall` après déverrouillage. Notre propre abonnement d'état est annulé
+    // ci-dessous, donc aucun doublon d'appel manqué.
+    if (!_closing && _shouldHandBackToLockedPath()) {
+      final delegate = widget.session.voip.delegate;
+      if (delegate is MurmureWebRTCDelegate && delegate.trackLockedIncoming(widget.session)) {
+        _closing = true;
+      }
+    }
     if (!_closing) {
       _closing = true;
       unawaited(widget.session.hangup(reason: CallErrorCode.userHangup).catchError((_) {}));
@@ -251,6 +270,18 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     super.dispose();
+  }
+
+  bool _shouldHandBackToLockedPath() {
+    final session = widget.session;
+    return !AppLock.isUnlocked &&
+        !_answered &&
+        !_declined &&
+        !session.isOutgoing &&
+        !session.isGroupCall &&
+        !session.answeredByUs &&
+        !session.callHasEnded &&
+        session.isRinging;
   }
 
   @override

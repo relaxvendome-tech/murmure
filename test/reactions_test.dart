@@ -113,4 +113,43 @@ void main() {
       expect(hasOwnReaction(const [], '@alice:ex.org', '👍'), isFalse);
     });
   });
+
+  group('isAnnotationRelation (notifications : une réaction n\'est pas un message)', () {
+    test('m.reaction en clair : vrai', () {
+      expect(
+          isAnnotationRelation({
+            'm.relates_to': {'rel_type': 'm.annotation', 'event_id': r'$x', 'key': '👍'},
+          }),
+          isTrue);
+    });
+
+    test('enveloppe chiffrée avec m.relates_to en clair : vrai', () {
+      expect(
+          isAnnotationRelation({
+            'algorithm': 'm.megolm.v1.aes-sha2',
+            'ciphertext': 'abc',
+            'm.relates_to': {'rel_type': 'm.annotation', 'event_id': r'$x'},
+          }),
+          isTrue);
+    });
+
+    test('réponse, édition, message simple ou contenu invalide : faux', () {
+      expect(
+          isAnnotationRelation({
+            'm.relates_to': {
+              'm.in_reply_to': {'event_id': r'$x'},
+            },
+          }),
+          isFalse);
+      expect(
+          isAnnotationRelation({
+            'm.relates_to': {'rel_type': 'm.replace', 'event_id': r'$x'},
+          }),
+          isFalse);
+      expect(isAnnotationRelation({'body': 'salut'}), isFalse);
+      expect(isAnnotationRelation(null), isFalse);
+      expect(isAnnotationRelation('x'), isFalse);
+      expect(isAnnotationRelation({'m.relates_to': 'x'}), isFalse);
+    });
+  });
 }

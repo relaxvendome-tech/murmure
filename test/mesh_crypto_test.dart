@@ -515,4 +515,46 @@ void main() {
           MeshEnvelopeRejection.expired);
     });
   });
+  group('meshSeenKey (déduplication anti-censure)', () {
+    test('message pour moi : id seul, inchangé', () async {
+      final id = randomBytes(16);
+      final hint = randomBytes(32);
+      final key = await meshSeenKey(id: id, recipientHint: hint, forMe: true);
+      expect(key, equals(id));
+    });
+
+    test('relais : SHA-256(id ‖ hint), 32 octets, déterministe', () async {
+      final id = randomBytes(16);
+      final hint = randomBytes(32);
+      final a = await meshSeenKey(id: id, recipientHint: hint, forMe: false);
+      final b = await meshSeenKey(
+          id: Uint8List.fromList(id), recipientHint: Uint8List.fromList(hint), forMe: false);
+      expect(a.length, 32);
+      expect(a, equals(b));
+      expect(a, isNot(equals(id)));
+    });
+
+    test('relais : une copie forgée au hint modifié a une autre clé', () async {
+      final id = randomBytes(16);
+      final hint = randomBytes(32);
+      final forged = Uint8List.fromList(hint)..[0] ^= 0x01;
+      final real = await meshSeenKey(id: id, recipientHint: hint, forMe: false);
+      final fake = await meshSeenKey(id: id, recipientHint: forged, forMe: false);
+      expect(fake, isNot(equals(real)));
+    });
+
+    test('relais : un id différent donne une autre clé', () async {
+      final hint = randomBytes(32);
+      final a = await meshSeenKey(id: randomBytes(16), recipientHint: hint, forMe: false);
+      final b = await meshSeenKey(id: randomBytes(16), recipientHint: hint, forMe: false);
+      expect(a, isNot(equals(b)));
+    });
+
+    test('vecteur connu : SHA-256 de 48 octets nuls', () async {
+      final key = await meshSeenKey(
+          id: Uint8List(16), recipientHint: Uint8List(32), forMe: false);
+      String hex(List<int> b) => b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+      expect(hex(key), '17b0761f87b081d5cf10757ccc89f12be355c70e2e29df288b65b30710dcbcd1');
+    });
+  });
 }

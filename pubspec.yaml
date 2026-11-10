@@ -10,17 +10,21 @@ dependencies:
   flutter:
     sdk: flutter
   matrix: ^0.29.0
-  # Trouvé en audit interne (revue indépendante) : `matrix` résout ici en 0.29.13 (log de CI), une
-  # version qui utilise encore `package:olm` (libolm) en interne pour TOUT le chiffrement —
-  # vodozemac n'existe dans matrix-dart-sdk qu'à partir du tag v1.0.0. `flutter_vodozemac` était
-  # donc une dépendance morte (voir le commentaire dans lib/main.dart) ; `flutter_olm` fournit la
-  # bibliothèque native (`libolm.so`) dont `package:olm` a réellement besoin sur Android — pairing
-  # documenté par le paquet `olm` lui-même ("On Flutter for Android and iOS, depend on
-  # flutter_olm."). Non maintenu depuis ~2 ans (libolm est déprécié en amont au profit de
-  # vodozemac) : stopgap délibéré pour obtenir un chiffrement qui fonctionne réellement
-  # maintenant ; une migration vers une version de `matrix` >= v6.1.0 (vodozemac) reste
-  # recommandée comme chantier séparé, voir le commentaire détaillé dans lib/main.dart.
-  flutter_olm: ^2.0.0
+  # `matrix` 0.29.x (résolu en 0.29.13) chiffre TOUT via `package:olm` (libolm) — vodozemac
+  # n'arrive dans matrix-dart-sdk qu'à partir de v1.0.0. `package:olm` ouvre la bibliothèque native
+  # par `DynamicLibrary.open('libolm.so')` sur Android (lib/src/ffi_base.dart, vérifié aux tags
+  # 2.0.2 et v3.1.0 du dépôt famedly/dart-olm). Déclaré en direct (même contrainte que celle de
+  # matrix 0.29.13 : `olm: ^2.0.2`) parce que c'est NOUS qui fournissons maintenant le .so.
+  #
+  # `flutter_olm` (2.0.0) RETIRÉ : son libolm.so était aligné sur 4 Ko (LOAD align 0x1000 constaté
+  # dans le log CI pour arm64-v8a et x86_64) — refusé par Google Play (pages de 16 Ko, Android 15+)
+  # et par le contrôle readelf de la CI. libolm 3.2.16 est désormais compilée en CI depuis le tag
+  # officiel, commit vérifié, liée avec -z max-page-size=16384 : voir scripts/build_libolm.sh
+  # (sortie : android/app/src/main/jniLibs/<abi>/libolm.so, non versionnée). Sans ce .so l'appli
+  # refuse de démarrer (voir lib/main.dart) : lancez ce script avant `flutter run` en local.
+  # libolm reste dépréciée en amont au profit de vodozemac : migration vers matrix >= v6.1.0 à
+  # mener comme chantier séparé.
+  olm: ^2.0.2
   sqflite_sqlcipher: ^3.1.0
   flutter_secure_storage: ^9.2.2
   # Déverrouillage biométrique optionnel (voir lib/biometric.dart) ; l'UI seulement, jamais les clés.

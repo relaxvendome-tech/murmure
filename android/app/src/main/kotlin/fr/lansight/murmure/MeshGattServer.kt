@@ -228,12 +228,18 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
             .addServiceUuid(android.os.ParcelUuid(SERVICE_UUID))
             .build()
 
-        val pending = PendingStart(result, server, leAdvertiser, char)
+        // Corrigé : un AdvertiseCallback PAR démarrage (et non plus un singleton partagé). Avant,
+        // un onStartSuccess tardif d'un démarrage déjà abandonné (délai dépassé, stop()) pouvait
+        // compléter le démarrage SUIVANT, en attente au même moment, avant que sa propre annonce
+        // ne soit confirmée — et stopAdvertising ne pouvait pas distinguer les deux annonces.
+        val callback = StartAdvertiseCallback()
+        val pending = PendingStart(result, server, leAdvertiser, char, callback)
+        callback.pending = pending
         pendingStart = pending
         // Filet : si aucun des deux callbacks d'annonce n'arrive, on échoue au lieu de bloquer Dart.
         mainHandler.postDelayed({ failPendingStart(pending, "Annonce BLE sans réponse") }, ADVERTISE_START_TIMEOUT_MS)
         try {
-            leAdvertiser.startAdvertising(settings, data, advertiseCallback)
+            leAdvertiser.startAdvertising(settings, data, callback)
         } catch (e: Exception) {
             failPendingStart(pending, e.message ?: "startAdvertising a échoué")
         }
@@ -245,9 +251,13 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         val server: BluetoothGattServer,
         val advertiser: BluetoothLeAdvertiser,
         val characteristic: BluetoothGattCharacteristic,
+        val callback: AdvertiseCallback,
     )
 
     private var pendingStart: PendingStart? = null
+
+    /** Callback de l'annonce ACTUELLEMENT active (celui à passer à stopAdvertising). */
+    private var activeAdvertiseCallback: AdvertiseCallback? = null
     @Volatile private var openingServer: BluetoothGattServer? = null
 
     /** Serveur à utiliser dans les callbacks (actif, ou en cours d'ouverture). */
@@ -259,6 +269,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         gattServer = pending.server
         advertiser = pending.advertiser
         characteristic = pending.characteristic
+        activeAdvertiseCallback = pending.callback
         openingServer = null
         pending.result.success(true)
     }
@@ -267,7 +278,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
     private fun failPendingStart(pending: PendingStart, message: String) {
         if (pendingStart !== pending) return
         pendingStart = null
-        try { pending.advertiser.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
+        try { pending.advertiser.stopAdvertising(pending.callback) } catch (_: Exception) {}
         try { pending.server.close() } catch (_: Exception) {}
         if (openingServer === pending.server) openingServer = null
         pending.result.error("GATT_ADVERTISE", message, null)
@@ -277,9 +288,10 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
     private fun stop() {
         pendingStart?.let { failPendingStart(it, "Arrêté avant la fin du démarrage") }
         try {
-            advertiser?.stopAdvertising(advertiseCallback)
+            activeAdvertiseCallback?.let { advertiser?.stopAdvertising(it) }
         } catch (_: Exception) {
         }
+        activeAdvertiseCallback = null
         try {
             gattServer?.close()
         } catch (_: Exception) {
@@ -304,14 +316,34 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
         eventSink = null
     }
 
-    private val advertiseCallback = object : AdvertiseCallback() {
+    /**
+     * Callback propre à UN démarrage ([pending], assigné juste après la construction). Un retour
+     * tardif d'un démarrage qui n'est plus le démarrage en attente (déjà échoué par délai, ou
+     * arrêté) ne complète/n'échoue JAMAIS le démarrage courant ; si c'est un succès tardif,
+     * l'annonce orpheline qu'il confirme est arrêtée avec CE callback.
+     */
+    private inner class StartAdvertiseCallback : AdvertiseCallback() {
+        var pending: PendingStart? = null
+
+        @SuppressLint("MissingPermission")
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            mainHandler.post { pendingStart?.let { completePendingStart(it) } }
+            mainHandler.post {
+                val mine = pending ?: return@post
+                if (pendingStart === mine) {
+                    completePendingStart(mine)
+                } else if (activeAdvertiseCallback !== this) {
+                    // Démarrage abandonné entre-temps : son annonce ne doit pas continuer seule.
+                    try { mine.advertiser.stopAdvertising(this) } catch (_: Exception) {}
+                }
+            }
         }
 
         override fun onStartFailure(errorCode: Int) {
             Log.w(TAG, "Échec de l'annonce BLE : code $errorCode")
-            mainHandler.post { pendingStart?.let { failPendingStart(it, "Annonce BLE refusée (code $errorCode)") } }
+            mainHandler.post {
+                val mine = pending ?: return@post
+                if (pendingStart === mine) failPendingStart(mine, "Annonce BLE refusée (code $errorCode)")
+            }
         }
     }
 

@@ -22,7 +22,9 @@ services:
     restart: unless-stopped
     volumes:
       - conduit-data:/var/lib/matrix-conduit
-      - ./conduit.toml:/etc/matrix-conduit/conduit.toml:ro
+      # Copie locale NON suivie par git, générée par deploy.sh depuis le modèle conduit.toml
+      # (en manuel : `cp conduit.toml conduit.local.toml` puis éditer la copie, voir README.md).
+      - ./conduit.local.toml:/etc/matrix-conduit/conduit.toml:ro
     environment:
       CONDUIT_CONFIG: /etc/matrix-conduit/conduit.toml
     expose:
@@ -79,7 +81,9 @@ services:
     # coturn abandonne ensuite ses privilèges (proc-user/proc-group dans turnserver.conf).
     user: "0:0"
     volumes:
-      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # Copie locale NON suivie par git, régénérée par deploy.sh depuis coturn/turnserver.conf
+      # (secret TURN, chemin du certificat, external-ip derrière un NAT).
+      - ./coturn/turnserver.local.conf:/etc/coturn/turnserver.conf:ro
       # Certificats obtenus par Caddy pour le même domaine, en LECTURE SEULE (aucun second client
       # ACME à maintenir). coturn ne recharge pas un certificat renouvelé à chaud : deploy.sh
       # installe un redémarrage hebdomadaire de ce service.

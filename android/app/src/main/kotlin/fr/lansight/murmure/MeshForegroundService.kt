@@ -37,7 +37,8 @@ import androidx.core.app.NotificationCompat
  * gravement qu'une notification ponctuelle. [startMesh] reçoit donc l'état du mode discret au
  * moment du démarrage (lu côté Dart, jamais recalculé ici) et choisit un texte et un canal de
  * notification cohérents avec l'identité affichée de l'appli à cet instant — jamais le texte
- * honnête quand la calculatrice est à l'écran.
+ * « Murmure » quand le mode discret est actif, mais jamais non plus l'identité d'une autre appli
+ * (texte et icône neutres, voir buildNotification).
  *
  * LIMITE HONNÊTE : ni le rendu réel de cette notification sur un appareil physique, ni sa capacité
  * effective à empêcher la suspension du processus sur les surcouches constructeur les plus
@@ -52,7 +53,10 @@ class MeshForegroundService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 4150 // 4143-4146 pris (appels, messages, maillage)
         private const val CHANNEL_HONEST = "murmure_mesh_fg"
-        private const val CHANNEL_CALC = "sys_calc_bg_v1"
+        // Mode discret : canal NEUTRE (un nom de canal est figé à sa création, d'où un nouvel id).
+        // Remplace "sys_calc_bg_v1" (canal « Calculatrice »), supprimé dans buildNotification().
+        private const val CHANNEL_CALC = "discreet_fg_v2"
+        private val LEGACY_CHANNELS = listOf("sys_calc_bg_v1")
         const val EXTRA_CALC_MODE = "calc_mode"
     }
 
@@ -74,15 +78,29 @@ class MeshForegroundService : Service() {
         // `setSmallIcon` restait figé sur `ic_launcher` (le logo Murmure) dans les deux cas. Cette
         // icône s'affiche en permanence dans la barre d'état ET dans le panneau de notifications
         // tant que le service tourne — exactement la trahison visuelle permanente que ce fichier
-        // documente plus haut comme la TENSION OPSEC à éviter, maintenant qu'un texte "Calculatrice"
-        // cohabitait avec un logo qui dit le contraire.
+        // documente plus haut comme la TENSION OPSEC à éviter.
+        //
+        // POLICY PLAY « USURPATION » (corrigé) : le mode discret affichait « Calculatrice » avec
+        // R.mipmap.ic_calculator, c.-à-d. se faisait passer pour une AUTRE appli — interdit par la
+        // policy Google Play « Impersonation », même optionnel (même raisonnement que le retrait de
+        // l'activity-alias, voir MainActivity.kt). Désormais : texte NEUTRE (« Activité en
+        // arrière-plan » / « Nouvelle activité. ») et petite icône monochrome neutre
+        // (res/drawable/ic_stat_neutral.xml), ni logo Murmure ni imitation d'une autre appli.
         val (channelId, title, text, icon) = if (calcMode) {
-            Quadruple(CHANNEL_CALC, "Calculatrice", "Synchronisation des fonctions en arrière-plan", R.mipmap.ic_calculator)
+            Quadruple(CHANNEL_CALC, "Activité en arrière-plan", "Nouvelle activité.", R.drawable.ic_stat_neutral)
         } else {
             Quadruple(CHANNEL_HONEST, "Murmure", "Mode hors-ligne actif (relais Bluetooth)", R.mipmap.ic_launcher)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channelName = if (calcMode) "Synchronisation arrière-plan" else "Mode hors-ligne"
+            // Anciens canaux « Calculatrice » : supprimés (best-effort, sans effet s'ils n'existent
+            // pas). Leur nom resterait sinon visible dans Réglages > Notifications.
+            for (legacy in LEGACY_CHANNELS) {
+                try {
+                    manager?.deleteNotificationChannel(legacy)
+                } catch (_: Exception) {
+                }
+            }
+            val channelName = if (calcMode) "Activité en arrière-plan" else "Mode hors-ligne"
             val channel = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_LOW)
             manager?.createNotificationChannel(channel)
         }

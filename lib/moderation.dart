@@ -24,3 +24,29 @@
 library;
 
 bool isSenderBlocked(String senderId, List<String> ignoredUsers) => ignoredUsers.contains(senderId);
+
+/// Logique pure : l'aperçu du dernier message d'une conversation (liste des conversations) est
+/// masqué s'il a été rédigé (supprimé), s'il a expiré (messages éphémères) ou si son expéditeur
+/// est bloqué — même règle que l'affichage de la conversation elle-même.
+bool hideRoomPreview({
+  required bool redacted,
+  required bool expired,
+  required bool senderBlocked,
+}) =>
+    redacted || expired || senderBlocked;
+
+/// Logique pure : une invitation dont l'expéditeur ([inviterId], auteur de l'événement
+/// `m.room.member` « invite » nous concernant) est bloqué n'est pas affichée. Synapse filtre déjà
+/// ces invitations côté serveur, mais pas forcément tous les serveurs : filtre côté client.
+bool isInviteHidden(String? inviterId, List<String> ignoredUsers) =>
+    inviterId != null && isSenderBlocked(inviterId, ignoredUsers);
+
+/// Logique pure : un message cité en réponse reste utilisable tant qu'il n'est ni rédigé, ni
+/// expiré, ni envoyé par un expéditeur bloqué ; sinon la réponse est annulée avant l'envoi (le SDK
+/// recopierait sinon le texte cité dans le corps de repli de la réponse).
+bool isReplyTargetUsable({
+  required bool redacted,
+  required bool expired,
+  required bool senderBlocked,
+}) =>
+    !redacted && !expired && !senderBlocked;

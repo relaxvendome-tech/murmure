@@ -75,26 +75,83 @@ String _stripReplyFallback(String body) {
 /// aussi souvent que ces événements arrivent, même quand rien de visible n'avait réellement changé.
 /// `distinct()` sur cette signature fait que seul un changement qui affecte vraiment ce qui est
 /// affiché déclenche cette reconstruction.
+/// Inclut aussi, pour le dernier événement, son état rédigé et expiré (messages éphémères), ainsi
+/// que la liste des utilisateurs bloqués : ces trois éléments changent l'aperçu affiché sans
+/// forcément changer l'identifiant du dernier événement. L'expiration dépendant de l'heure, l'écran
+/// se rafraîchit en plus toutes les 30 s (voir [_RoomsScreenState]).
 String _roomsSignature(Client client) {
   final rooms = client.rooms.where((r) => !r.isSpace);
+  final ignored = client.ignoredUsers.join(',');
   final parts = rooms.map((r) {
     final last = r.lastEvent;
+    final expired = last != null && isExpired(last, r);
     // Trouvé en audit interne : `membership` doit faire partie de la signature, sinon accepter ou
     // refuser une invitation (Room.join()/Room.leave(), voir plus bas) ne faisait pas réafficher
     // la liste — l'id, le nom et le dernier événement du salon ne changent pas forcément à cette
     // occasion, seule son statut d'adhésion change.
     return '${r.id}\u0000${r.getLocalizedDisplayname()}\u0000${last?.eventId ?? ''}\u0000'
-        '${last?.originServerTs.millisecondsSinceEpoch ?? 0}\u0000${r.membership}';
+        '${last?.originServerTs.millisecondsSinceEpoch ?? 0}\u0000${r.membership}\u0000'
+        '${last?.redacted ?? false}\u0000$expired';
   });
-  return parts.join('\u0001');
+  return '$ignored\u0002${parts.join('\u0001')}';
 }
 
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
-class RoomsScreen extends StatelessWidget {
+class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key, required this.client, required this.callManager});
   final Client client;
   final CallManager callManager;
+
+  @override
+  State<RoomsScreen> createState() => _RoomsScreenState();
+}
+
+/// Aperçu du dernier message d'une conversation dans la liste : vide s'il est rédigé, expiré ou
+/// envoyé par un utilisateur bloqué (voir `hideRoomPreview`, lib/moderation.dart).
+String _roomPreview(Room room) {
+  final last = room.lastEvent;
+  if (last == null) return '';
+  if (hideRoomPreview(
+    redacted: last.redacted,
+    expired: isExpired(last, room),
+    senderBlocked: isSenderBlocked(last.senderId, room.client.ignoredUsers),
+  )) {
+    return '';
+  }
+  // Une demande de vérification d'appareil n'est pas un message de conversation : jamais
+  // affichée comme aperçu du dernier message. Une réaction non plus.
+  if (last.messageType == EventTypes.KeyVerificationRequest) return '';
+  if (last.type == EventTypes.Reaction) return '';
+  if (last.type == EventTypes.Encrypted) return 'Message illisible sur cet appareil';
+  return last.text;
+}
+
+class _RoomsScreenState extends State<RoomsScreen> {
+  Client get client => widget.client;
+  CallManager get callManager => widget.callManager;
+
+  /// Flux créé une seule fois (et non à chaque `build`), pour que le rafraîchissement périodique
+  /// ne réabonne pas le `StreamBuilder`.
+  late final Stream<String> _signatures =
+      client.onSync.stream.map((_) => _roomsSignature(client)).distinct();
+
+  /// Rafraîchit la liste toutes les 30 s : un message éphémère peut expirer sans aucune synchro.
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -170,7 +227,7 @@ class RoomsScreen extends StatelessWidget {
         ],
       ),
       body: StreamBuilder<String>(
-        stream: client.onSync.stream.map((_) => _roomsSignature(client)).distinct(),
+        stream: _signatures,
         initialData: _roomsSignature(client),
         builder: (context, _) {
           // Trouvé en audit interne (revue indépendante), confirmé contre le code réel du SDK
@@ -185,7 +242,15 @@ class RoomsScreen extends StatelessWidget {
           // automatiquement) pouvait écrire. On sépare donc les invitations, affichées avec
           // Accepter/Refuser (`Room.join()` / `Room.leave()`), des conversations déjà actives.
           final allRooms = client.rooms.where((r) => !r.isSpace).toList();
-          final invites = allRooms.where((r) => r.membership == Membership.invite).toList()
+          final ignoredUsers = client.ignoredUsers;
+          // Invitation dont l'expéditeur est bloqué : exclue (voir `isInviteHidden`).
+          final invites = allRooms
+              .where((r) =>
+                  r.membership == Membership.invite &&
+                  !isInviteHidden(
+                      r.getState(EventTypes.RoomMember, client.userID ?? '')?.senderId,
+                      ignoredUsers))
+              .toList()
             ..sort((a, b) => (b.lastEvent?.originServerTs ?? DateTime(0))
                 .compareTo(a.lastEvent?.originServerTs ?? DateTime(0)));
           final rooms = allRooms.where((r) => r.membership != Membership.invite).toList()
@@ -232,15 +297,7 @@ class RoomsScreen extends StatelessWidget {
               final room = rooms[i - invites.length];
               final name = room.getLocalizedDisplayname();
               final lastTs = room.lastEvent?.originServerTs;
-              final last = room.lastEvent;
-              // Une demande de vérification d'appareil n'est pas un message de conversation :
-              // jamais affichée comme aperçu du dernier message.
-              final preview = last == null ||
-                      last.messageType == EventTypes.KeyVerificationRequest
-                  ? ''
-                  : last.type == EventTypes.Encrypted
-                      ? 'Message illisible sur cet appareil'
-                      : last.text;
+              final preview = _roomPreview(room);
               return ListTile(
                 leading: CircleAvatar(
                   backgroundColor: murmureAvatarColor(room.id),
@@ -573,8 +630,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _scrollCtrl.addListener(_onScroll);
     _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      // Le dernier message lisible a pu changer (expiration) sans nouvel événement.
+      _maybeSendReadMarker();
     });
+    // Plancher local et horodatage de l'état précédent du réglage éphémère (lib/ephemeral.dart).
+    unawaited(refreshEphemeralState(widget.room).then((_) {
+      if (mounted) setState(() {});
+    }));
     widget.room.getTimeline(onUpdate: () {
       if (!mounted) return;
       setState(() {});
@@ -617,8 +681,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
     if (!AppLock.isUnlocked) return;
     if (ModalRoute.of(context)?.isCurrent != true) return;
+    // Dernier message réellement affichable : envoyé (pas un écho local en attente ou en échec,
+    // dont l'identifiant n'existe pas côté serveur), non expiré, d'un expéditeur non bloqué.
+    final ignoredUsers = widget.room.client.ignoredUsers;
     final latest = _timeline?.events
-        .where((e) => e.type == EventTypes.Message)
+        .where((e) =>
+            e.type == EventTypes.Message &&
+            e.status.isSent &&
+            !isExpired(e, widget.room) &&
+            !isSenderBlocked(e.senderId, ignoredUsers))
         .fold<Event?>(null, (latest, e) =>
             latest == null || e.originServerTs.isAfter(latest.originServerTs) ? e : latest);
     if (latest == null || latest.eventId == _lastReadMarkerEventId) return;
@@ -649,12 +720,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (timeline == null || _loadingHistory) return;
     if (timeline.isRequestingHistory || !timeline.canRequestHistory) return;
     setState(() => _loadingHistory = true);
+    final before = timeline.events.length;
     try {
       await timeline.requestHistory();
     } catch (_) {
       // Réseau indisponible : on réessaiera au prochain défilement.
     } finally {
       if (mounted) setState(() => _loadingHistory = false);
+    }
+    // Une page peut ne contenir que des événements non affichés (états, réactions, messages
+    // expirés ou d'un bloqué) : la liste ne grandit pas, aucun défilement ne relancerait la
+    // pagination. On revérifie donc après le prochain rendu si des événements ont été ajoutés.
+    if (mounted && timeline.events.length > before) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _onScroll());
     }
   }
 
@@ -676,6 +754,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _setReplyTarget(Event e) => setState(() => _replyingTo = e);
 
+  /// Vrai si les messages éphémères sont actifs : les réactions (non chiffrées, voir
+  /// lib/reactions.dart) sont alors désactivées et masquées.
+  bool get _ephemeralActive => ephemeralTtlSeconds(widget.room) > 0;
+
+  /// Version à jour (depuis la timeline) du message cité en réponse, ou null s'il n'est plus
+  /// utilisable : rédigé, expiré, ou expéditeur bloqué (voir `isReplyTargetUsable`).
+  Event? _usableReplyTarget() {
+    final target = _replyingTo;
+    if (target == null) return null;
+    var current = target;
+    for (final e in _timeline?.events ?? const <Event>[]) {
+      if (e.eventId == target.eventId) {
+        current = e;
+        break;
+      }
+    }
+    final usable = isReplyTargetUsable(
+      redacted: current.redacted,
+      expired: isExpired(current, widget.room),
+      senderBlocked: isSenderBlocked(current.senderId, widget.room.client.ignoredUsers),
+    );
+    return usable ? current : null;
+  }
+
   void _cancelReply() => setState(() => _replyingTo = null);
 
   /// Réactions (emoji) actives sur [e] d'après la timeline chargée, réduites à ce dont
@@ -685,10 +787,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   List<ReactionEntry> _reactionsOf(Event e) {
     final timeline = _timeline;
     if (timeline == null) return const [];
+    // Salon éphémère : réactions non affichées (elles ne sont pas chiffrées).
+    if (_ephemeralActive) return const [];
     final ignoredUsers = widget.room.client.ignoredUsers;
     final result = <ReactionEntry>[];
     for (final r in e.aggregatedEvents(timeline, RelationshipTypes.reaction)) {
       if (r.redacted) continue;
+      // Réaction expirée : ignorée (garde défensive ; dans un salon éphémère, les réactions sont
+      // de toute façon masquées ci-dessus).
+      if (isExpired(r, widget.room)) continue;
       // Voir lib/moderation.dart : la réaction d'un expéditeur bloqué n'est pas plus filtrée par
       // le SDK ou le serveur que ses messages (section « events » de [build]) — même filtre ici.
       if (isSenderBlocked(r.senderId, ignoredUsers)) continue;
@@ -709,6 +816,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (myId == null) return;
     final timeline = _timeline;
     if (timeline == null) return;
+    if (_ephemeralActive) return; // réactions désactivées (non chiffrées)
     final mine = target
         .aggregatedEvents(timeline, RelationshipTypes.reaction)
         .where((r) => !r.redacted && r.senderId == myId && reactionKeyOf(r.content) == key)
@@ -732,6 +840,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _showMessageActions(Event e) async {
     final myId = widget.room.client.userID;
     final existing = _reactionsOf(e);
+    final reactionsDisabled = _ephemeralActive;
     if (!mounted) return;
     await showModalBottomSheet<void>(
       context: context,
@@ -739,25 +848,36 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Wrap(
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final emoji in kQuickReactions)
-                    IconButton(
-                      icon: Text(emoji, style: const TextStyle(fontSize: 22)),
-                      tooltip: myId != null && hasOwnReaction(existing, myId, emoji)
-                          ? 'Retirer cette réaction'
-                          : 'Réagir avec $emoji',
-                      onPressed: () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(_toggleReaction(e, emoji));
-                      },
-                    ),
-                ],
+            if (reactionsDisabled)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 14, 20, 10),
+                child: Text(
+                  'Réactions désactivées dans cette conversation : les réactions ne sont pas '
+                  'chiffrées (le serveur voit l\'emoji, le message visé et l\'auteur) et ne '
+                  'conviennent pas aux messages éphémères.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  children: [
+                    for (final emoji in kQuickReactions)
+                      IconButton(
+                        icon: Text(emoji, style: const TextStyle(fontSize: 22)),
+                        tooltip: myId != null && hasOwnReaction(existing, myId, emoji)
+                            ? 'Retirer cette réaction'
+                            : 'Réagir avec $emoji',
+                        onPressed: () {
+                          Navigator.of(sheetContext).pop();
+                          unawaited(_toggleReaction(e, emoji));
+                        },
+                      ),
+                  ],
+                ),
               ),
-            ),
             const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.reply_outlined),
@@ -1015,9 +1135,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _send() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
-    final replyTo = _replyingTo;
+    // Message cité devenu rédigé, expiré ou venant d'un bloqué : la réponse est annulée (le SDK
+    // recopierait sinon son texte dans le corps de repli `> <@...>` de la réponse).
+    final replyTo = _usableReplyTarget();
+    final replyDropped = _replyingTo != null && replyTo == null;
     _textCtrl.clear();
-    if (replyTo != null) _cancelReply();
+    if (_replyingTo != null) _cancelReply();
+    if (replyDropped && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Le message cité n\'est plus disponible : envoyé sans citation')));
+    }
     _stopTyping();
     final eventId = await widget.room.sendTextEvent(text, inReplyTo: replyTo);
     if (eventId == null && mounted) {
@@ -1188,6 +1315,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final minOtherReceiptIndex =
         otherReceiptIndices.isEmpty ? null : otherReceiptIndices.reduce((a, b) => a < b ? a : b);
     final verificationStatus = _deviceVerificationStatus();
+    // Message cité devenu inutilisable (rédigé, expiré, expéditeur bloqué) : la réponse en cours
+    // est annulée (après ce rendu) et son texte n'est plus affiché au-dessus du champ de saisie.
+    final replyTarget = _usableReplyTarget();
+    if (_replyingTo != null && replyTarget == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _replyingTo != null && _usableReplyTarget() == null) _cancelReply();
+      });
+    }
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.room.getLocalizedDisplayname()),
@@ -1223,9 +1358,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             IconButton(
               icon: const Icon(Icons.group_outlined),
               tooltip: 'Infos du groupe',
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => GroupInfoScreen(room: widget.room)),
-              ),
+              onPressed: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => GroupInfoScreen(room: widget.room)),
+                );
+                // Cet écran recouvrait la conversation : aucun accusé n'a pu partir entre-temps.
+                if (!mounted) return;
+                setState(() {});
+                _maybeSendReadMarker();
+              },
             ),
           if (ephemeralTtlSeconds(widget.room) > 0)
             IconButton(
@@ -1273,6 +1414,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       }
                       final e = events[i];
                       final undecryptable = e.type == EventTypes.Encrypted;
+                      // Message rédigé (supprimé) : bulle « Message supprimé », sans citation,
+                      // sans réactions ni menu d'actions.
+                      final redacted = e.redacted;
                       final mine = e.senderId == widget.room.client.userID;
                       final scheme = Theme.of(context).colorScheme;
                       final bubbleColor =
@@ -1289,7 +1433,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       // répondant n'existait pas du tout. `inReplyTo` (voir [_send]) ajoute une
                       // relation `m.in_reply_to` que le SDK reconnaît ici via `relationshipType` —
                       // on résout l'événement cité pour l'afficher au-dessus de la réponse.
-                      final isReply = e.relationshipType == RelationshipTypes.reply;
+                      final isReply =
+                          !redacted && e.relationshipType == RelationshipTypes.reply;
                       // Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
                       // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur.
                       // Calculé par position (voir [otherReceiptIndices] ci-dessus), pas par
@@ -1298,9 +1443,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       // au plus ancien) que le point de lecture le plus permissif.
                       final seenByOther =
                           mine && minOtherReceiptIndex != null && i >= minOtherReceiptIndex;
-                      final reactions = undecryptable ? const <ReactionEntry>[] : _reactionsOf(e);
+                      final reactions = undecryptable || redacted
+                          ? const <ReactionEntry>[]
+                          : _reactionsOf(e);
                       return GestureDetector(
-                        onLongPress: undecryptable ? null : () => _showMessageActions(e),
+                        onLongPress: undecryptable || redacted
+                            ? null
+                            : () => _showMessageActions(e),
                         child: Align(
                           alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
                           child: Container(
@@ -1333,7 +1482,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                     padding: const EdgeInsets.only(bottom: 4),
                                     child: _ReplyQuote(event: e, timeline: _timeline!, metaColor: metaColor),
                                   ),
-                                if (undecryptable) ...[
+                                if (redacted)
+                                  Text(
+                                    'Message supprimé',
+                                    style: TextStyle(color: metaColor, fontStyle: FontStyle.italic),
+                                  )
+                                else if (undecryptable) ...[
                                   Text(
                                     'Message illisible sur cet appareil (clé manquante)',
                                     style: TextStyle(color: textColor, fontStyle: FontStyle.italic),
@@ -1418,7 +1572,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                   ),
           ),
-          if (_replyingTo != null)
+          if (replyTarget != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
               child: Container(
@@ -1435,11 +1589,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            'Réponse à ${_replyingTo!.senderFromMemoryOrFallback.calcDisplayname()}',
+                            'Réponse à ${replyTarget.senderFromMemoryOrFallback.calcDisplayname()}',
                             style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
                           ),
                           Text(
-                            _stripReplyFallback(_replyingTo!.text),
+                            _stripReplyFallback(replyTarget.text),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -1613,6 +1767,9 @@ class _ReplyQuote extends StatelessWidget {
           label = 'Message supprimé';
         } else if (isExpired(quoted, quoted.room)) {
           label = 'Message expiré';
+        } else if (isSenderBlocked(quoted.senderId, quoted.room.client.ignoredUsers)) {
+          // Ni le nom ni le texte d'un expéditeur bloqué (voir lib/moderation.dart).
+          label = 'Message masqué (expéditeur bloqué)';
         } else if (quoted.type == EventTypes.Encrypted) {
           label = 'Message illisible sur cet appareil';
         } else {

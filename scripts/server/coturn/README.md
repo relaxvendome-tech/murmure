@@ -37,8 +37,9 @@ flux média. Derrière le réseau Docker par défaut (bridge + NAT), coturn ne c
 interne au conteneur et l'annoncerait telle quelle — injoignable depuis Internet. `network_mode:
 host` fait tourner coturn directement sur la pile réseau de la machine hôte, comme s'il n'était
 pas conteneurisé du point de vue réseau : c'est un besoin documenté de coturn lui-même (pas une
-négligence de ce fichier), et la façon la plus simple de l'éviter sans configurer manuellement
-`external-ip=` avec l'IP publique exacte de la machine.
+négligence de ce fichier). Cela suffit quand l'IP publique est portée par l'interface (Hetzner,
+la plupart des VPS) ; derrière un NAT 1:1 (AWS EC2/Lightsail…), l'interface n'a qu'une IP privée
+et `deploy.sh` ajoute alors `external-ip=PUBLIQUE/PRIVÉE` à `turnserver.local.conf`.
 
 ## Ports à ouvrir dans le pare-feu de la machine
 
@@ -57,11 +58,14 @@ contrôle client en clair — jamais le relais UDP lui-même (voir le commentair
 ## Avant de déployer
 
 1. `deploy.sh` configure ce service automatiquement (domaine, secret identique à `turn_secret`
-   dans `../conduit.toml`, chemin du certificat obtenu par Caddy) et le démarre — ou, si le
-   certificat n'est pas encore disponible, désactive `turn_uris` dans `conduit.toml` (appels
-   indisponibles, jamais de relais mal configuré) jusqu'à la relance du script. En configuration
-   manuelle : remplacez tous les `CHANGEME` dans `turnserver.conf`, avec un secret **identique** à
-   `turn_secret` dans `../conduit.toml`.
+   dans `../conduit.local.toml`, chemin du certificat obtenu par Caddy) et le démarre — ou, si le
+   certificat n'est pas encore disponible, désactive `turn_uris` dans `conduit.local.toml` (appels
+   indisponibles, jamais de relais mal configuré) jusqu'à la relance du script. Le modèle suivi
+   `turnserver.conf` n'est jamais modifié : le script écrit `turnserver.local.conf` (ignoré par
+   git, monté par `docker-compose.yml`), et y ajoute `external-ip=PUBLIQUE/PRIVÉE` quand la
+   machine est derrière un NAT 1:1 (AWS…). En configuration manuelle : copiez `turnserver.conf` en
+   `turnserver.local.conf` et remplacez tous les `CHANGEME` de la copie, avec un secret
+   **identique** à `turn_secret` dans `../conduit.local.toml`.
 2. Le certificat est celui de Caddy (volume `caddy-data`, monté en lecture seule dans le
    conteneur coturn). coturn ne recharge pas un certificat renouvelé : `deploy.sh` installe
    `/etc/cron.weekly/murmure-coturn` qui redémarre le service chaque semaine.

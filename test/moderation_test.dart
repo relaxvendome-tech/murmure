@@ -22,4 +22,36 @@ void main() {
       expect(isSenderBlocked('@Eve:ex.org', const ['@eve:ex.org']), isFalse);
     });
   });
+
+  group('hideRoomPreview (aperçu de la liste des conversations)', () {
+    test('message normal : affiché', () {
+      expect(hideRoomPreview(redacted: false, expired: false, senderBlocked: false), isFalse);
+    });
+    test('rédigé, expiré ou expéditeur bloqué : masqué', () {
+      expect(hideRoomPreview(redacted: true, expired: false, senderBlocked: false), isTrue);
+      expect(hideRoomPreview(redacted: false, expired: true, senderBlocked: false), isTrue);
+      expect(hideRoomPreview(redacted: false, expired: false, senderBlocked: true), isTrue);
+    });
+  });
+
+  group('isInviteHidden', () {
+    test('invitant bloqué : invitation masquée', () {
+      expect(isInviteHidden('@eve:ex.org', const ['@eve:ex.org']), isTrue);
+    });
+    test('invitant non bloqué ou inconnu : invitation affichée', () {
+      expect(isInviteHidden('@alice:ex.org', const ['@eve:ex.org']), isFalse);
+      expect(isInviteHidden(null, const ['@eve:ex.org']), isFalse);
+    });
+  });
+
+  group('isReplyTargetUsable', () {
+    test('message cité normal : utilisable', () {
+      expect(isReplyTargetUsable(redacted: false, expired: false, senderBlocked: false), isTrue);
+    });
+    test('rédigé, expiré ou expéditeur bloqué : réponse annulée', () {
+      expect(isReplyTargetUsable(redacted: true, expired: false, senderBlocked: false), isFalse);
+      expect(isReplyTargetUsable(redacted: false, expired: true, senderBlocked: false), isFalse);
+      expect(isReplyTargetUsable(redacted: false, expired: false, senderBlocked: true), isFalse);
+    });
+  });
 }

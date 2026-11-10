@@ -44,7 +44,23 @@ class VerificationManager {
     _sub = null;
   }
 
+  bool _isBlocked(String userId) {
+    try {
+      return client.ignoredUsers.contains(userId);
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _onRequest(KeyVerification request) async {
+    // Demande venant d'un utilisateur bloqué : rejetée d'office, sans aucune UI (même appli
+    // verrouillée — le rejet n'affiche rien).
+    if (_isBlocked(request.userId)) {
+      try {
+        await request.rejectVerification();
+      } catch (_) {}
+      return;
+    }
     if (!AppLock.isUnlocked) return; // voir le commentaire de classe ci-dessus
 
     final nav = navigatorKey?.currentState;
@@ -75,7 +91,7 @@ class VerificationManager {
       ),
     );
 
-    if (accept != true) {
+    if (accept != true || !AppLock.isUnlocked) {
       try {
         await request.rejectVerification();
       } catch (_) {}
@@ -87,10 +103,16 @@ class VerificationManager {
     } catch (_) {
       return;
     }
-    if (nav.mounted) {
-      nav.push(MaterialPageRoute(
-        builder: (_) => SasVerificationScreen(request: request, peerName: peerName),
-      ));
+    // L'appli a pu se reverrouiller pendant le dialogue ou l'acceptation réseau : jamais d'écran
+    // SAS par-dessus le verrou — on annule alors la vérification déjà acceptée.
+    if (!AppLock.isUnlocked || !nav.mounted) {
+      try {
+        await request.cancel('m.user');
+      } catch (_) {}
+      return;
     }
+    nav.push(MaterialPageRoute(
+      builder: (_) => SasVerificationScreen(request: request, peerName: peerName),
+    ));
   }
 }

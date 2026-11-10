@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
 import '../account.dart';
+import '../lock.dart';
 import 'mesh_crypto.dart';
 import 'mesh_foreground_service.dart';
 import 'mesh_gatt_server.dart';
@@ -83,6 +84,19 @@ class Mesh {
   int _rotateIndex = 0;
   bool _running = false;
 
+  /// Génération de cycle de vie, incrémentée par [stop] (donc aussi par [reset]). Corrigé :
+  /// [start] enchaîne plusieurs `await` (ouverture de base, scan, serveur GATT natif…) ; un
+  /// [stop]/[reset] survenant pendant l'un d'eux laissait ensuite [start] reprendre et créer des
+  /// timers/abonnements orphelins (jamais annulés), voire ROUVRIR la base qu'un effacement
+  /// d'urgence venait de supprimer. Après chaque `await`, [start] compare sa génération à celle-ci
+  /// et, si elle a changé, défait ce qu'il a lui-même lancé et sort sans rien émettre.
+  int _gen = 0;
+
+  /// Incrémenté par [reset] seulement : permet à [_database]/[identity], dont l'ouverture était
+  /// déjà en vol au moment d'un effacement d'urgence, de NE PAS réinstaller l'ancienne base ou
+  /// l'ancienne identité dans ce singleton une fois l'effacement passé (voir ces méthodes).
+  int _resetGen = 0;
+
   /// Vrai si le relais Bluetooth tourne (lecture seule, pour l'affichage d'état).
   bool get isRunning => _running;
 
@@ -150,9 +164,10 @@ class Mesh {
 
   Future<sqlcipher.Database> _database() async {
     if (_db != null) return _db!;
+    final resetGen = _resetGen;
     final dir = await getApplicationSupportDirectory();
     final dbPath = p.join(dir.path, Account.kMeshDbName);
-    _db = await sqlcipher.openDatabase(
+    final opened = await sqlcipher.openDatabase(
       dbPath,
       password: await Account.dbKey(),
       version: 5,
@@ -245,7 +260,42 @@ class Mesh {
         }
       },
     );
-    return _db!;
+    if (resetGen != _resetGen) {
+      // Un [reset] (effacement d'urgence) est passé pendant l'ouverture : cette base ne doit ni
+      // être réutilisée ni survivre sur disque. On la referme et on la re-supprime (best-effort).
+      // (Sauf si une ouverture POSTÉRIEURE au reset a déjà installé cette même instance.)
+      if (!identical(_db, opened)) {
+        try {
+          await opened.close();
+        } catch (_) {}
+        if (_db == null) await _deleteDbFiles(dbPath);
+      }
+      throw StateError('mesh reset');
+    }
+    if (_db != null) {
+      // Deux ouvertures concurrentes : on garde la première. sqflite renvoie par défaut la MÊME
+      // instance pour un même chemin (singleInstance) : ne fermer que si c'en est une autre.
+      final current = _db!;
+      if (!identical(current, opened)) {
+        try {
+          await opened.close();
+        } catch (_) {}
+      }
+      return current;
+    }
+    _db = opened;
+    return opened;
+  }
+
+  static Future<void> _deleteDbFiles(String path) async {
+    try {
+      await sqlcipher.deleteDatabase(path);
+    } catch (_) {}
+    for (final suffix in ['-wal', '-shm', '-journal']) {
+      try {
+        await File('$path$suffix').delete();
+      } catch (_) {}
+    }
   }
 
   Future<void> _createContactsTable(sqlcipher.Database db) async {
@@ -313,8 +363,13 @@ class Mesh {
   }
 
   Future<MeshIdentity> identity() async {
-    _identity ??= await MeshIdentity.loadOrCreate((name) => Account.seed(name));
-    return _identity!;
+    final cached = _identity;
+    if (cached != null) return cached;
+    final resetGen = _resetGen;
+    final loaded = await MeshIdentity.loadOrCreate((name) => Account.seed(name));
+    // Effacement d'urgence passé pendant le chargement : ne pas réinstaller l'ancienne identité.
+    if (resetGen != _resetGen) throw StateError('mesh reset');
+    return _identity ??= loaded;
   }
 
   /// Démarre le scan BLE et la boucle de relais périodique. À appeler quand l'utilisateur active
@@ -342,10 +397,16 @@ class Mesh {
     // catch réutilise le nettoyage déjà idempotent (cancel null-safe de chaque abonnement/timer)
     // pour ne pas laisser un démarrage partiel (ex. scan lancé mais rôle périphérique natif en
     // échec) à moitié actif.
+    final gen = _gen;
+    // Vrai si un stop()/reset() est intervenu depuis le début de CE démarrage.
+    bool cancelled() => gen != _gen;
     try {
       await _database();
+      if (cancelled()) return _abandonStart();
       await identity();
-      final calcMode = await Account.read('calc_mode') == '1';
+      if (cancelled()) return _abandonStart();
+      final calcMode = await AppLock.calcMode();
+      if (cancelled()) return _abandonStart();
       // Corrigé : plus de `timeout` (était 1 jour) — à l'échéance, flutter_blue_plus arrêtait le
       // scan EN SILENCE alors que `_running` restait vrai (interrupteur « activé », plus aucun
       // relais). Sans timeout, le scan tourne jusqu'à [stop] (ou coupure de l'adaptateur, gérée
@@ -354,6 +415,7 @@ class Mesh {
         withServices: [serviceUuid],
         continuousUpdates: true,
       );
+      if (cancelled()) return _abandonStart();
       // Corrigé : le service de premier plan (notification persistante) n'est lancé qu'APRÈS le
       // succès de startScan — avant, il démarrait d'abord, et un échec du scan laissait
       // brièvement une notification pour un mode qui n'a jamais tourné.
@@ -370,7 +432,9 @@ class Mesh {
       // Rôle périphérique natif : s'annonce et répond aux lectures/écritures d'autres téléphones.
       // Échoue silencieusement sur les plateformes sans ce canal (iOS, desktop) ou si le Bluetooth
       // est indisponible — le mode reste alors limité au rôle central, comme avant cette extension.
-      _peripheralActive = await MeshGattServerBridge.start();
+      final peripheral = await MeshGattServerBridge.start();
+      if (cancelled()) return _abandonStart();
+      _peripheralActive = peripheral;
       _gattSub = MeshGattServerBridge.incoming().listen(_onGattWrite);
       _rotateTimer = Timer.periodic(const Duration(seconds: 15), (_) => _rotateReadValue());
       unawaited(_rotateReadValue());
@@ -392,7 +456,7 @@ class Mesh {
       // vérifiés sur un appareil physique, faute de matériel dans ce bac à sable — seule la
       // disparition totale de toute détection, le défaut d'avant ce correctif, est certaine.
       _adapterSub = FlutterBluePlus.adapterState.listen((state) {
-        if (_running && state != BluetoothAdapterState.on) {
+        if (_running && gen == _gen && state != BluetoothAdapterState.on) {
           _eventsController.add(const MeshEvent.adapterOff());
           // Trouvé en audit interne (revue indépendante) : `stop()` émet toujours
           // `MeshEvent.stopped()` à la fin, quelle que soit la raison de l'arrêt. Sans le
@@ -406,9 +470,31 @@ class Mesh {
 
       _eventsController.add(const MeshEvent.started());
     } catch (_) {
+      // Démarrage déjà annulé par un stop()/reset() concurrent : celui-ci a tout nettoyé et
+      // signalé l'arrêt ; ne pas relancer un second stop() (qui émettrait un 2e événement).
+      if (cancelled()) return _abandonStart();
       await stop();
       rethrow;
     }
+  }
+
+  /// Un [stop]/[reset] est intervenu pendant un `await` de [start] : ce [stop] a déjà annulé ce
+  /// qui existait à ce moment-là, mais [start] a pu lancer quelque chose APRÈS (scan BLE, serveur
+  /// GATT natif, service de premier plan). On défait ici, sans toucher à `_running` ni aux
+  /// abonnements/timers d'un éventuel démarrage plus récent (génération différente), et sans émettre
+  /// d'événement (le [stop] concurrent l'a déjà fait). Si un démarrage plus récent tourne déjà
+  /// (`_running`), on ne coupe rien : ses propres ressources natives sont les mêmes (singletons).
+  Future<void> _abandonStart() async {
+    if (_running) return;
+    try {
+      await MeshGattServerBridge.stop();
+    } catch (_) {}
+    try {
+      await MeshForegroundService.stop();
+    } catch (_) {}
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
   }
 
   /// [emitStoppedEvent] : `false` uniquement quand l'appelant a déjà notifié l'UI d'une raison
@@ -417,6 +503,7 @@ class Mesh {
   /// volontaire via l'interrupteur, effacement d'urgence via [reset]) gardent la valeur par défaut
   /// `true`, qui préserve le comportement existant.
   Future<void> stop({bool emitStoppedEvent = true}) async {
+    _gen++; // invalide tout start() en cours (voir [_gen])
     _running = false;
     _peripheralActive = false;
     await _scanSub?.cancel();
@@ -562,11 +649,19 @@ class Mesh {
     if (meshValidateIncoming(env) != null) return;
 
     final db = await _database();
-    final already = await db.query('seen', where: 'id = ?', whereArgs: [env.id], limit: 1);
+    final me = await identity();
+    final forMe = _bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes));
+    // Clé de déduplication : id seul pour un message qui NOUS est destiné (écrit seulement après
+    // déchiffrement authentifié), SHA-256(id ‖ recipientHint) pour une enveloppe à relayer — voir
+    // [meshSeenKey] : une copie forgée au hint modifié ne bloque plus le vrai message chez les
+    // relais. Pas de migration : `seen.id` (comme `outbox.id`) est un BLOB PRIMARY KEY sans
+    // contrainte de longueur ; les anciennes lignes (id seul, 16 octets) expirent d'elles-mêmes
+    // par [_purgeExpired] et ne peuvent pas entrer en collision avec les nouvelles (32 octets).
+    final seenKey = await meshSeenKey(id: env.id, recipientHint: env.recipientHint, forMe: forMe);
+    final already = await db.query('seen', where: 'id = ?', whereArgs: [seenKey], limit: 1);
     if (already.isNotEmpty) return;
 
-    final me = await identity();
-    if (_bytesEqual(env.recipientHint, await meshRecipientHint(me.publicKeyBytes))) {
+    if (forMe) {
       // Corrigé (usurpation) : on ne déchiffre/affiche que les messages d'expéditeurs présents
       // dans `mesh_contacts`. La clé publique de l'expéditeur voyage en clair : sans ce filtre,
       // n'importe qui pouvait ouvrir un canal avec nous sous une identité jamais validée par QR.
@@ -585,7 +680,7 @@ class Mesh {
             if (!await _commitRecvPlan(txn, env.senderPublicKey, env.chainCounter, plan)) {
               return false;
             }
-            await txn.insert('seen', {'id': env.id, 'seen_at': now},
+            await txn.insert('seen', {'id': seenKey, 'seen_at': now},
                 conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
             await txn.insert(
               'inbox',
@@ -603,15 +698,22 @@ class Mesh {
       // Pour nous mais non authentifié (falsifié, corrompu) ou d'un expéditeur inconnu : surtout
       // PAS marqué `seen` — sinon une copie forgée portant l'id d'un vrai message bloquerait ce
       // dernier à son arrivée. Relayé comme n'importe quelle enveloppe (un relais qui s'abstient
-      // révélerait à un observateur que l'enveloppe nous était destinée).
-      await _storeForRelay(db, env);
+      // révélerait à un observateur que l'enveloppe nous était destinée), sous la clé de relais.
+      await _storeForRelay(
+          db, env, await meshSeenKey(id: env.id, recipientHint: env.recipientHint, forMe: false));
       return;
     }
 
-    await db.insert('seen', {'id': env.id, 'seen_at': DateTime.now().millisecondsSinceEpoch},
+    // Pas pour nous. Une copie dont le ttl est déjà épuisé ne sera de toute façon pas relayée :
+    // on ne la marque PAS `seen`, pour qu'une copie forgée à ttl 1 (le ttl n'est pas authentifié,
+    // voir meshValidateIncoming) ne bloque pas la vraie enveloppe à ttl plus élevé.
+    // LIMITE RESTANTE : une copie forgée au même id ET au même hint mais à ttl réduit (≥ 2) est
+    // encore acceptée en premier et raccourcit la portée de l'original chez ce relais.
+    if (env.relayed().expired) return;
+    await db.insert('seen', {'id': seenKey, 'seen_at': DateTime.now().millisecondsSinceEpoch},
         conflictAlgorithm: sqlcipher.ConflictAlgorithm.ignore);
-    // Pas pour nous : on le garde dans notre propre file pour le repasser au prochain appareil.
-    await _storeForRelay(db, env);
+    // On le garde dans notre propre file pour le repasser au prochain appareil.
+    await _storeForRelay(db, env, seenKey);
   }
 
   Future<bool> _isContact(sqlcipher.DatabaseExecutor db, Uint8List peer) async {
@@ -623,13 +725,18 @@ class Mesh {
   /// Met une enveloppe de tiers en file de relais (`own = 0`), puis applique le plafond
   /// [_maxRelayedEnvelopes] en évinçant les plus anciennes par ordre d'INSERTION (rowid), jamais
   /// par `created_at`, que l'expéditeur choisit librement.
-  Future<void> _storeForRelay(sqlcipher.Database db, MeshEnvelope env) async {
+  ///
+  /// [relayKey] = [meshSeenKey] (forMe: false) : sert de clé primaire `outbox.id` pour les
+  /// enveloppes de tiers (au lieu de l'id seul), sinon une copie forgée au hint modifié, insérée
+  /// la première, occuperait la ligne et le vrai message serait ignoré (`ConflictAlgorithm.ignore`)
+  /// à son tour. Nos propres messages (`own = 1`) gardent leur id de 16 octets : pas de collision.
+  Future<void> _storeForRelay(sqlcipher.Database db, MeshEnvelope env, Uint8List relayKey) async {
     final relayed = env.relayed();
     if (relayed.expired) return;
     await db.insert(
       'outbox',
       {
-        'id': env.id,
+        'id': relayKey,
         'recipient': env.recipientHint,
         'payload': relayed.serialize(),
         'created_at': env.createdAt.millisecondsSinceEpoch,
@@ -689,6 +796,17 @@ class Mesh {
   /// abandonne plutôt que de faire calculer un nombre de HMAC arbitrairement grand à partir d'un
   /// compteur falsifié (un relais malveillant ne peut pas altérer le contenu — authentifié par le
   /// GCM — mais pourrait forger ce compteur en clair pour un déni de service local).
+  ///
+  /// LIMITE CONNUE (documentée, non corrigée) : si plus de 200 messages consécutifs d'un contact
+  /// ne nous parviennent jamais (perdus, expirés, évincés des files de relais), tout message
+  /// suivant est hors fenêtre et indéchiffrable : le canal de réception depuis ce contact reste
+  /// bloqué. Une « réinitialisation du canal » par simple suppression locale de `ratchet_chain` /
+  /// `ratchet_skipped` n'est PAS sûre : [_ensureRatchetSeeded] ré-amorcerait les deux chaînes depuis
+  /// le même secret ECDH statique (un nouvel échange QR redonne les mêmes clés publiques), donc les
+  /// mêmes clés de message dès le rang 0 — rejeu des anciennes enveloppes encore en circulation
+  /// (la table `seen` n'en garde que 72 h) et réutilisation de clés AES-GCM. Une vraie
+  /// réinitialisation demande un nouvel aléa partagé (époque de cliquet), donc un changement de
+  /// protocole — hors périmètre. Voir aussi le commentaire de `_composeAndSend` (mesh_screen.dart).
   static const _maxRatchetSkipAhead = 200;
 
   /// Nombre de clés de rangs sautés conservées par contact, pour tolérer les messages qui
@@ -911,7 +1029,8 @@ class Mesh {
   /// appelé par [Account.wipeLocal] lors d'un effacement d'urgence.
   static Future<void> reset() async {
     final m = instance;
-    await m.stop();
+    m._resetGen++; // voir [_database]/[identity] : une ouverture en vol ne réinstalle rien
+    await m.stop(); // incrémente aussi [_gen] : un start() en cours s'arrête au prochain await
     try {
       await m._db?.close();
     } catch (_) {}

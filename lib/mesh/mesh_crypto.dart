@@ -198,6 +198,29 @@ Future<Uint8List> meshRecipientHint(Uint8List publicKey) async {
   return Uint8List.fromList(hash.bytes);
 }
 
+/// Clé de déduplication (table `seen`, et `outbox.id` des enveloppes de tiers) d'une enveloppe.
+///
+/// Corrigé (censure par copie forgée) : un relais se contentait de l'id (16 octets, en clair et
+/// NON authentifié pour lui — il ne peut pas vérifier le GCM). Un attaquant qui voyait passer un
+/// message pouvait donc en émettre une copie au même id mais au [recipientHint] modifié : chaque
+/// relais qui recevait la copie d'abord marquait l'id « vu » et rejetait ensuite le VRAI message,
+/// qui ne se propageait plus. Désormais :
+/// - [forMe] faux (enveloppe à RELAYER) : clé = SHA-256(id ‖ recipientHint), 32 octets — une copie
+///   au hint modifié a une autre clé et ne bloque plus l'original ;
+/// - [forMe] vrai (enveloppe qui NOUS est destinée) : l'id seul (16 octets), écrit en base
+///   uniquement après un déchiffrement authentifié réussi (voir `Mesh._handleIncomingLocked`).
+/// Les longueurs différentes (16 vs 32) rendent toute collision entre les deux espaces impossible.
+/// Fonction pure (aucune I/O), testée dans test/mesh_crypto_test.dart.
+Future<Uint8List> meshSeenKey({
+  required Uint8List id,
+  required Uint8List recipientHint,
+  required bool forMe,
+}) async {
+  if (forMe) return Uint8List.fromList(id);
+  final hash = await Sha256().hash([...id, ...recipientHint]);
+  return Uint8List.fromList(hash.bytes);
+}
+
 // -----------------------------------------------------------------------------------------------
 // Enveloppe
 // -----------------------------------------------------------------------------------------------

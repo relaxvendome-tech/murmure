@@ -7,6 +7,7 @@ import 'package:matrix/matrix.dart';
 import 'account.dart';
 import 'ephemeral.dart';
 import 'lock.dart';
+import 'reactions.dart';
 
 /// Notifications locales de nouveaux messages, tant que le PROCESSUS de l'appli vit (premier plan,
 /// ou arrière-plan avant que le système ne le tue).
@@ -19,8 +20,9 @@ import 'lock.dart';
 /// - Un message encore chiffré à sa réception (clé pas encore arrivée) notifie immédiatement un
 ///   « Nouveau message » générique : la mise à jour `decryptedTimelineQueue` envoyée plus tard par
 ///   le SDK est reconstruite SANS expéditeur (impossible d'exclure ses propres messages ou ceux d'un
-///   utilisateur bloqué) et est donc ignorée. Contrepartie : une réaction ou un événement chiffré
-///   illisible peut aussi notifier.
+///   utilisateur bloqué) et est donc ignorée. Contrepartie : un événement chiffré illisible peut
+///   aussi notifier. Les réactions, elles, sont ignorées : leur relation `m.annotation` est en
+///   clair (type `m.reaction`, ou `m.relates_to` recopié dans l'enveloppe `m.room.encrypted`).
 /// - Rien n'est notifié pendant une synchronisation initiale (`Client.prevBatch == null` :
 ///   première connexion, ou vidage du cache après blocage/déblocage d'un utilisateur), sinon tout
 ///   l'historique récent déclencherait une rafale de fausses notifications.
@@ -102,6 +104,7 @@ class MessageNotifier with WidgetsBindingObserver {
       if (u.type != EventUpdateType.timeline) return;
       final type = u.content['type'];
       if (type != EventTypes.Message && type != EventTypes.Encrypted) return;
+      if (isAnnotationRelation(u.content['content'])) return; // réaction, pas un message
       final room = client.getRoomById(u.roomID);
       if (room == null || room.membership != Membership.join) return;
       if (room.id == _activeRoomId && _isForegroundUnlocked) return;
@@ -115,7 +118,7 @@ class MessageNotifier with WidgetsBindingObserver {
       if (DateTime.now().difference(event.originServerTs) > _maxAge) return;
       if (isExpired(event, room)) return;
       if (!await isEnabled()) return;
-      if (await Account.read('calc_mode') == '1') return; // mode discret : silence total
+      if (await AppLock.calcMode()) return; // mode discret : silence total
       if (!_seen.add(event.eventId)) return; // dédoublonnage (re-sync)
       if (_seen.length > _maxSeen) _seen.remove(_seen.first);
       _count++;
