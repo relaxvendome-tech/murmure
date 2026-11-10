@@ -330,12 +330,17 @@ class AppLock {
   /// voir ui/calculator_lock_screen.dart, où seule une saisie ayant la forme d'un code (4 à 8
   /// chiffres réellement tapés, sans opérateur) est testée, un calcul anodin ne consommant jamais
   /// de tentative. À réserver à des comparaisons hors déverrouillage (aucun appelant actuel).
+  ///
+  /// `pin_hash` est lu EN PREMIER, avant [_salt] — voir le commentaire de [check] ci-dessous
+  /// (même défaut corrigé pour la même raison, cette méthode n'avait simplement aucun appelant
+  /// pour le révéler).
   static Future<PinResult> classify(String pin) async {
+    final pinHash = await Account.read('pin_hash');
+    if (pinHash == null) return PinResult.wrong;
     final h = await _hash(pin, await _salt());
     final duressHash = await Account.read('duress_hash');
-    final pinHash = await Account.read('pin_hash');
     if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;
-    if (pinHash != null && _same(h, pinHash)) return PinResult.ok;
+    if (_same(h, pinHash)) return PinResult.ok;
     return PinResult.wrong;
   }
 
@@ -344,14 +349,31 @@ class AppLock {
   ///
   /// Lève [KeystoreUnavailable] (sans compter d'échec) si le sel ou l'empreinte est illisible :
   /// un code juste ne doit jamais être compté faux à cause d'une panne Keystore.
+  ///
+  /// Trouvé en audit interne (lecture du code réel, pas seulement du commentaire juste au-dessus) :
+  /// `pin_hash` était lu APRÈS avoir déjà calculé `salt`/`h`, donc après l'appel à [_salt] —
+  /// qui, pour `create: false` (le cas de cette méthode), lève TOUJOURS [KeystoreUnavailable] dès
+  /// que le sel est absent, quel que soit [lockMarkerPresent] (seul [setPin] passe `create: true`,
+  /// où ce garde-fou a un sens : ne jamais recréer un sel tant qu'un code existe déjà). Le sel
+  /// n'étant écrit que par [setPin], l'ancien ordre faisait donc lever cette exception AVANT même
+  /// d'atteindre la branche `pinHash == null` plus bas dès qu'aucun code n'avait jamais été
+  /// configuré — rendant cette branche (et son commentaire « aucun code configuré : rien à
+  /// comparer ») inatteignable, à l'inverse de ce qu'elle prétend faire. SANS CONSÉQUENCE
+  /// OBSERVABLE aujourd'hui, vérifié en relisant `ui/lock_screens.dart` : `LockGate` (`_init`,
+  /// `_relock`) n'affiche jamais `PinScreen` ni le mode calculatrice quand [AppLock.enabled] est
+  /// faux, donc [check] n'est en pratique jamais appelée dans cet état. Mais cette méthode ne doit
+  /// pas dépendre UNIQUEMENT de cette garde côté appelant pour rester sûre, même principe que le
+  /// reste de ce fichier (ex. [KeystoreUnavailable] lui-même). `pin_hash` est donc maintenant lu EN
+  /// PREMIER : si un code existe réellement, [_salt] n'est appelée qu'à ce moment-là, et son échec
+  /// signale alors une vraie incohérence Keystore (sel illisible alors que l'empreinte l'est),
+  /// plutôt que d'être confondu avec la simple absence de code.
   static Future<PinResult> check(String pin) async {
-    final salt = await _salt();
-    final h = await _hash(pin, salt);
     final pinHash = await Account.read('pin_hash');
     if (pinHash == null) {
       if (await lockMarkerPresent()) throw const KeystoreUnavailable();
       return PinResult.wrong; // aucun code configuré : rien à comparer, aucun échec compté
     }
+    final h = await _hash(pin, await _salt());
     final duressHash = await Account.read('duress_hash');
     // Le code de contrainte est testé en premier et de la même façon : même durée de calcul.
     if (_duressActive(duressHash, pinHash) && _same(h, duressHash!)) return PinResult.duress;
