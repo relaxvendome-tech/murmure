@@ -18,15 +18,11 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    // Versions reprises telles quelles du gabarit `flutter create` officiel de Flutter 3.29.0
-    // (lib/src/android/gradle_utils.dart), la version épinglée dans le workflow CI — voir le
-    // commentaire sur flutter-version dans .github/workflows/build.yml pour pourquoi.
-    id("com.android.application") version "8.7.0" apply false
-    // 2.1.0, pas 1.8.22 : un plugin natif de ce projet embarque un kotlin-stdlib compilé avec les
-    // métadonnées Kotlin 2.1.0 (jetified-kotlin-stdlib-2.1.10.jar dans l'échec du run précédent),
-    // illisible par un compilateur Kotlin 1.8.x. Suggestion reprise telle quelle du message
-    // d'erreur Flutter ("Your project requires a newer version of the Kotlin Gradle plugin").
-    id("org.jetbrains.kotlin.android") version "2.1.0" apply false
+    // Versions reprises telles quelles du gabarit `flutter create` officiel de Flutter 3.41.9
+    // (packages/flutter_tools/lib/src/android/gradle_utils.dart : AGP 8.11.1, Kotlin 2.2.20,
+    // Gradle 8.14), la version épinglée dans le workflow CI. Flutter 3.44+ passe à AGP 9/Gradle 9.
+    id("com.android.application") version "8.11.1" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
 include(":app")

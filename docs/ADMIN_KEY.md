@@ -12,7 +12,7 @@ sauvegarder et utiliser en pratique.
 
 ## Pourquoi cette limite existe
 
-Murmure chiffre chaque message de bout en bout (Olm/Megolm, via libolm/`flutter_olm` avec `matrix` 0.29.x ; vodozemac n'est pas encore utilisé) : seul le téléphone du
+Murmure chiffre chaque message de bout en bout (Olm/Megolm, via vodozemac — implémentation Rust auditée — avec `matrix` 16.x et `flutter_vodozemac`) : seul le téléphone du
 destinataire peut le déchiffrer. Une « clé maîtresse » capable de lire les messages de n'importe
 qui serait, techniquement, une porte dérobée — et une porte dérobée s'ouvre pour n'importe qui qui
 met la main sur la clé, pas seulement vous : vol du téléphone, saisie judiciaire, piratage du

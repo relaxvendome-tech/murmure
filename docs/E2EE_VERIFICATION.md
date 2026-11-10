@@ -1,5 +1,14 @@
 # Vérification des appareils (clés E2EE)
 
+> **Migration vodozemac (branche `migration/vodozemac`)** : Murmure utilise désormais
+> `matrix: ^16.0.2` + `flutter_vodozemac` 0.9 (vodozemac, Rust, audité) au lieu de `matrix` 0.29 +
+> libolm. Toute la crypto Olm/Megolm, la SAS (`KeyVerification`, émojis) et la signature des clés
+> passent par vodozemac à l'intérieur du SDK ; l'API utilisée par `lib/verification/` et les écrans
+> SAS/appareils (`DeviceKeysList.startVerification`, `setVerified`, flux `KeyVerification`) a
+> compilé à l'identique contre le SDK 16 (analyse statique CI). Seule `KeyVerificationMethod.emoji`
+> reste annoncée. Les mentions de « 0.29 »/libolm plus bas sont historiques. Non revalidé sur
+> appareil : refaire une vérification SAS réelle entre deux téléphones avant publication.
+
 ## État actuel (vérifié contre `lib/`)
 
 | Capacité | État | Preuve |
@@ -140,7 +149,7 @@ l'état `error` plutôt qu'un flux silencieusement cassé.
 ## Ce qui a été trouvé
 
 Murmure chiffre de bout en bout toutes les conversations via Megolm/Olm (par
-`flutter_olm`/libolm — `matrix` 0.29.13 n'utilise pas vodozemac —, piloté par `matrix-dart-sdk`), comme documenté ailleurs dans ce dépôt. Mais
+vodozemac depuis la migration vers `matrix` 16.x — à l'époque de ce constat `flutter_olm`/libolm avec `matrix` 0.29.13 —, piloté par `matrix-dart-sdk`), comme documenté ailleurs dans ce dépôt. Mais
 aucun écran, aucun code de ce dépôt ne permet à deux correspondants de **vérifier** que la clé
 Olm/Ed25519 présentée pour un appareil est bien celle de la personne attendue, plutôt que celle
 d'un appareil ajouté par quelqu'un d'autre.

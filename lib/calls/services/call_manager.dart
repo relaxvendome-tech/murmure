@@ -353,6 +353,15 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     }
   }
 
+  /// Ajouté à `WebRTCDelegate` entre matrix-dart-sdk 0.29 et 16 : appelé par `VoIP` juste AVANT
+  /// `initOutboundCall`/`initWithInvite`, donc avant toute `RTCPeerConnection` (créée, elle,
+  /// exclusivement par [createPeerConnection], qui applique [CallPolicy]). Volontairement vide :
+  /// toute la prise en charge (verrou, blocage, écran, appel manqué) reste dans [handleNewCall],
+  /// appelé ensuite par le SDK — n'y rien faire ici n'ouvre aucun chemin qui contournerait ces
+  /// contrôles (aucune UI, aucun média n'est démarré par cette méthode).
+  @override
+  Future<void> registerListeners(CallSession session) async {}
+
   /// Trouvé en audit interne (revue croisée IA, confirmé en relisant la structure réelle des
   /// widgets — voir le commentaire de [AppLock.isUnlocked]) : [LockGate] n'est pas une frontière
   /// de navigation, donc le `push` ci-dessous s'empilait TOUJOURS par-dessus l'écran de

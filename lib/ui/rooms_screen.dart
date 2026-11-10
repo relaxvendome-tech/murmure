@@ -631,8 +631,8 @@ class _AddContactScreenState extends State<AddContactScreen> {
   }
 }
 
-/// Conversation chiffrée (Olm/Megolm via libolm, géré en interne par le SDK Matrix — voir le
-/// commentaire détaillé dans main.dart sur le choix libolm/flutter_olm à cette version du SDK).
+/// Conversation chiffrée (Olm/Megolm via vodozemac, géré en interne par le SDK Matrix — voir le
+/// commentaire détaillé dans main.dart sur vodozemac et le refus de démarrer sans chiffrement).
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.room, required this.callManager});
   final Room room;
@@ -1130,7 +1130,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      await widget.room.client.ignoreUser(otherId);
+      // `leaveRooms: false` : depuis matrix 3.0.0, `ignoreUser` QUITTE par défaut les
+      // conversations directes avec ce contact (événement `leave` visible par lui) et refuse ses
+      // invitations. On garde le comportement d'avant la migration (simple
+      // `m.ignored_user_list`, rien de visible côté contact) : le texte « Il n'en sera pas
+      // averti » reste exact et « Débloquer » rend la conversation intacte.
+      await widget.room.client.ignoreUser(otherId, leaveRooms: false);
       messenger.showSnackBar(const SnackBar(content: Text('Contact bloqué')));
       navigator.pop();
     } catch (_) {
@@ -1507,10 +1512,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       final showSenderName = !mine && !widget.room.isDirectChat;
                       // Trouvé en audit interne (revue croisée IA) : citer un message précis en
                       // répondant n'existait pas du tout. `inReplyTo` (voir [_send]) ajoute une
-                      // relation `m.in_reply_to` que le SDK reconnaît ici via `relationshipType` —
-                      // on résout l'événement cité pour l'afficher au-dessus de la réponse.
-                      final isReply =
-                          !redacted && e.relationshipType == RelationshipTypes.reply;
+                      // relation `m.in_reply_to` que le SDK reconnaît ici via `inReplyToEventId()`
+                      // (matrix >= 4.0.0 : `RelationshipTypes.reply` supprimé) — on résout
+                      // l'événement cité pour l'afficher au-dessus de la réponse.
+                      final isReply = !redacted && e.inReplyToEventId() != null;
                       // Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
                       // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur.
                       // Calculé par position (voir [otherReceiptIndices] ci-dessus), pas par

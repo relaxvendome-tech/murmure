@@ -28,7 +28,10 @@ class _FakeClient extends Fake implements Client {
 TurnServerCredentials _creds({List<String>? uris}) => TurnServerCredentials(
       password: 'pw',
       ttl: 600,
-      uris: uris ?? ['turns:turn.example.org:5349?transport=tcp', 'turn:turn.example.org:3478'],
+      // matrix >= 9 : `uris` est une `List<Uri>`.
+      uris: (uris ?? ['turns:turn.example.org:5349?transport=tcp', 'turn:turn.example.org:3478'])
+          .map(Uri.parse)
+          .toList(),
       username: 'user',
     );
 

@@ -5,6 +5,8 @@
 /// Trouvé en audit interne (vérifié contre le SDK matrix-dart pinné, tag v0.29.13, et contre
 /// Synapse à HEAD — jamais supposé) : `Client.ignoreUser` (appelé par `_blockContact` dans
 /// `lib/ui/rooms_screen.dart`) n'écrit QUE le compte `m.ignored_user_list` de l'utilisateur.
+/// (matrix 16 : appelé avec `leaveRooms: false` pour conserver exactement ce comportement ; par
+/// défaut le SDK quitterait désormais aussi la conversation directe, ce que le contact verrait.)
 /// Aucune référence à `ignoredUsers`/`ignored_user` n'existe dans `room.dart`, `timeline.dart` ou
 /// `event.dart` du SDK épinglé : rien côté client ne retire les événements d'un expéditeur bloqué
 /// de la timeline affichée. Côté serveur, `synapse/handlers/sync.py` (dépôt `element-hq/synapse`,

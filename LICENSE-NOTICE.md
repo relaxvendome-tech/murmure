@@ -7,11 +7,12 @@ pas à un outil d'audit) se prenne en connaissance de cause plutôt que par omis
 
 ## Le fait vérifié
 
-`matrix-dart-sdk` (le paquet `matrix: ^0.29.0`, résolu à `0.29.13`, dont dépend directement
+`matrix-dart-sdk` (le paquet `matrix: ^16.0.2` — auparavant `^0.29.0` —, dont dépend directement
 Murmure pour tout le protocole Matrix/E2EE) est distribué sous licence **AGPL-3.0**. Vérifié deux
 fois indépendamment :
 - page du paquet sur `pub.dev` (section licence) ;
-- fichier `LICENSE` du dépôt source cloné localement au tag `v0.29.0`.
+- fichier `LICENSE` du dépôt source cloné localement aux tags `v0.29.0` et `v16.0.2` (toujours
+  AGPL-3.0).
 
 FluffyChat, le client de référence du même éditeur (Famedly) pour le code de vérification SAS et
 de cross-signing, est également AGPL-3.0 — logique puisqu'il utilise le même SDK.
@@ -43,21 +44,21 @@ cette question n'est pas tranchée.**
 
 ## Composants tiers embarqués dans le binaire
 
-### libolm 3.2.16 — Apache License 2.0
+### vodozemac (Rust) et ses bindings Dart/Flutter
 
-`android/app/src/main/jniLibs/<abi>/libolm.so` est compilée par `scripts/build_libolm.sh` depuis le
-tag `3.2.16` du dépôt officiel `https://gitlab.matrix.org/matrix-org/olm` (commit
-`7e0c8277032e40308987257b711b38af8d77cc69`, vérifié par le script), et livrée dans l'APK/AAB.
-libolm est publiée sous **Apache License 2.0** (fichier `LICENSE` du dépôt source ; en-têtes
-« Copyright 2015-2016 OpenMarket Ltd », « Copyright 2018-2019 New Vector Ltd », constatés sur la
-3.2.15, à reconfirmer sur la 3.2.16 ; pas de fichier NOTICE dans la 3.2.15). Obligations lors de la
-distribution : fournir une copie de la licence Apache-2.0 et conserver ces mentions de copyright
-(à reprendre dans l'écran « Licences » de l'appli ou un fichier livré avec elle — **non encore
-fait côté appli**, à prévoir avant distribution). Aucune modification n'est apportée au code de
-libolm (seules les options de compilation diffèrent). Apache-2.0 est compatible avec une
-distribution sous AGPL-3.0 (voir plus haut) ; elle ne règle pas, à elle seule, la question de
-licence de Murmure.
+libolm n'est plus embarquée (retirée avec la migration vers `matrix` 16.x). Le chiffrement passe
+désormais par :
 
-libolm est dépréciée en amont au profit de vodozemac : la migration vers une version de `matrix`
-basée sur vodozemac reste un chantier séparé.
+- **`vodozemac`** (crate Rust 0.10.x de Matrix.org, compilée dans
+  `libvodozemac_bindings_dart.so`) — **Apache License 2.0** : fournir une copie de la licence et
+  conserver les mentions de copyright lors de la distribution (écran « Licences » de l'appli ou
+  fichier livré — **non encore fait côté appli**, à prévoir avant distribution) ;
+- **`vodozemac`** (paquet Dart) et **`flutter_vodozemac`** 0.9.0 (dépôt `famedly/dart-vodozemac`,
+  y compris la copie de cargokit qu'il embarque) — **AGPL-3.0** (fichiers `LICENSE` du dépôt,
+  vérifiés) : même conséquence que `matrix-dart-sdk` ci-dessus, ne change pas la décision à prendre ;
+- dépendances Rust transitives (`flutter_rust_bridge`, RustCrypto `aes`/`ctr`/`hmac`/`pbkdf2`/
+  `sha2`, etc.) — licences MIT et/ou Apache-2.0 usuelles, **inventaire exhaustif non fait** (à
+  produire, p. ex. avec `cargo about`, avant distribution).
 
+Apache-2.0 et MIT sont compatibles avec une distribution sous AGPL-3.0 ; elles ne règlent pas, à
+elles seules, la question de licence de Murmure.

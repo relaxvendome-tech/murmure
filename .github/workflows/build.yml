@@ -9,7 +9,7 @@ name: Build Murmure (AAB + APK)
 #   l'AAB produit est signé debug — jamais de repli silencieux.
 on:
   push:
-    branches: [main]
+    branches: [main, 'migration/**']
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -34,10 +34,12 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          # Épinglé (plutôt que "stable" flottant) : les versions de Flutter plus récentes basculent
-          # par défaut sur Gradle 9, qui a supprimé des API encore utilisées par certains plugins.
-          # 3.29.0 reste sur Gradle 8.x (AGP 8.7.0, voir android/settings.gradle.kts).
-          flutter-version: '3.29.0'
+          # Épinglé (plutôt que "stable" flottant). 3.41.9 embarque Dart 3.11 (exigé par
+          # matrix 16.x ; flutter_vodozemac 0.9 exige Flutter >= 3.38) et reste sur Gradle 8.x
+          # (AGP 8.11.1, Kotlin 2.2.20, Gradle 8.14 : voir android/settings.gradle.kts). Flutter
+          # 3.44+ bascule sur AGP 9/Gradle 9, qui a supprimé des API encore utilisées par
+          # certains plugins.
+          flutter-version: '3.41.9'
           channel: 'stable'
 
       - name: Type de build
@@ -45,12 +47,13 @@ jobs:
           echo "Release Play : $MURMURE_REQUIRE_RELEASE_SIGNING (ref=$GITHUB_REF, event=$GITHUB_EVENT_NAME)"
           echo "versionCode : $((100 + GITHUB_RUN_NUMBER))"
 
-      - name: Compiler libolm 3.2.16 (alignée 16 Ko, commit source vérifié)
-        # Remplace flutter_olm 2.0.0, dont le libolm.so était aligné 4 Ko (refusé par Play). Le
-        # script clone le tag officiel, ÉCHOUE si le commit diffère du hash épinglé, compile pour
-        # arm64-v8a/armeabi-v7a/x86_64 avec le NDK 28.2.13676358 (installé si absent), puis vérifie
-        # SONAME (libolm.so), alignement LOAD >= 0x4000 et symboles exportés de chaque .so.
-        run: bash scripts/build_libolm.sh
+      - name: Toolchain Rust (vodozemac, compilé par cargokit via flutter_vodozemac)
+        # flutter_vodozemac compile la crate Rust de vodozemac au build Gradle (cargokit), avec le
+        # NDK du projet (android.ndkVersion) et -z max-page-size=16384. Cibles installées ici
+        # explicitement plutôt que laissées au bootstrap rustup de cargokit.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
 
       - name: Installer les dépendances
         run: flutter pub get
@@ -141,29 +144,35 @@ jobs:
       - name: Construire l'APK universel (installation manuelle sur tablette de test)
         run: flutter build apk --release --build-number=$((100 + GITHUB_RUN_NUMBER))
 
-      - name: Vérifier la présence de libolm.so (AAB et APK, 3 ABI)
-        # Sans libolm.so, package:olm ne peut pas s'initialiser et l'appli refuse de démarrer :
-        # ÉCHEC pour tout build (développement comme release), jamais un simple avertissement.
+      - name: Vérifier la présence de la bibliothèque vodozemac (AAB et APK, 3 ABI)
+        # Sans libvodozemac_bindings_dart.so, `vod.init()` échoue, le SDK Matrix démarre sans
+        # chiffrement et l'appli refuse alors de démarrer : ÉCHEC pour tout build (développement
+        # comme release), jamais un simple avertissement.
         run: |
           aab=build/app/outputs/bundle/release/app-release.aab
           apk=build/app/outputs/flutter-apk/app-release.apk
+          lib=libvodozemac_bindings_dart.so
           aab_list="$(unzip -Z1 "$aab")"
           apk_list="$(unzip -Z1 "$apk")"
           missing=""
           for abi in arm64-v8a armeabi-v7a x86_64; do
-            grep -qx "base/lib/$abi/libolm.so" <<<"$aab_list" || missing="$missing AAB:$abi"
-            grep -qx "lib/$abi/libolm.so" <<<"$apk_list" || missing="$missing APK:$abi"
+            grep -qx "base/lib/$abi/$lib" <<<"$aab_list" || missing="$missing AAB:$abi"
+            grep -qx "lib/$abi/$lib" <<<"$apk_list" || missing="$missing APK:$abi"
           done
           if [ -n "$missing" ]; then
-            echo "::error::libolm.so absente :$missing (voir l'étape « Compiler libolm »)."
+            echo "::error::$lib absente :$missing (flutter_vodozemac / cargokit)."
             exit 1
           fi
-          echo "OK : libolm.so présente pour arm64-v8a, armeabi-v7a, x86_64 dans l'AAB et l'APK."
+          if unzip -Z1 "$apk" | grep -q 'libolm'; then
+            echo "::error::libolm encore présente dans l'APK : elle ne doit plus être livrée."
+            exit 1
+          fi
+          echo "OK : $lib présente pour arm64-v8a, armeabi-v7a, x86_64 dans l'AAB et l'APK."
 
       - name: Vérifier l'alignement 16 Ko des bibliothèques natives (arm64-v8a, x86_64)
         # Google Play exige des .so alignés sur des pages de 16 Ko (Android 15+). ÉCHEC pour une
-        # release Play, simple avertissement pour un build de développement. libolm.so (compilée
-        # par scripts/build_libolm.sh avec -z max-page-size=16384) doit désormais passer.
+        # release Play, simple avertissement pour un build de développement. Couvre notamment
+        # libvodozemac_bindings_dart.so (cargokit la lie avec -z max-page-size=16384).
         run: |
           apk=build/app/outputs/flutter-apk/app-release.apk
           test -f "$apk" || { echo "::error::APK introuvable : $apk"; exit 1; }
