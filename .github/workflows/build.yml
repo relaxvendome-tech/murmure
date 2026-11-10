@@ -9,7 +9,7 @@ name: Build Murmure (AAB + APK)
 #   l'AAB produit est signé debug — jamais de repli silencieux.
 on:
   push:
-    branches: [main]
+    branches: [main, 'migration/**']
     tags: ['v*']
   workflow_dispatch:
     inputs:
