@@ -16,6 +16,7 @@ import '../ephemeral.dart';
 import '../lock.dart';
 import '../media.dart';
 import '../message_notifier.dart';
+import '../moderation.dart';
 import '../network.dart';
 import '../privacy_settings.dart';
 import '../reactions.dart';
@@ -684,9 +685,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   List<ReactionEntry> _reactionsOf(Event e) {
     final timeline = _timeline;
     if (timeline == null) return const [];
+    final ignoredUsers = widget.room.client.ignoredUsers;
     final result = <ReactionEntry>[];
     for (final r in e.aggregatedEvents(timeline, RelationshipTypes.reaction)) {
       if (r.redacted) continue;
+      // Voir lib/moderation.dart : la réaction d'un expéditeur bloqué n'est pas plus filtrée par
+      // le SDK ou le serveur que ses messages (section « events » de [build]) — même filtre ici.
+      if (isSenderBlocked(r.senderId, ignoredUsers)) continue;
       final key = reactionKeyOf(r.content);
       if (key == null) continue;
       result.add((senderId: r.senderId, key: key));
@@ -901,8 +906,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _maybeSendReadMarker();
   }
 
-  /// Bloque le contact d'une conversation directe (`Client.ignoreUser`) : ses messages et
-  /// invitations ne sont plus reçus ; il n'en est pas averti. Aucun contenu journalisé.
+  /// Bloque le contact d'une conversation directe (`Client.ignoreUser`, écrit
+  /// `m.ignored_user_list`) : ses invitations futures sont déjà filtrées par le serveur
+  /// (vérifié dans Synapse) ; ses messages et réactions dans CETTE conversation, eux, ne le sont
+  /// ni par le SDK ni par le serveur (voir lib/moderation.dart) — c'est le filtre appliqué dans
+  /// [build] et [_reactionsOf] qui les masque réellement. Il n'est pas averti du blocage. Aucun
+  /// contenu journalisé.
   Future<void> _blockContact() async {
     final otherId = widget.room.directChatMatrixID;
     if (otherId == null) return;
@@ -1128,6 +1137,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    // Trouvé en audit interne (voir lib/moderation.dart pour le constat complet, vérifié contre
+    // le SDK Matrix pinné et Synapse) : ni le SDK ni le serveur ne retirent d'un salon déjà
+    // rejoint les messages d'un expéditeur bloqué ; seul ce filtre côté client peut tenir la
+    // promesse faite à l'écran de confirmation de blocage (`_blockContact`).
+    final ignoredUsers = widget.room.client.ignoredUsers;
     final events = _timeline?.events
             .where((e) =>
                 // Les messages non déchiffrables (type resté `m.room.encrypted`) sont affichés
@@ -1135,7 +1149,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 (e.type == EventTypes.Message || e.type == EventTypes.Encrypted) &&
                 // Une demande de vérification d'appareil n'est pas un message de conversation.
                 e.messageType != EventTypes.KeyVerificationRequest &&
-                !isExpired(e, widget.room))
+                !isExpired(e, widget.room) &&
+                !isSenderBlocked(e.senderId, ignoredUsers))
             .toList() ??
         [];
     // Trouvé en audit interne, vérifié contre le SDK matrix-dart pinné (tag v0.29.13,
