@@ -70,9 +70,12 @@ class CallPolicy {
     }
     // Défense en profondeur : ne garder QUE des URI TURN, même si le homeserver renvoyait une
     // entrée stun: (mauvaise config ou serveur compromis). Plus aucune URI exploitable → refus.
+    // matrix >= 9 : `TurnServerCredentials.uris` est une `List<Uri>` (plus `List<String>`) ; on
+    // filtre sur sa forme texte, exactement comme avant.
     final turnUris = creds.uris
+        .map((u) => u.toString().trim())
         .where((u) {
-          final l = u.trim().toLowerCase();
+          final l = u.toLowerCase();
           return l.startsWith('turn:') || l.startsWith('turns:');
         })
         .toList(growable: false);

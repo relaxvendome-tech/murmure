@@ -1507,10 +1507,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       final showSenderName = !mine && !widget.room.isDirectChat;
                       // Trouvé en audit interne (revue croisée IA) : citer un message précis en
                       // répondant n'existait pas du tout. `inReplyTo` (voir [_send]) ajoute une
-                      // relation `m.in_reply_to` que le SDK reconnaît ici via `relationshipType` —
-                      // on résout l'événement cité pour l'afficher au-dessus de la réponse.
-                      final isReply =
-                          !redacted && e.relationshipType == RelationshipTypes.reply;
+                      // relation `m.in_reply_to` que le SDK reconnaît ici via `inReplyToEventId()`
+                      // (matrix >= 4.0.0 : `RelationshipTypes.reply` supprimé) — on résout
+                      // l'événement cité pour l'afficher au-dessus de la réponse.
+                      final isReply = !redacted && e.inReplyToEventId() != null;
                       // Trouvé en audit interne (revue croisée IA, « niveau Telegram/Signal ») :
                       // aucun accusé de lecture visible — [_maybeSendReadMarker] envoie le marqueur.
                       // Calculé par position (voir [otherReceiptIndices] ci-dessus), pas par

@@ -314,8 +314,10 @@ class Account {
     await setDisplayName(client, displayName);
   }
 
+  /// matrix >= 9 (spec 1.19) : `setDisplayName` remplacé par l'endpoint générique des champs de
+  /// profil (`PUT /profile/{userId}/displayname`, même requête HTTP qu'avant).
   static Future<void> setDisplayName(Client client, String name) =>
-      client.setDisplayName(client.userID!, name);
+      client.setProfileField(client.userID!, 'displayname', {'displayname': name});
 
   /// Supprime le compte sur le serveur (désactivation Matrix), SANS toucher aux données locales.
   ///
