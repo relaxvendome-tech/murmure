@@ -166,8 +166,8 @@ Points d'attention :
   conformité export US ; en France, la fourniture d'un moyen de cryptologie relève de la LCEN (art. 30) et du décret
   2007-663 : vérifier auprès de l'ANSSI si une déclaration est requise ou si une exemption s'applique.
 - **Cible API** : targetSdk 36 / compileSdk 36 (exigence Google Play 2026) ; bibliothèques natives alignées
-  sur 16 Ko **à partir du correctif qui recompile libolm 3.2.16 en CI** (`scripts/build_libolm.sh`, liée avec
-  `-z max-page-size=16384`, remplace `flutter_olm` 2.0.0 dont le `libolm.so` était aligné 4 Ko). Le contrôle
+  sur 16 Ko : la bibliothèque de chiffrement est désormais `libvodozemac_bindings_dart.so` (vodozemac, compilée
+  par cargokit via `flutter_vodozemac`, liée avec `-z max-page-size=16384`) ; libolm n'est plus livrée. Le contrôle
   readelf de la CI bloque toute release Play contenant une `.so` arm64-v8a/x86_64 non alignée : vérifier
   dans le log de la release que « 0 non alignée(s) » est affiché (et ne pas publier un AAB antérieur à ce
   correctif). Fournir l'AAB signé avec la clé d'upload : uniquement l'artefact

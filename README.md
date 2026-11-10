@@ -1,6 +1,6 @@
 # Murmure
 
-Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via libolm 3.2.16 compilée par ce dépôt, le SDK `matrix` 0.29.x n'utilisant pas encore vodozemac ; migration à prévoir), pensée pour
+Messagerie chiffrée de bout en bout (protocole Matrix, Olm/Megolm via vodozemac — implémentation Rust auditée — avec `matrix` 16.x et `flutter_vodozemac`), pensée pour
 rester utilisable quand le réseau mobile est coupé ou brouillé.
 
 ## État du projet (reconstruction 3.0)
@@ -64,30 +64,35 @@ docs/           documentation (dont ADMIN_KEY.md : architecture prévue de la cl
 ## Démarrer en développement
 
 ```bash
-scripts/build_libolm.sh   # une fois (puis à chaque changement de version de libolm)
-flutter pub get
+flutter pub get   # Flutter 3.41.9 (Dart 3.11), comme la CI
 flutter run
 ```
 
-### libolm (bibliothèque native de chiffrement)
+Prérequis : Rust via `rustup` (cibles Android `aarch64-linux-android`, `armv7-linux-androideabi`,
+`x86_64-linux-android`, `i686-linux-android` ; cargokit les ajoute lui-même si besoin).
 
-`matrix` 0.29.x chiffre tout via `package:olm`, qui charge `libolm.so` par
-`DynamicLibrary.open('libolm.so')` : **sans ce fichier dans l'APK, l'appli refuse de démarrer**.
-Il n'est plus fourni par `flutter_olm` (retiré : son `libolm.so` 2.0.0 était aligné sur 4 Ko,
-refusé par Google Play pour Android 15+) mais compilé par `scripts/build_libolm.sh` :
+### vodozemac (bibliothèque native de chiffrement)
 
-- source : tag `3.2.16` du dépôt officiel `gitlab.matrix.org/matrix-org/olm`, **commit vérifié**
-  (`7e0c8277032e40308987257b711b38af8d77cc69`, échec du build en cas de différence) ;
-- NDK `28.2.13676358` (installé via `sdkmanager` s'il manque), `android-26`, STL statique,
-  `-Wl,-z,max-page-size=16384`, tests désactivés, `strip` ;
-- ABI `arm64-v8a`, `armeabi-v7a`, `x86_64` → `android/app/src/main/jniLibs/<abi>/libolm.so`
-  (SONAME `libolm.so` non versionné, alignement LOAD ≥ 0x4000 et symboles vérifiés par le script) ;
-- ces `.so` ne sont **pas versionnés** (`.gitignore`) : la CI les régénère avant chaque
-  `flutter build`. Prérequis locaux : `git`, `cmake`, `ninja` (ou `make`), SDK Android
-  (`ANDROID_SDK_ROOT`/`ANDROID_HOME`) ou `ANDROID_NDK_HOME` pointant vers ce NDK.
+`matrix` 16.x chiffre tout (Olm/Megolm, SAS, sauvegarde de clés, pièces jointes) via le paquet
+Dart `vodozemac`, implémentation Rust de Matrix.org (auditée par Least Authority) qui remplace
+libolm (dépréciée). La bibliothèque native Android (`libvodozemac_bindings_dart.so`) est fournie
+par le plugin `flutter_vodozemac` : cargokit compile la crate Rust pendant le build Gradle avec le
+NDK du projet (`28.2.13676358`) et la lie avec `-z max-page-size=16384` (pages de 16 Ko). Rien
+n'est versionné ni compilé à part.
 
-Gradle affiche un avertissement si un `libolm.so` manque ; la CI échoue si `libolm.so` est absente
-de l'AAB ou de l'APK pour l'une des trois ABI.
+`vod.init()` est appelé dans `main()` avant `Client.init()` : **si l'initialisation échoue, le SDK
+démarre sans chiffrement et l'appli refuse alors de démarrer ou de s'inscrire** (fail-closed,
+`client.encryptionEnabled`). La CI échoue si `libvodozemac_bindings_dart.so` manque dans l'AAB
+ou l'APK pour l'une des trois ABI (arm64-v8a, armeabi-v7a, x86_64), ou si une `libolm` y traîne.
+
+### Mise à jour depuis une version libolm (3.0.0+7 et avant)
+
+Base locale inchangée (`murmure_matrix.db`, SQLCipher, même clé Keystore) : le SDK 16 migre son
+schéma (`MatrixSdkDatabase`, version 12) et relit les comptes Olm et sessions Megolm picklés par
+libolm (`fromOlmPickleEncrypted`). Cette reprise n'a **pas** été testée sur appareil : si une
+session ne démarre pas ou si d'anciens messages restent illisibles après la mise à jour, une
+réinstallation (ou « Supprimer ce téléphone ») puis une nouvelle inscription suffit — l'appli
+n'étant qu'en test fermé, aucune donnée utilisateur publiée n'est en jeu.
 
 Au premier lancement, l'appli demande l'adresse d'un serveur Murmure. Voir `scripts/server/README.md`
 pour en déployer un.
@@ -106,9 +111,9 @@ d'auto-mise à jour.
 | AAB | Play Store | `flutter build appbundle --release` | `build/app/outputs/bundle/release/*.aab` |
 | APK universel | Installation manuelle sur une tablette de test | `flutter build apk --release` | `build/app/outputs/flutter-apk/app-release.apk` |
 
-La CI compile d'abord libolm (`scripts/build_libolm.sh`, voir plus haut), produit les deux et
-échoue si `REQUEST_INSTALL_PACKAGES` est présente dans le manifeste fusionné ou si `libolm.so`
-manque pour arm64-v8a, armeabi-v7a ou x86_64. Seul l'AAB est envoyé sur Play. `targetSdk`/`compileSdk` 36, `versionCode` = 100 +
+La CI installe Rust (cibles Android), produit les deux et échoue si une permission interdite
+(`REQUEST_INSTALL_PACKAGES`…) est présente dans le manifeste fusionné ou si
+`libvodozemac_bindings_dart.so` manque pour arm64-v8a, armeabi-v7a ou x86_64. Seul l'AAB est envoyé sur Play. `targetSdk`/`compileSdk` 36, `versionCode` = 100 +
 numéro de run CI (`--build-number`).
 
 | Déclencheur | Signature | Artefact | Publiable |
