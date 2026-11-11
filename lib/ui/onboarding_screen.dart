@@ -5,6 +5,7 @@ import 'package:matrix/matrix.dart';
 import '../account.dart';
 import '../config.dart';
 import '../network.dart';
+import 'mesh_screen.dart';
 import 'qr_screens.dart';
 import 'security_info_screen.dart';
 
@@ -313,9 +314,23 @@ class _ServerSetupScreenState extends State<_ServerSetupScreen> {
               ),
             ],
             const SizedBox(height: 8),
+            const Divider(height: 32),
+            // Mode sans serveur : le maillé Bluetooth (voir mesh/mesh.dart) ne dépend NI du serveur
+            // Matrix NI d'un compte — sa base et son identité sont indépendantes (voir Mesh).
+            // Avant : l'appli n'était utilisable qu'après avoir configuré un serveur, donc le
+            // maillé n'était pas accessible à qui n'en avait pas.
+            OutlinedButton.icon(
+              icon: const Icon(Icons.bluetooth_searching),
+              label: const Text('Utiliser sans serveur (Bluetooth)'),
+              onPressed: _testing
+                  ? null
+                  : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MeshScreen())),
+            ),
+            const SizedBox(height: 8),
             Text(
-              'Pas de réseau pour l\'instant ? Le mode Bluetooth hors-ligne reste disponible depuis '
-              'les réglages une fois l\'appli ouverte.',
+              'Sans serveur ni compte : messages chiffrés de bout en bout de téléphone à téléphone, '
+              'à portée Bluetooth, relayés par les autres appareils Murmure croisés. Portée limitée '
+              'et livraison non garantie ; vous pourrez configurer un serveur plus tard.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
