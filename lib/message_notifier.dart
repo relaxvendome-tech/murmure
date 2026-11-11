@@ -35,6 +35,21 @@ import 'reactions.dart';
 /// API du SDK (tag v0.29.0) : `Client.onEvent` (flux d'`EventUpdate`, il n'existe pas de
 /// `onTimelineEvent` à cette version), `Client.ignoredUsers`, `Room.pushRuleState`,
 /// `Room.membership`, `Event.fromJson`.
+///
+/// Logique pure (testable sans plugin ni client Matrix, voir test/message_notifier_test.dart) :
+/// total des messages encore en attente de notification, par salon, après avoir marqué [roomId]
+/// comme vu (ouverture de cette conversation). Les messages des AUTRES salons restent en
+/// attente — [roomId] est le seul retiré du compte. Un [roomId] absent de [pending] ne change
+/// rien à la somme (ouvrir un salon sans rien en attente ne doit rien effacer ailleurs).
+int remainingAfterViewing(Map<String, int> pending, String roomId) {
+  var total = 0;
+  for (final entry in pending.entries) {
+    if (entry.key == roomId) continue;
+    total += entry.value;
+  }
+  return total;
+}
+
 class MessageNotifier with WidgetsBindingObserver {
   MessageNotifier._();
   static final MessageNotifier instance = MessageNotifier._();
@@ -53,11 +68,24 @@ class MessageNotifier with WidgetsBindingObserver {
   static String? get activeRoomId => _activeRoomId;
   static set activeRoomId(String? id) {
     _activeRoomId = id;
-    if (id != null) unawaited(clear()); // ouvrir une conversation = on a vu les nouveautés
+    // Trouvé en audit interne : appelait auparavant `clear()` sans condition, qui efface LA
+    // notification (unique, partagée entre salons, voir [_show]) ET remet `_count` à zéro —
+    // ouvrir N'IMPORTE QUELLE conversation (même une sans aucun message en attente) effaçait donc
+    // aussi le signal de messages reçus dans d'AUTRES salons restés non lus. Exemple concret :
+    // deux messages arrivent, un dans le salon A et un dans le salon B ; l'utilisateur ouvre A (ou
+    // même un salon C sans rien en attente) → la notification disparaissait entièrement, alors que
+    // le message du salon B n'a jamais été vu. Seuls les messages DU salon ouvert sont maintenant
+    // retirés de l'attente (voir [_markRoomSeen] et [remainingAfterViewing]) ; s'il en reste
+    // ailleurs, la notification reste affichée avec un compte à jour plutôt que de disparaître.
+    if (id != null) unawaited(_markRoomSeen(id));
   }
 
   static int _count = 0;
   static final Set<String> _seen = <String>{};
+  /// Messages notifiés et pas encore vus, par salon (nombre, pas les identifiants : seul le
+  /// décompte importe ici, [_seen] gère déjà le dédoublonnage par eventId). Vidé par [clear]
+  /// (effacement global) ; un salon y est retiré par [_markRoomSeen] quand il est ouvert.
+  static final Map<String, int> _pendingByRoom = <String, int>{};
   static StreamSubscription<EventUpdate>? _sub;
   static Timer? _unlockWatch;
   static bool _observing = false;
@@ -122,6 +150,7 @@ class MessageNotifier with WidgetsBindingObserver {
       if (!_seen.add(event.eventId)) return; // dédoublonnage (re-sync)
       if (_seen.length > _maxSeen) _seen.remove(_seen.first);
       _count++;
+      _pendingByRoom.update(room.id, (v) => v + 1, ifAbsent: () => 1);
       await _show();
       _watchUnlock();
     } catch (_) {
@@ -154,12 +183,36 @@ class MessageNotifier with WidgetsBindingObserver {
     );
   }
 
-  /// Efface la notification et remet le compteur à zéro.
+  /// Efface la notification et remet le compteur à zéro (TOUS les salons : utilisé pour une
+  /// remise à zéro globale, pas pour l'ouverture d'une conversation précise, voir
+  /// [_markRoomSeen]).
   static Future<void> clear() async {
     _count = 0;
+    _pendingByRoom.clear();
     _stopUnlockWatch();
     try {
       await _plugin.cancel(_notificationId);
+    } catch (_) {}
+  }
+
+  /// Marque les messages de [roomId] comme vus (conversation ouverte) : retire SEULEMENT ce
+  /// salon de l'attente (voir [remainingAfterViewing]). S'il ne reste rien en attente ailleurs, la
+  /// notification est effacée comme avant ; sinon elle est réaffichée avec le compte restant,
+  /// pour ne pas faire disparaître le signal de messages non vus dans d'autres salons.
+  static Future<void> _markRoomSeen(String roomId) async {
+    if (!_pendingByRoom.containsKey(roomId)) return; // rien en attente pour ce salon
+    final remaining = remainingAfterViewing(_pendingByRoom, roomId);
+    _pendingByRoom.remove(roomId);
+    if (remaining == 0) {
+      await clear();
+      return;
+    }
+    _count = remaining;
+    // L'utilisateur vient d'ouvrir une conversation : forcément au premier plan et déverrouillé,
+    // aucune surveillance du déverrouillage à faire pour le compte restant.
+    _stopUnlockWatch();
+    try {
+      await _show();
     } catch (_) {}
   }
 
