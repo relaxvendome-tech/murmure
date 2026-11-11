@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -84,10 +85,36 @@ class Account {
   /// d'une clé lue `null`, qui peut signifier « Keystore en panne » (voir [KeystoreUnavailable]). Les appels concurrents
   /// (base Matrix, mesh, appels ouvertes en parallèle) sont sérialisés par [_dbKeyOp] pour
   /// qu'une seule clé soit jamais créée et qu'aucune base fraîchement créée ne soit supprimée.
-  static Future<String> dbKey() =>
-      _dbKeyOp ??= _loadOrCreateDbKey().whenComplete(() => _dbKeyOp = null);
+  ///
+  /// Trouvé en audit interne (course entre un effacement et une écriture concurrente) : cette
+  /// méthode est le point de passage unique des TROIS bases locales (celle-ci via
+  /// [Account.openDatabase], `Mesh._database()` et `CallOpsecStore._open()`, qui appellent toutes
+  /// [Account.dbKey]). [wipeLocal] appelle `_storage.deleteAll()` directement, SANS passer par ce
+  /// point de passage ni par [_wipeLock] ci-dessous à l'époque du défaut : un appel concurrent à
+  /// [dbKey] déclenché PENDANT [wipeLocal] (ex. `CallOpsecStore.insert()` pour un appel qui se
+  /// termine juste au moment où l'utilisateur entre son code de contrainte) pouvait lire `db_key`
+  /// déjà supprimée, prendre la branche « effacement à terminer » de [_loadOrCreateDbKey] (le
+  /// marqueur [kWipePendingMarker] est déjà posé), créer une clé neuve et rouvrir/recréer une base
+  /// — potentiellement APRÈS que [wipeLocal] ait déjà supprimé cette même base dans sa propre
+  /// boucle, puisque rien n'empêchait les deux de s'exécuter en même temps. Résultat possible :
+  /// une base reconstituée avec, par exemple, une ligne d'appel manqué (identifiant du
+  /// correspondant compris) survivant intégralement à un effacement de panique. [dbKey] attend
+  /// maintenant la fin complète de [wipeLocal] (voir [_wipeLock]) avant de lire ou créer quoi que
+  /// ce soit : aucune des trois bases ne peut plus être rouverte ou recréée tant qu'un effacement
+  /// est en cours.
+  static Future<String> dbKey() async {
+    while (_wipeLock != null) {
+      await _wipeLock!.future;
+    }
+    return _dbKeyOp ??= _loadOrCreateDbKey().whenComplete(() => _dbKeyOp = null);
+  }
 
   static Future<String>? _dbKeyOp;
+
+  /// Non nul pendant toute la durée de [wipeLocal] (voir ce commentaire de [dbKey]) : fait
+  /// attendre tout appel concurrent à [dbKey] — donc toute ouverture/recréation des trois bases
+  /// locales — jusqu'à ce que l'effacement soit entièrement terminé.
+  static Completer<void>? _wipeLock;
 
   static Future<String> _loadOrCreateDbKey() async {
     // Trouvé en audit interne (perte totale sur panne Keystore) : la version précédente supprimait
@@ -424,70 +451,88 @@ class Account {
   ///
   /// Chaque étape est isolée dans son propre try/catch : l'échec de l'une (plugin indisponible,
   /// fichier verrouillé…) ne doit jamais empêcher les suivantes.
+  ///
+  /// Toute la méthode tourne sous [_wipeLock] (voir son commentaire et celui de [dbKey]) : posé
+  /// avant la toute première étape, relâché seulement à la fin (y compris si une étape lève une
+  /// erreur imprévue hors des try/catch ci-dessous, via le `finally`) — aucun appel concurrent à
+  /// [dbKey] ne peut donc rouvrir ni recréer une des trois bases locales pendant que celle-ci les
+  /// supprime.
   static Future<void> wipeLocal(Client? client) async {
-    // TOUT PREMIER : marqueur « effacement en cours », hors Keystore. Il autorise
-    // [_loadOrCreateDbKey] à supprimer les bases restantes si l'effacement est interrompu, et
-    // seulement dans ce cas (voir [KeystoreUnavailable]).
+    final lock = Completer<void>();
+    _wipeLock = lock;
     try {
-      await setMarker(kWipePendingMarker);
-    } catch (_) {}
-    try {
-      await _storage.deleteAll(); // sans la clé, la base SQLCipher est illisible
-    } catch (_) {}
-    await _clearStateMarkers();
-    try {
-      await client?.dispose(closeDatabase: true);
-    } catch (_) {}
-    try {
-      await Mesh.reset();
-    } catch (_) {}
-    try {
-      await CallForegroundService.stop(); // notification 4151 + micro/caméra d'un appel en cours
-    } catch (_) {}
-    // Trouvé en audit interne (pas une proposition externe) : cette base a été ajoutée dans une
-    // passe postérieure à l'écriture de la boucle ci-dessous, qui ne connaissait donc que les deux
-    // bases historiques — `murmure_calls.db` (salons, identifiants Matrix des correspondants et
-    // horodatages des appels manqués) survivait sinon à la fois à `panic()` et à
-    // la suppression de compte, contredisant la garantie documentée juste au-dessus. Voir
-    // `CallOpsecStore.wipe()` pour le détail.
-    try {
-      await CallOpsecStore.wipe();
-    } catch (_) {}
-    // Les fichiers annexes WAL/SHM/journal sont supprimés inconditionnellement (voir
-    // [_deleteDbFiles]) : SQLite peut supprimer le fichier principal en les laissant derrière.
-    try {
-      final dir = await getApplicationSupportDirectory();
-      for (final name in _allDbNames) {
-        await _deleteDbFiles(p.join(dir.path, name));
+      // TOUT PREMIER : marqueur « effacement en cours », hors Keystore. Il autorise
+      // [_loadOrCreateDbKey] à supprimer les bases restantes si l'effacement est interrompu, et
+      // seulement dans ce cas (voir [KeystoreUnavailable]).
+      try {
+        await setMarker(kWipePendingMarker);
+      } catch (_) {}
+      try {
+        await _storage.deleteAll(); // sans la clé, la base SQLCipher est illisible
+      } catch (_) {}
+      await _clearStateMarkers();
+      try {
+        await client?.dispose(closeDatabase: true);
+      } catch (_) {}
+      try {
+        await Mesh.reset();
+      } catch (_) {}
+      try {
+        await CallForegroundService.stop(); // notification 4151 + micro/caméra d'un appel en cours
+      } catch (_) {}
+      // Trouvé en audit interne (pas une proposition externe) : cette base a été ajoutée dans une
+      // passe postérieure à l'écriture de la boucle ci-dessous, qui ne connaissait donc que les deux
+      // bases historiques — `murmure_calls.db` (salons, identifiants Matrix des correspondants et
+      // horodatages des appels manqués) survivait sinon à la fois à `panic()` et à
+      // la suppression de compte, contredisant la garantie documentée juste au-dessus. Voir
+      // `CallOpsecStore.wipe()` pour le détail.
+      try {
+        await CallOpsecStore.wipe();
+      } catch (_) {}
+      // Les fichiers annexes WAL/SHM/journal sont supprimés inconditionnellement (voir
+      // [_deleteDbFiles]) : SQLite peut supprimer le fichier principal en les laissant derrière.
+      try {
+        final dir = await getApplicationSupportDirectory();
+        for (final name in _allDbNames) {
+          await _deleteDbFiles(p.join(dir.path, name));
+        }
+      } catch (_) {}
+      try {
+        await purgeMediaCache();
+      } catch (_) {}
+      // Notifications : une notification « Nouveau message »/« Appel manqué » restée dans la barre
+      // d'état après un effacement trahirait l'usage de l'appli.
+      final notifications = FlutterLocalNotificationsPlugin();
+      try {
+        await notifications.cancelAll();
+      } catch (_) {}
+      AndroidFlutterLocalNotificationsPlugin? android;
+      try {
+        android = notifications
+            .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      } catch (_) {}
+      if (android != null) {
+        for (final id in _notificationChannels) {
+          try {
+            await android.deleteNotificationChannel(id);
+          } catch (_) {}
+        }
+        // Second essai pour les canaux du service de premier plan, refusés tant qu'il tourne.
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        for (final id in _foregroundServiceChannels) {
+          try {
+            await android.deleteNotificationChannel(id);
+          } catch (_) {}
+        }
       }
-    } catch (_) {}
-    try {
-      await purgeMediaCache();
-    } catch (_) {}
-    // Notifications : une notification « Nouveau message »/« Appel manqué » restée dans la barre
-    // d'état après un effacement trahirait l'usage de l'appli.
-    final notifications = FlutterLocalNotificationsPlugin();
-    try {
-      await notifications.cancelAll();
-    } catch (_) {}
-    AndroidFlutterLocalNotificationsPlugin? android;
-    try {
-      android = notifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    } catch (_) {}
-    if (android != null) {
-      for (final id in _notificationChannels) {
-        try {
-          await android.deleteNotificationChannel(id);
-        } catch (_) {}
-      }
-      // Second essai pour les canaux du service de premier plan, refusés tant qu'il tourne.
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      for (final id in _foregroundServiceChannels) {
-        try {
-          await android.deleteNotificationChannel(id);
-        } catch (_) {}
-      }
+    } finally {
+      // `identical` plutôt qu'une simple affectation : si un second appel concurrent à cette
+      // méthode a entre-temps remplacé [_wipeLock] par SON propre verrou (double effacement
+      // superposé, ex. suppression de compte et code de contrainte déclenchés presque en même
+      // temps), cet appel-ci ne doit relâcher que SON verrou, jamais celui de l'autre — sinon
+      // [dbKey] redeviendrait disponible alors que l'autre effacement, lui, tourne encore.
+      if (identical(_wipeLock, lock)) _wipeLock = null;
+      lock.complete();
     }
   }
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -28,14 +29,45 @@ class MediaCache {
     return dir;
   }
 
+  /// Écritures en cours (voir [purgeAll]) : chacune s'enregistre ici avant d'écrire sur le disque
+  /// et se désenregistre une fois le fichier complet, pour que [purgeAll] puisse attendre leur fin
+  /// plutôt que de risquer de les manquer.
+  static final Set<Completer<void>> _activeWrites = {};
+
+  /// Non nul pendant [purgeAll] : toute nouvelle écriture attend la fin de la purge avant de
+  /// commencer, pour ne jamais créer un fichier juste après le passage qui doit l'effacer.
+  static Completer<void>? _purging;
+
   /// Écrit des octets déchiffrés dans un fichier temporaire et retourne son chemin.
   /// L'appelant DOIT appeler [wipe] dès que la lecture est terminée.
+  ///
+  /// Trouvé en audit interne (course avec l'effacement d'urgence) : [purgeAll] énumère le
+  /// répertoire UNE SEULE FOIS et n'écrase que les fichiers déjà présents à cet instant. Un appel
+  /// à cette méthode dont l'écriture (`writeAsBytes`) n'était pas encore terminée — ou pas encore
+  /// commencée — au moment de cette énumération n'était jamais vu par [purgeAll] : le fichier
+  /// temporaire, contenant des octets DÉCHIFFRÉS en clair (une photo/vidéo tout juste ouverte dans
+  /// l'appli au moment où l'utilisateur déclenche le code de contrainte, par exemple), pouvait donc
+  /// survivre intact à un effacement de panique censé faire disparaître « clés, messages et
+  /// médias » du téléphone. Chaque écriture s'enregistre maintenant dans [_activeWrites] avant de
+  /// commencer et attend la fin d'une purge déjà en cours ([_purging]) avant même d'essayer : une
+  /// purge ne peut donc jamais être doublée d'une écriture qui lui échappe, dans aucun des deux
+  /// sens.
   static Future<File> writeTemp(List<int> bytes, {required String extension}) async {
-    final dir = await _dir();
-    final name = '${DateTime.now().microsecondsSinceEpoch}.$extension';
-    final file = File(p.join(dir.path, name));
-    await file.writeAsBytes(bytes, flush: true);
-    return file;
+    while (_purging != null) {
+      await _purging!.future;
+    }
+    final done = Completer<void>();
+    _activeWrites.add(done);
+    try {
+      final dir = await _dir();
+      final name = '${DateTime.now().microsecondsSinceEpoch}.$extension';
+      final file = File(p.join(dir.path, name));
+      await file.writeAsBytes(bytes, flush: true);
+      return file;
+    } finally {
+      _activeWrites.remove(done);
+      done.complete();
+    }
   }
 
   /// Écrase puis supprime un fichier temporaire.
@@ -71,11 +103,31 @@ class MediaCache {
 
   /// Purge tout le cache média : appelée au démarrage (restes d'une lecture interrompue) et lors
   /// de l'effacement d'urgence (panic / contrainte / trop d'erreurs de PIN).
+  ///
+  /// Voir le commentaire de [writeTemp] : bloque d'abord toute NOUVELLE écriture ([_purging]), puis
+  /// attend que celles déjà en cours ([_activeWrites]) se terminent — donc que leur fichier existe
+  /// bel et bien sur le disque — avant d'énumérer le répertoire une seule fois et de tout écraser.
+  /// Une écriture qui commence pendant la purge attend que celle-ci se termine (voir [writeTemp])
+  /// et crée donc son fichier APRÈS, jamais pendant : aucune fenêtre où un fichier déchiffré en
+  /// clair existe sans qu'il soit, soit déjà vu par cette énumération, soit encore non créé.
   static Future<void> purgeAll() async {
-    final dir = await _dir();
-    if (!await dir.exists()) return;
-    await for (final entity in dir.list()) {
-      if (entity is File) await wipe(entity);
+    final purge = Completer<void>();
+    _purging = purge;
+    try {
+      await Future.wait(_activeWrites.map((c) => c.future));
+      final dir = await _dir();
+      if (!await dir.exists()) return;
+      await for (final entity in dir.list()) {
+        if (entity is File) await wipe(entity);
+      }
+    } finally {
+      // `identical` plutôt qu'une simple affectation : si un second appel concurrent à [purgeAll]
+      // a entre-temps remplacé [_purging] par SON propre verrou (ex. la purge de démarrage et un
+      // effacement d'urgence qui se chevauchent), cet appel-ci ne doit relâcher que SON verrou,
+      // jamais celui de l'autre — sinon une écriture pourrait démarrer alors que l'autre purge,
+      // elle, est encore en train d'énumérer le répertoire.
+      if (identical(_purging, purge)) _purging = null;
+      purge.complete();
     }
   }
 }
