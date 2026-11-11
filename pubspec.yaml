@@ -14,29 +14,57 @@ dependencies:
   # Dart `vodozemac` qu'il importe lui-même. libolm (dépréciée en amont) n'est plus utilisée nulle
   # part : `olm`, scripts/build_libolm.sh et les jniLibs ont été retirés.
   # matrix 16 exige Dart >= 3.11 (Flutter 3.41.x épinglé dans .github/workflows/build.yml).
-  matrix: ^16.0.2
+  #
+  # Trouvé en audit interne : AUCUN pubspec.lock n'est commité dans ce dépôt (vérifié : absent de
+  # `git ls-files`, malgré le commentaire de .gitignore affirmant qu'il est « VERSIONNÉ » — faux
+  # en pratique, jamais ajouté). CI exécute `flutter pub get` à chaque build (voir build.yml) sans
+  # fichier de verrouillage : avec une contrainte `^`, chaque build peut silencieusement résoudre
+  # une version mineure plus récente que celle citée comme vérifiée. Or une bonne partie des
+  # commentaires « Trouvé en audit interne » de ce dépôt (network.dart, verification_manager.dart,
+  # main.dart, rooms_screen.dart…) justifient une décision de sécurité par une lecture du code
+  # réel du SDK À UN TAG PRÉCIS (ex. « vérifié dans matrix-dart-sdk v16.0.2 ») — exactement ce que
+  # la règle du projet interdit de laisser dériver sans le revérifier (« ne jamais deviner le
+  # comportement d'une API versionnée »). Les dépendances dont le comportement est directement
+  # cité par leur version exacte, ou qui portent un primitif cryptographique/réseau critique
+  # (chiffrement Olm/Megolm, SQLCipher, routage Tor/SOCKS5), sont donc épinglées EXACTEMENT
+  # ci-dessous (pas de `^`) : une mise à jour délibérée reste possible, mais passe désormais par un
+  # commit explicite qui change ce nombre, jamais par une résolution silencieuse au build suivant.
+  # Un vrai pubspec.lock commité (couvrant aussi les dépendances transitives) reste préférable et
+  # n'a pas pu être généré ici : ce bac à sable n'a ni Flutter ni Dart (voir README de session) ;
+  # `flutter pub get` doit être exécuté et son résultat commité depuis un poste qui les a.
+  matrix: 16.0.2
   # Bibliothèque native de vodozemac pour Android (plugin FFI) : cargokit compile la crate Rust
   # au build Gradle (rustup requis, voir build.yml) et la lie avec -z max-page-size=16384
   # (pages de 16 Ko, exigence Play). `vod.init()` DOIT réussir avant `Client.init()` : sinon le
   # SDK démarre SANS chiffrement (`client.encryptionEnabled == false`) et l'appli refuse alors de
-  # démarrer/s'inscrire (voir lib/main.dart et Account.register).
-  flutter_vodozemac: ^0.9.0
-  sqflite_sqlcipher: ^3.1.0
+  # démarrer/s'inscrire (voir lib/main.dart et Account.register). Épinglé exactement : même
+  # raison que `matrix` ci-dessus, et c'est la bibliothèque native qui fournit le chiffrement lui-même.
+  flutter_vodozemac: 0.9.0
+  # Base locale chiffrée (SQLCipher) de tout le compte Matrix (sessions Olm/Megolm, messages).
+  # Épinglé exactement : même raison que `matrix` ci-dessus.
+  sqflite_sqlcipher: 3.1.0
   flutter_secure_storage: ^9.2.2
   # Déverrouillage biométrique optionnel (voir lib/biometric.dart) ; l'UI seulement, jamais les clés.
   local_auth: ^2.3.0
   local_auth_android: ^1.0.0 # AndroidAuthMessages (non réexporté par local_auth 2.x)
   path_provider: ^2.1.3
   path: ^1.9.0
-  cryptography: ^2.6.1
+  # AES-GCM du mode maillé Bluetooth (mesh_crypto.dart) et dérivation du code de verrouillage
+  # (lock.dart). Épinglé exactement : même raison que `matrix` plus haut — primitif
+  # cryptographique directement utilisé par ce dépôt, pas seulement transitif.
+  cryptography: 2.6.1
   flutter_zxing: ^2.2.1
   intl: ^0.19.0
   flutter_blue_plus: ^1.36.0
   permission_handler: ^11.3.1
-  socks5_proxy: ^2.1.1
-  # Déjà utilisé en transitif par network.dart (via `matrix`) avant cette revue, mais jamais
-  # déclaré en direct : on le fixe explicitement puisqu'on en étend l'usage (SOCKS5 réel) et qu'on
-  # ne veut pas dépendre silencieusement d'une version choisie par un autre paquet.
+  # Déjà utilisé en transitif par network.dart (via `matrix`) avant la revue qui l'a déclaré en
+  # direct, mais jamais déclaré en direct avant ça : fixé explicitement puisqu'on en étend l'usage
+  # (SOCKS5 réel pour Tor/proxy personnalisé, voir network.dart) et qu'on ne veut pas dépendre
+  # silencieusement d'une version choisie par un autre paquet. Épinglé exactement (pas de `^`)
+  # depuis cette revue : c'est le paquet qui porte la garantie « fail closed » de network.dart
+  # (jamais de repli vers une connexion directe pour quelqu'un qui compte sur Tor) — une mise à
+  # jour mineure de son comportement SOCKS5 ne doit jamais arriver sans être relue.
+  socks5_proxy: 2.1.1
   http: ^1.2.0
   # Appels (voir lib/calls/ et docs/CALLS_ARCHITECTURE.md) : gère ses propres sockets natifs, EN
   # DEHORS du http.Client de network.dart — c'est précisément pour ça que CallPolicy impose
