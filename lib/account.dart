@@ -238,7 +238,27 @@ class Account {
   /// existe. Lue `null` alors que ce marqueur existe et qu'aucun effacement n'est en cours : on
   /// lève [KeystoreUnavailable] au lieu d'en créer une nouvelle (qui changerait l'identité mesh et
   /// écraserait la vraie graine au lancement suivant).
-  static Future<List<int>> seed(String name) async {
+  ///
+  /// Trouvé en audit interne — même défaut que [dbKey] avant son propre correctif ([_dbKeyOp]),
+  /// jamais corrigé ici : AUCUNE sérialisation des appels concurrents à ce nom. `ui/mesh_screen.dart`
+  /// appelle `Mesh.instance.identity()` dans `initState` (pour afficher sa propre clé publique/QR)
+  /// pendant que `Mesh.start()` (déclenché par l'interrupteur, plausible dans la même frame au tout
+  /// premier lancement — identité jamais créée) appelle aussi `identity()`, donc ce `seed()` pour
+  /// `'mesh_identity_seed'`. Sans ce correctif, les deux appels lisaient tous les deux `null`,
+  /// généraient chacun une graine aléatoire DIFFÉRENTE et l'écrivaient : la dernière écriture
+  /// gagnait au Keystore, mais l'appelant dont l'écriture avait perdu la course continuait avec SA
+  /// PROPRE graine, déjà retournée à `MeshIdentity.loadOrCreate` et mise en cache dans
+  /// `Mesh._identity` — potentiellement différente de celle relue au lancement suivant (ou utilisée
+  /// par l'autre appel). Concrètement : la clé publique affichée/partagée par QR dans l'instant
+  /// pouvait ne pas être celle qui chiffre réellement, cassant silencieusement l'échange ECDH avec
+  /// un contact qui vient d'ajouter « votre » clé. Comme pour [dbKey], un seul appel réel par nom à
+  /// la fois désormais ; tout appel concurrent attend et reçoit exactement le même résultat.
+  static final Map<String, Future<List<int>>> _seedOps = {};
+
+  static Future<List<int>> seed(String name) =>
+      _seedOps[name] ??= _loadOrCreateSeed(name).whenComplete(() => _seedOps.remove(name));
+
+  static Future<List<int>> _loadOrCreateSeed(String name) async {
     final marker = '$_seedMarkerPrefix${name.replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_')}';
     var s = await _storage.read(key: name);
     if (s == null) {
