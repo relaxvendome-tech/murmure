@@ -263,6 +263,40 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
     /** Serveur à utiliser dans les callbacks (actif, ou en cours d'ouverture). */
     private fun activeServer(): BluetoothGattServer? = gattServer ?: openingServer
 
+    /**
+     * Trouvé en audit interne : les quatre callbacks de [gattCallback] qui répondent à une requête
+     * ATT (`onCharacteristicReadRequest`, `onCharacteristicWriteRequest`, `onExecuteWrite`)
+     * appelaient `sendResponse` directement, sans aucun `try/catch` — contrairement à [start],
+     * [stop] et [failPendingStart] dans ce même fichier, qui protègent systématiquement leurs
+     * appels Bluetooth. Ces callbacks sont livrés par le processus Bluetooth système sur un thread
+     * Binder : une exception non rattrapée là n'est pas confinée au mode maillé, elle remonte au
+     * gestionnaire d'exceptions non interceptées du processus et tue TOUTE l'application (y
+     * compris des conversations Matrix en cours), pas seulement le relais Bluetooth.
+     *
+     * Scénario concret, pas seulement théorique : `BLUETOOTH_CONNECT` (API 31+) peut être révoqué
+     * à tout moment depuis Réglages pendant que le serveur GATT est déjà ouvert et qu'un autre
+     * appareil Murmure est en train d'écrire/lire sur la caractéristique — Android ne ferme pas le
+     * serveur pour autant, il fait simplement lever une `SecurityException` au prochain appel
+     * d'API Bluetooth. Une fermeture concurrente du serveur (`stop()` appelé depuis Dart pendant
+     * qu'une requête est encore en vol) peut de même faire lever une `IllegalStateException` sur
+     * un serveur déjà fermé. Centralise donc l'appel ici : la réponse ATT est perdue (le central en
+     * face voit un simple timeout, déjà le cas pour toute écriture rejetée ailleurs dans ce
+     * fichier), mais le processus survit.
+     */
+    private fun safeSendResponse(
+        device: BluetoothDevice,
+        requestId: Int,
+        status: Int,
+        offset: Int,
+        value: ByteArray?,
+    ) {
+        try {
+            activeServer()?.sendResponse(device, requestId, status, offset, value)
+        } catch (e: Exception) {
+            Log.w(TAG, "sendResponse a échoué (permission révoquée ou serveur fermé) : ${e.message}")
+        }
+    }
+
     private fun completePendingStart(pending: PendingStart) {
         if (pendingStart !== pending) return
         pendingStart = null
@@ -367,12 +401,12 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
                     readSnapshots[device.address]
                 }
             }
-            val server = activeServer() ?: return
+            if (activeServer() == null) return
             if (value == null || offset < 0 || offset > value.size) {
-                server.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
+                safeSendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
                 return
             }
-            server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value.copyOfRange(offset, value.size))
+            safeSendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value.copyOfRange(offset, value.size))
         }
 
         /**
@@ -423,20 +457,20 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
                     // que de le laisser grossir sans borne ; l'enveloppe en cours sera simplement
                     // perdue, comme n'importe quelle écriture déjà rejetée ailleurs dans mesh.dart.
                     if (responseNeeded) {
-                        activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                        safeSendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                     }
                     return
                 }
                 if (responseNeeded) {
                     // Spec ATT : la réponse à une Prepare Write Request échoie l'offset et la
                     // valeur reçus, pour que le central puisse vérifier l'intégrité avant d'exécuter.
-                    activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                    safeSendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 }
                 return
             }
 
             if (responseNeeded) {
-                activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+                safeSendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
             // Transmis à Dart sur le thread principal : setMethodCallHandler/EventChannel ne sont
             // pas thread-safe depuis un callback Bluetooth qui arrive sur un thread binder.
@@ -465,7 +499,7 @@ class MeshGattServer(private val context: Context, messenger: BinaryMessenger) {
                     eventSink?.success(assembled)
                 }
             }
-            activeServer()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            safeSendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         }
 
         @SuppressLint("MissingPermission")
