@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 
 import '../account.dart';
@@ -81,6 +82,7 @@ class Mesh {
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
   Timer? _relayTimer;
   Timer? _rotateTimer;
+  Timer? _permissionTimer;
   int _rotateIndex = 0;
   bool _running = false;
 
@@ -468,6 +470,24 @@ class Mesh {
         }
       });
 
+      // Trouvé en audit interne : seule la coupure de l'ADAPTATEUR Bluetooth était surveillée
+      // une fois le relais démarré (voir [_adapterSub] ci-dessus) — pas la révocation d'une
+      // PERMISSION Bluetooth, possible à tout moment depuis Réglages (Android peut même la
+      // retirer de lui-même sur une appli inutilisée en arrière-plan, API 30+) sans jamais
+      // couper l'adaptateur lui-même. Dans ce cas, `FlutterBluePlus.startScan`/`connect` et le
+      // rôle périphérique natif échouent silencieusement à chaque tentative (avalés par les
+      // `catch (_)` de [_tryExchange] et consorts, indiscernables d'un simple appareil hors de
+      // portée) : `_running` restait bloqué à `true` et l'interrupteur de `ui/mesh_screen.dart`
+      // continuait d'afficher « activé » alors que le relais ne fonctionne plus du tout — même
+      // danger OPSEC que celui déjà corrigé pour [MeshEvent.adapterOff] (croire le mode
+      // hors-ligne actif en manifestation alors qu'il ne l'est plus). `permission_handler`
+      // n'offrant pas de flux à écouter (seulement une lecture ponctuelle de l'état), on sonde
+      // toutes les 30 s plutôt qu'en continu — assez réactif pour cet usage sans réveil excessif.
+      _permissionTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => unawaited(_checkPermissions(gen)),
+      );
+
       _eventsController.add(const MeshEvent.started());
     } catch (_) {
       // Démarrage déjà annulé par un stop()/reset() concurrent : celui-ci a tout nettoyé et
@@ -516,6 +536,8 @@ class Mesh {
     _adapterSub = null;
     _rotateTimer?.cancel();
     _rotateTimer = null;
+    _permissionTimer?.cancel();
+    _permissionTimer = null;
     _inFlightExchanges.clear();
     _lastExchangeAt.clear();
     await MeshGattServerBridge.stop();
@@ -544,6 +566,33 @@ class Mesh {
   /// Vrai si le relais est arrêté ou si un effacement d'urgence a eu lieu depuis la capture de
   /// [rg] (valeur de [_resetGen]) : l'appelant doit alors sortir sans toucher à la base.
   bool _stale(int rg) => !_running || rg != _resetGen;
+
+  /// Sonde périodique lancée par [start] (voir [_permissionTimer]) : vérifie qu'aucune des
+  /// permissions Bluetooth déjà accordées au moment du démarrage n'a été révoquée depuis. Même
+  /// garantie que [MeshEvent.adapterOff] mais pour une cause différente — voir le commentaire au
+  /// point d'appel. [rg] est la génération ([_gen]) capturée par [start] : un `stop`/`reset`
+  /// survenu depuis rend cette vérification obsolète, à ignorer silencieusement (son propre
+  /// `stop` a déjà tout nettoyé).
+  Future<void> _checkPermissions(int rg) async {
+    if (!_running || rg != _gen) return;
+    bool lost;
+    try {
+      final statuses = await Future.wait([
+        Permission.bluetoothScan.status,
+        Permission.bluetoothConnect.status,
+        Permission.bluetoothAdvertise.status,
+      ]);
+      lost = statuses.any((s) => !s.isGranted && !s.isLimited);
+    } catch (_) {
+      // Lecture du statut elle-même en échec (plateforme sans ce canal) : on ne peut rien
+      // conclure, on ne coupe pas le relais sur une incertitude.
+      return;
+    }
+    if (lost && _running && rg == _gen) {
+      _eventsController.add(const MeshEvent.permissionLost());
+      unawaited(stop(emitStoppedEvent: false));
+    }
+  }
 
   /// Fait tourner la valeur que le serveur GATT natif renvoie à la prochaine lecture, parmi notre
   /// file d'attente (voir la limite documentée en tête de fichier).
@@ -1113,6 +1162,7 @@ sealed class MeshEvent {
   const factory MeshEvent.started() = MeshStarted;
   const factory MeshEvent.stopped() = MeshStopped;
   const factory MeshEvent.adapterOff() = MeshAdapterOff;
+  const factory MeshEvent.permissionLost() = MeshPermissionLost;
   const factory MeshEvent.messageReceived(List<int> sender, String text) = MeshMessageReceived;
 }
 
@@ -1131,6 +1181,13 @@ class MeshStopped extends MeshEvent {
 /// vient de se passer.
 class MeshAdapterOff extends MeshEvent {
   const MeshAdapterOff();
+}
+
+/// Arrêt provoqué par la révocation d'une permission Bluetooth (BLUETOOTH_SCAN/CONNECT/ADVERTISE)
+/// PENDANT que le mode hors-ligne tournait — voir [Mesh._checkPermissions]. Distinct de
+/// [MeshAdapterOff] : ici l'adaptateur reste allumé, seule l'autorisation d'y accéder a disparu.
+class MeshPermissionLost extends MeshEvent {
+  const MeshPermissionLost();
 }
 
 class MeshMessageReceived extends MeshEvent {

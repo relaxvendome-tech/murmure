@@ -105,6 +105,19 @@ class _MeshScreenState extends State<MeshScreen> {
             _active = false;
             _log.insert(
                 0, _LogEntry.status('Bluetooth désactivé (mode avion ?) — mode hors-ligne arrêté'));
+          case MeshPermissionLost():
+            // Trouvé en audit interne (voir le commentaire de `Mesh.start`/`_checkPermissions`
+            // dans mesh.dart) : une permission Bluetooth a été révoquée (Réglages, ou retrait
+            // automatique par Android sur une appli inutilisée) pendant que le relais tournait —
+            // l'adaptateur reste allumé, contrairement à [MeshAdapterOff], mais l'appli n'a plus
+            // le droit d'y accéder. Même traitement : remettre l'interrupteur à l'état réel plutôt
+            // que de laisser croire le mode hors-ligne actif.
+            _active = false;
+            _log.insert(
+                0,
+                _LogEntry.status(
+                    'Permission Bluetooth retirée — mode hors-ligne arrêté. Réactivez-la dans les '
+                    'réglages du téléphone, puis relancez le mode hors-ligne.'));
           case MeshMessageReceived(:final sender, :final text):
             // Déjà inséré en base par Mesh._handleIncomingLocked ; on l'ajoute ici seulement à
             // l'affichage en direct, jamais une deuxième fois en base.
