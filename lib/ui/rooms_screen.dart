@@ -763,6 +763,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final latest = _timeline?.events
         .where((e) =>
             e.type == EventTypes.Message &&
+            // Voir le même filtre dans [build] : une édition n'est jamais un message affiché,
+            // elle ne doit donc pas non plus faire avancer le marqueur de lecture.
+            e.relationshipType != RelationshipTypes.edit &&
             e.status.isSent &&
             !isExpired(e, widget.room) &&
             !isSenderBlocked(e.senderId, ignoredUsers))
@@ -1357,6 +1360,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 (e.type == EventTypes.Message || e.type == EventTypes.Encrypted) &&
                 // Une demande de vérification d'appareil n'est pas un message de conversation.
                 e.messageType != EventTypes.KeyVerificationRequest &&
+                // Trouvé en audit interne (vérifié contre le SDK matrix-dart pinné, event.dart :
+                // `relationshipType`/`getDisplayEvent`) : une édition (`m.relates_to.rel_type ==
+                // "m.replace"`) est un événement `m.room.message` à PART ENTIÈRE, donc passait ce
+                // filtre comme n'importe quel autre message — ce code l'affichait comme une
+                // DEUXIÈME bulle distincte (texte préfixé « * » par le SDK), au lieu de remplacer
+                // le contenu affiché du message original. Deux conséquences réelles, pas
+                // seulement cosmétiques : (1) un message édité apparaît deux fois dans
+                // l'historique ; (2) si l'édition RETIRE une information sensible, l'ancien texte
+                // reste pleinement visible dans sa bulle d'origine — l'édition échoue alors
+                // totalement à faire ce que l'utilisateur en attend. Le SDK agrège déjà ces
+                // événements lui-même (`Timeline.aggregatedEvents`, le même mécanisme que les
+                // réactions) ; `getDisplayEvent` plus bas résout le texte à afficher.
+                e.relationshipType != RelationshipTypes.edit &&
                 !isExpired(e, widget.room) &&
                 !isSenderBlocked(e.senderId, ignoredUsers))
             .toList() ??
@@ -1498,6 +1514,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       // Message rédigé (supprimé) : bulle « Message supprimé », sans citation,
                       // sans réactions ni menu d'actions.
                       final redacted = e.redacted;
+                      // Trouvé en audit interne : voir le commentaire sur le filtre `events`
+                      // ci-dessus. `getDisplayEvent` (SDK pinné, event.dart) renvoie le contenu à
+                      // jour si `e` a été édité, `e` lui-même sinon ; on garde `e` pour tout ce
+                      // qui identifie le message (clé de widget, réactions, reçus, réponse, menu
+                      // d'actions) et n'utilise `display` que pour le TEXTE affiché — l'édition ne
+                      // change jamais l'identité du message, seulement son contenu.
+                      final display =
+                          (redacted || undecryptable) ? e : e.getDisplayEvent(_timeline!);
+                      // Signalé à l'utilisateur plutôt que substitué en silence : dans une appli
+                      // où une édition peut servir à retirer une information envoyée par erreur,
+                      // masquer qu'un message a changé serait trompeur (voir aussi le commentaire
+                      // ci-dessus sur le risque inverse — l'ancien texte qui resterait visible).
+                      final edited = !redacted &&
+                          !undecryptable &&
+                          e.hasAggregatedEvents(_timeline!, RelationshipTypes.edit);
                       final mine = e.senderId == widget.room.client.userID;
                       final scheme = Theme.of(context).colorScheme;
                       final bubbleColor =
@@ -1581,7 +1612,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   _MessageImage(event: e)
                                 else
                                   Text(
-                                    isReply ? _stripReplyFallback(e.text) : e.text,
+                                    isReply
+                                        ? _stripReplyFallback(display.text)
+                                        : display.text,
                                     style: TextStyle(color: textColor),
                                   ),
                                 if (reactions.isNotEmpty)
@@ -1635,6 +1668,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      if (edited)
+                                        Padding(
+                                          padding: const EdgeInsets.only(right: 4),
+                                          child: Text(
+                                            'modifié',
+                                            style: TextStyle(
+                                              color: metaColor,
+                                              fontSize: 11,
+                                              fontStyle: FontStyle.italic,
+                                            ),
+                                          ),
+                                        ),
                                       Text(
                                         DateFormat.Hm().format(e.originServerTs),
                                         style: TextStyle(color: metaColor, fontSize: 11),
