@@ -148,10 +148,19 @@ class Account {
   }
 
   /// Noms de toutes les bases SQLCipher chiffrées par [dbKey].
-  static const _allDbNames = [_dbName, kMeshDbName, _callsDbName];
+  ///
+  /// `kCrashDbName` est ajouté ICI, à sa création (voir crash_log.dart), plutôt qu'après coup :
+  /// c'est exactement la lacune trouvée (et corrigée) deux fois dans ce dépôt pour
+  /// `murmure_calls.db` — une base ajoutée dans une passe postérieure à l'écriture de cette liste,
+  /// que l'effacement de panique/suppression de compte ne connaissait donc pas encore.
+  static const _allDbNames = [_dbName, kMeshDbName, _callsDbName, kCrashDbName];
 
   /// Nom réel de la base de `calls/services/call_opsec_store.dart` (constante privée là-bas).
   static const _callsDbName = 'murmure_calls.db';
+
+  /// Nom réel de la base de `crash_log.dart` (`CrashLogStore._open` l'ouvre via cette même
+  /// constante, pour ne jamais dupliquer le littéral entre les deux fichiers).
+  static const kCrashDbName = 'murmure_crash.db';
 
   static Future<bool> _anyDatabaseExists() async {
     try {

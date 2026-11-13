@@ -5,6 +5,7 @@ import '../account.dart';
 import '../message_notifier.dart';
 import '../privacy_settings.dart';
 import 'blocked_users_screen.dart';
+import 'diagnostics_screen.dart';
 import 'security_info_screen.dart';
 
 /// Permet de voir et changer son pseudo (nom affiché) à tout moment, sans recréer de compte.
@@ -209,6 +210,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     trailing: const Icon(Icons.chevron_right),
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(builder: (_) => const SecurityInfoScreen()),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.bug_report_outlined),
+                    title: const Text('Diagnostics'),
+                    subtitle: const Text(
+                        'Journal local des erreurs de l\'appli, jamais transmis nulle part'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
                     ),
                   ),
                 ],

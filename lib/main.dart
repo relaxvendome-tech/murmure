@@ -9,6 +9,7 @@ import 'account.dart';
 import 'calls/services/call_manager.dart';
 import 'calls/services/call_opsec_notifier.dart';
 import 'calls/ui/call_session_screen.dart';
+import 'crash_log.dart';
 import 'ephemeral.dart';
 import 'lock.dart';
 import 'media.dart';
@@ -27,6 +28,10 @@ import 'verification/verification_manager.dart';
 final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
+  // Tout en premier, avant même `ensureInitialized()` : voir crash_log.dart (journal de
+  // plantages purement local, jamais transmis). Installé ici pour couvrir le plus de code
+  // possible, y compris l'initialisation ci-dessous (`vod.init()`, ouverture des bases...).
+  CrashLogStore.install();
   WidgetsFlutterBinding.ensureInitialized();
   // Chiffrement de bout en bout : matrix-dart-sdk 16.x utilise vodozemac (Rust, audité), via le
   // paquet Dart `vodozemac`, dont la bibliothèque native Android est fournie par
