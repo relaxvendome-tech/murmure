@@ -28,6 +28,7 @@ import 'lock_screens.dart';
 import 'network_status_chip.dart';
 import 'mesh_screen.dart';
 import 'profile_screen.dart';
+import 'search_screen.dart';
 import 'qr_screens.dart';
 import 'theme.dart';
 
@@ -1437,6 +1438,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   : 'Appareils non vérifiés — appuyez pour vérifier',
               onPressed: _openDeviceVerification,
             ),
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Rechercher dans cette conversation',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => SearchInRoomScreen(room: widget.room)),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.call),
             tooltip: 'Appel audio',
