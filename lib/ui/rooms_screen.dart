@@ -973,9 +973,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Trouvé en audit interne : filtrait déjà `myId`, mais pas un expéditeur bloqué
+  /// ([Client.ignoredUsers]) — un contact bloqué reste généralement membre de la conversation
+  /// directe ([_blockContact] appelle `ignoreUser(leaveRooms: false)`, voir `lib/moderation.dart`)
+  /// et peut donc continuer à émettre `m.typing`, que ni le SDK ni Synapse ne filtrent pour un
+  /// salon déjà rejoint (même constat que pour les messages/réactions dans `lib/moderation.dart` :
+  /// rien côté serveur ou SDK ne retire quoi que ce soit d'un expéditeur ignoré). Sans ce filtre,
+  /// « X est en train d'écrire… » s'affichait quand même pour un contact qu'on a justement bloqué
+  /// pour ne plus rien voir de lui — même classe de bug que celle déjà corrigée pour les messages
+  /// et réactions, juste pas étendue à cet indicateur, ajouté dans une passe ultérieure.
   void _refreshTypingUsers() {
     final myId = widget.room.client.userID;
-    final ids = widget.room.typingUsers.map((u) => u.id).where((id) => id != myId).toSet();
+    final ignoredUsers = widget.room.client.ignoredUsers;
+    final ids = widget.room.typingUsers
+        .map((u) => u.id)
+        .where((id) => id != myId && !isSenderBlocked(id, ignoredUsers))
+        .toSet();
     if (ids.length == _typingOtherUserIds.length && ids.containsAll(_typingOtherUserIds)) {
       return;
     }
