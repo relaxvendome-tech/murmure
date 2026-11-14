@@ -32,9 +32,23 @@ import 'reactions.dart';
 /// « Murmure », corps « Nouveau message » / « N nouveaux messages », visibilité privée sur écran
 /// verrouillé. Mode discret (`calc_mode == '1'`) : AUCUNE notification de message. Aucun log.
 ///
-/// API du SDK (tag v0.29.0) : `Client.onEvent` (flux d'`EventUpdate`, il n'existe pas de
-/// `onTimelineEvent` à cette version), `Client.ignoredUsers`, `Room.pushRuleState`,
-/// `Room.membership`, `Event.fromJson`.
+/// API du SDK : `Client.onEvent` (flux d'`EventUpdate`), `Client.ignoredUsers`,
+/// `Room.pushRuleState`, `Room.membership`, `Event.fromJson`.
+///
+/// Trouvé en audit interne (re-vérifié contre le SDK matrix-dart pinné, tag v16.0.2, après la
+/// migration 0.29 -> 16 : `client.dart`) : le commentaire précédent affirmait qu'`onTimelineEvent`
+/// n'existait pas « à cette version » (v0.29.0) pour justifier l'usage d'`onEvent` ci-dessous —
+/// redevenu faux depuis, et trompeur tel quel. Au tag épinglé, `Client.onEvent`/`EventUpdate` sont
+/// explicitement `@Deprecated` par le SDK lui-même, au profit de `onTimelineEvent`/`onHistoryEvent`
+/// (flux d'`Event` déjà déchiffrés, avec expéditeur) et surtout d'`onNotification` (événements
+/// post-déchiffrement qui DEVRAIENT déclencher une notification, déjà filtrés par les règles de
+/// push Matrix via `pushruleEvaluator.match(...).notify` — ce qui couvrirait aussi la limite
+/// documentée ci-dessus sur les messages encore chiffrés à la réception). `onEvent` reste
+/// fonctionnellement correct au tag épinglé (toujours alimenté pour chaque mise à jour de timeline,
+/// vérifié dans `client.dart`) : aucun changement de comportement ici. Migrer vers `onNotification`
+/// serait une amélioration réelle, mais change la source de vérité des notifications (minuteur de
+/// push rules côté SDK plutôt que la logique ad hoc ci-dessous) sans pouvoir être validée sur un
+/// appareil réel depuis ce bac à sable — laissé pour une passe dédiée plutôt que fait à l'aveugle.
 ///
 /// Logique pure (testable sans plugin ni client Matrix, voir test/message_notifier_test.dart) :
 /// total des messages encore en attente de notification, par salon, après avoir marqué [roomId]
