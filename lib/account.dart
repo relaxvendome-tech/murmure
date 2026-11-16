@@ -102,6 +102,25 @@ class Account {
   /// maintenant la fin complète de [wipeLocal] (voir [_wipeLock]) avant de lire ou créer quoi que
   /// ce soit : aucune des trois bases ne peut plus être rouverte ou recréée tant qu'un effacement
   /// est en cours.
+  ///
+  /// LIMITE HONNÊTE RESTANTE (trouvée en audit interne, PAS corrigée dans cette passe) : ce qui
+  /// précède protège seulement contre une recréation pendant que [wipeLocal] s'exécute encore. Un
+  /// appel à [dbKey] resté bloqué dans la boucle `while` ci-dessous PENDANT un effacement reprend
+  /// normalement dès que [_wipeLock] se libère, et peut alors recréer une base toute neuve avec le
+  /// contenu que son appelant s'apprêtait à écrire — par exemple `CallOpsecStore.insert()` pour un
+  /// appel qui se termine juste après l'effacement (identifiant du correspondant compris), ou
+  /// `CrashLogStore.record()` pour une erreur survenue pendant l'effacement lui-même. Exactement le
+  /// scénario que ce correctif vise à empêcher (voir plus haut), seulement décalé après la fin de
+  /// [wipeLocal] plutôt que pendant. `MediaCache.purgeAll()` (`lib/media.dart`) traite ce même
+  /// problème pour les fichiers temporaires en attendant les écritures déjà en vol ([_activeWrites])
+  /// puis en les purgeant quand même après coup — généraliser ce patron ici demanderait de faire
+  /// attendre [wipeLocal] la fin des opérations de base de données déjà en vol (pas seulement la
+  /// récupération de la clé, qui est tout ce que [dbKey] voit) puis de repasser une suppression,
+  /// avec un vrai risque d'interblocage si mal ordonné (l'opération attend la clé pendant que
+  /// [wipeLocal] attendrait cette même opération). [wipeLocal] doit rester quasi instantané — c'est
+  /// le cœur de la garantie de l'effacement de panique — donc pas de changement à l'aveugle ici sans
+  /// pouvoir vérifier sur un appareil réel que cette attente ne le ralentit jamais. À reprendre dans
+  /// une passe dédiée, avec son propre commit et, si possible, un test de concurrence.
   static Future<String> dbKey() async {
     while (_wipeLock != null) {
       await _wipeLock!.future;
