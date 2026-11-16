@@ -103,6 +103,27 @@ class NetConfig {
   /// Échoue plutôt que de retomber sur une connexion directe (« fail closed ») : pour quelqu'un
   /// qui compte sur Tor ou un proxy pour ne pas révéler son IP réelle, un repli silencieux vers le
   /// direct serait pire qu'une erreur visible.
+  ///
+  /// LIMITE HONNÊTE NON VÉRIFIÉE (trouvée en audit interne, zone réseau/Tor) : ce qui précède
+  /// garantit que l'IP RÉELLE de l'appareil ne part jamais en direct dès que le mode n'est pas
+  /// `direct` (TCP/TLS passe par le tunnel SOCKS5, vérifié par `test/net_config_test.dart`). Ça ne
+  /// dit rien sur le NOM D'HÔTE DE DESTINATION (le homeserver, pas le proxy lui-même, déjà traité
+  /// séparément par [_LazySocksClient]). Le protocole SOCKS5 permet deux façons de router une
+  /// requête : le client résout le nom localement puis envoie l'IP au proxy (type d'adresse
+  /// 0x01/0x04 — le résolveur DNS du système, donc potentiellement le réseau local/FAI, voit alors
+  /// QUEL domaine est visité, même si la connexion elle-même part ensuite par Tor), ou le client
+  /// envoie le nom en clair au proxy qui le résout lui-même (type d'adresse 0x03 — comportement
+  /// natif de Tor, celui qu'on veut ici). Lequel des deux fait réellement le paquet `socks5_proxy`
+  /// 2.1.1 (`SocksTCPClient.assignToHttpClient`, via `HttpClient.connectionFactory`, dart:io) pour
+  /// l'hôte de la REQUÊTE HTTP elle-même (par opposition à l'hôte du proxy) n'a pas pu être vérifié
+  /// depuis ce bac à sable : ni Flutter/pub n'y sont installés pour inspecter le code résolu, ni
+  /// pub.dev ni le dépôt source du paquet n'ont pu être atteints avec les outils réseau disponibles
+  /// ici (recherches et tentatives documentées dans la session d'audit correspondante). Ne jamais
+  /// affirmer, tant que ce point n'est pas vérifié, que le mode Tor/proxy personnalisé cache le nom
+  /// de domaine du homeserver au réseau local — seule l'IP réelle l'est avec certitude aujourd'hui.
+  /// À vérifier par une prochaine passe disposant d'un accès pub.dev/GitHub, ou par une capture
+  /// réseau (Wireshark/tcpdump) sur un appareil réel en mode Tor, en cherchant une requête DNS vers
+  /// le nom d'hôte du homeserver en dehors du tunnel SOCKS5.
   Future<http.Client> httpClient() async {
     switch (mode) {
       case NetMode.direct:
