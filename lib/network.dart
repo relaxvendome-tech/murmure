@@ -104,26 +104,42 @@ class NetConfig {
   /// qui compte sur Tor ou un proxy pour ne pas révéler son IP réelle, un repli silencieux vers le
   /// direct serait pire qu'une erreur visible.
   ///
-  /// LIMITE HONNÊTE NON VÉRIFIÉE (trouvée en audit interne, zone réseau/Tor) : ce qui précède
-  /// garantit que l'IP RÉELLE de l'appareil ne part jamais en direct dès que le mode n'est pas
-  /// `direct` (TCP/TLS passe par le tunnel SOCKS5, vérifié par `test/net_config_test.dart`). Ça ne
-  /// dit rien sur le NOM D'HÔTE DE DESTINATION (le homeserver, pas le proxy lui-même, déjà traité
-  /// séparément par [_LazySocksClient]). Le protocole SOCKS5 permet deux façons de router une
-  /// requête : le client résout le nom localement puis envoie l'IP au proxy (type d'adresse
-  /// 0x01/0x04 — le résolveur DNS du système, donc potentiellement le réseau local/FAI, voit alors
-  /// QUEL domaine est visité, même si la connexion elle-même part ensuite par Tor), ou le client
-  /// envoie le nom en clair au proxy qui le résout lui-même (type d'adresse 0x03 — comportement
-  /// natif de Tor, celui qu'on veut ici). Lequel des deux fait réellement le paquet `socks5_proxy`
-  /// 2.1.1 (`SocksTCPClient.assignToHttpClient`, via `HttpClient.connectionFactory`, dart:io) pour
-  /// l'hôte de la REQUÊTE HTTP elle-même (par opposition à l'hôte du proxy) n'a pas pu être vérifié
-  /// depuis ce bac à sable : ni Flutter/pub n'y sont installés pour inspecter le code résolu, ni
-  /// pub.dev ni le dépôt source du paquet n'ont pu être atteints avec les outils réseau disponibles
-  /// ici (recherches et tentatives documentées dans la session d'audit correspondante). Ne jamais
-  /// affirmer, tant que ce point n'est pas vérifié, que le mode Tor/proxy personnalisé cache le nom
-  /// de domaine du homeserver au réseau local — seule l'IP réelle l'est avec certitude aujourd'hui.
-  /// À vérifier par une prochaine passe disposant d'un accès pub.dev/GitHub, ou par une capture
-  /// réseau (Wireshark/tcpdump) sur un appareil réel en mode Tor, en cherchant une requête DNS vers
-  /// le nom d'hôte du homeserver en dehors du tunnel SOCKS5.
+  /// RÉSOLUTION DNS DU HOMESERVER EN MODE TOR/PROXY — VÉRIFIÉ (audit interne, zone réseau/Tor,
+  /// tour précédent laissé en suspens faute d'accès à pub.dev/GitHub depuis ce bac à sable ; cette
+  /// fois le dépôt source du paquet a pu être cloné et lu directement). Ce qui précède garantit que
+  /// l'IP RÉELLE de l'appareil ne part jamais en direct dès que le mode n'est pas `direct` (TCP/TLS
+  /// passe par le tunnel SOCKS5, vérifié par `test/net_config_test.dart`). Restait à vérifier le
+  /// NOM D'HÔTE DE DESTINATION (le homeserver, pas le proxy lui-même, déjà traité séparément par
+  /// [_LazySocksClient]) : le protocole SOCKS5 permet soit de résoudre le nom localement puis
+  /// d'envoyer l'IP au proxy (type d'adresse 0x01/0x04 — fuite DNS vers le réseau local/FAI), soit
+  /// d'envoyer le nom en clair au proxy qui le résout lui-même (type d'adresse 0x03 — comportement
+  /// natif de Tor, celui qu'on veut).
+  ///
+  /// `socks5_proxy` 2.1.1 (paquet pub.dev `name: socks5_proxy`, dépôt source confirmé par son
+  /// propre `pubspec.yaml` : github.com/LacticWhale/socks_dart, commit 317f086 = exactement la
+  /// version 2.1.1 épinglée ici) fait le second choix, sans jamais résoudre le nom localement :
+  /// - `socks_tcp_client.dart` (`assignToHttpClientWithSecureOptions`, le code que
+  ///   `SocksTCPClient.assignToHttpClient` appelle) construit l'adresse cible avec
+  ///   `InternetAddress(uri.host, type: InternetAddressType.unix)` — `uri.host` est le nom du
+  ///   homeserver tel que `HttpClient` le passe à `connectionFactory`, jamais une IP déjà résolue.
+  /// - Le constructeur `InternetAddress(String, {type})` de dart:io ne fait AUCUNE résolution DNS
+  ///   pour `InternetAddressType.unix` : sa propre documentation dans le SDK (`sdk/lib/io/socket.dart`,
+  ///   dart-lang/sdk) dit explicitement que pour ce type l'adresse brute doit être « a valid UTF-8
+  ///   encoded file path » — il encode la chaîne telle quelle, il ne la regarde jamais comme un nom
+  ///   à résoudre.
+  /// - `socks_client.dart` (`_handleCommand`) mappe `InternetAddressType.unix` vers
+  ///   `AddressType.domain` (SOCKS5 0x03, voir `address_type.dart`) et envoie directement
+  ///   `targetAddress.rawAddress` — les octets UTF-8 du NOM, pas une IP — dans la requête CONNECT.
+  ///   (Le correctif amont 2.1.1, « fix domain serialization issue », corrige juste un octet nul de
+  ///   fin mal géré dans cet encodage ; il ne change pas ce choix de type d'adresse.)
+  ///
+  /// Donc : en mode Tor ou proxy SOCKS5 personnalisé, le résolveur DNS du système n'est jamais
+  /// invoqué pour le nom d'hôte du HOMESERVER — seul le nom du PROXY lui-même peut l'être
+  /// (`InternetAddress.tryParse`/`InternetAddress.lookup` dans [_LazySocksClient], déjà documenté
+  /// séparément, et sans rapport avec la destination). Le réseau local/FAI ne voit donc pas le nom
+  /// de domaine du homeserver dans ce mode. Non re-vérifié : le comportement du proxy SOCKS5 en face
+  /// (Orbot/Tor réel, ou le proxy personnalisé de l'utilisateur) une fois qu'il reçoit ce nom —
+  /// seule la correction du CLIENT Murmure est garantie ici.
   Future<http.Client> httpClient() async {
     switch (mode) {
       case NetMode.direct:
