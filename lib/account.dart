@@ -103,24 +103,30 @@ class Account {
   /// ce soit : aucune des trois bases ne peut plus être rouverte ou recréée tant qu'un effacement
   /// est en cours.
   ///
-  /// LIMITE HONNÊTE RESTANTE (trouvée en audit interne, PAS corrigée dans cette passe) : ce qui
-  /// précède protège seulement contre une recréation pendant que [wipeLocal] s'exécute encore. Un
-  /// appel à [dbKey] resté bloqué dans la boucle `while` ci-dessous PENDANT un effacement reprend
-  /// normalement dès que [_wipeLock] se libère, et peut alors recréer une base toute neuve avec le
-  /// contenu que son appelant s'apprêtait à écrire — par exemple `CallOpsecStore.insert()` pour un
-  /// appel qui se termine juste après l'effacement (identifiant du correspondant compris), ou
-  /// `CrashLogStore.record()` pour une erreur survenue pendant l'effacement lui-même. Exactement le
-  /// scénario que ce correctif vise à empêcher (voir plus haut), seulement décalé après la fin de
-  /// [wipeLocal] plutôt que pendant. `MediaCache.purgeAll()` (`lib/media.dart`) traite ce même
-  /// problème pour les fichiers temporaires en attendant les écritures déjà en vol ([_activeWrites])
-  /// puis en les purgeant quand même après coup — généraliser ce patron ici demanderait de faire
-  /// attendre [wipeLocal] la fin des opérations de base de données déjà en vol (pas seulement la
-  /// récupération de la clé, qui est tout ce que [dbKey] voit) puis de repasser une suppression,
-  /// avec un vrai risque d'interblocage si mal ordonné (l'opération attend la clé pendant que
-  /// [wipeLocal] attendrait cette même opération). [wipeLocal] doit rester quasi instantané — c'est
-  /// le cœur de la garantie de l'effacement de panique — donc pas de changement à l'aveugle ici sans
-  /// pouvoir vérifier sur un appareil réel que cette attente ne le ralentit jamais. À reprendre dans
-  /// une passe dédiée, avec son propre commit et, si possible, un test de concurrence.
+  /// CORRIGÉ DANS CETTE PASSE (le paragraphe précédent — « LIMITE HONNÊTE RESTANTE » — décrivait
+  /// cette même lacune comme volontairement non corrigée ; conservé juste au-dessus pour
+  /// l'historique du constat, voir ce qui suit pour ce qui a changé) : un appel à [dbKey] resté
+  /// bloqué dans la boucle `while` ci-dessous PENDANT un effacement reprend normalement dès que
+  /// [_wipeLock] se libère, et peut alors recréer une base toute neuve avec le contenu que son
+  /// appelant s'apprêtait à écrire — `CallOpsecStore.insert()` pour un appel qui se termine juste
+  /// après l'effacement (identifiant du correspondant compris), ou `CrashLogStore.record()` pour
+  /// une erreur survenue pendant l'effacement lui-même. La correction envisagée plus haut (faire
+  /// attendre [wipeLocal] la fin des opérations déjà en vol, comme `MediaCache.purgeAll()` le fait
+  /// pour les fichiers temporaires via `_activeWrites`) reste écartée pour la raison déjà donnée :
+  /// un vrai risque d'interblocage, et [wipeLocal] doit rester quasi instantané sans pouvoir le
+  /// vérifier sur un appareil réel depuis ce bac à sable.
+  ///
+  /// Corrigé autrement, sans toucher à la vitesse ni à l'ordre des opérations de [wipeLocal] : au
+  /// lieu d'empêcher la course, on la détecte APRÈS coup, exactement le même principe que
+  /// `Mesh._resetGen`/`Mesh._database()` (voir mesh.dart) utilise déjà pour la même classe de
+  /// problème (une ouverture de base en vol pendant [Mesh.reset]). [wipeGeneration] est incrémenté
+  /// de façon strictement synchrone, dans la même ligne que la pose de [_wipeLock], donc avant
+  /// tout premier `await` de [wipeLocal] : un appelant qui capture sa valeur avant d'attendre
+  /// [dbKey] voit forcément une valeur différente après coup si un effacement a eu lieu pendant
+  /// son attente. `CallOpsecStore.insert()`/`CrashLogStore.record()` capturent [wipeGeneration]
+  /// avant d'écrire et, si [wipedSince] renvoie vrai une fois l'écriture faite, suppriment
+  /// seulement la ligne qu'ils viennent d'insérer (jamais toute la base, qui pourrait déjà
+  /// contenir une écriture légitime postérieure à l'effacement) — voir ces deux fichiers.
   static Future<String> dbKey() async {
     while (_wipeLock != null) {
       await _wipeLock!.future;
@@ -129,6 +135,22 @@ class Account {
   }
 
   static Future<String>? _dbKeyOp;
+
+  /// Génération d'effacement : incrémentée une seule fois, de façon synchrone, au tout début de
+  /// [wipeLocal] (même ligne que la pose de [_wipeLock], avant son premier `await`). Sert à
+  /// [wipedSince] — voir le commentaire de [dbKey] ci-dessus pour le scénario que ça détecte.
+  static int _wipeGen = 0;
+
+  /// Valeur actuelle de [_wipeGen], à capturer AVANT toute écriture dans une base protégée par
+  /// [dbKey] dont le résultat ne doit pas survivre à un effacement qui aurait eu lieu pendant
+  /// cette écriture (voir [wipedSince]).
+  static int get wipeGeneration => _wipeGen;
+
+  /// Vrai si [wipeLocal] a été appelé (et a donc déjà incrémenté [_wipeGen]) depuis que l'appelant
+  /// a capturé [capturedGen] via [wipeGeneration] — c'est-à-dire si l'écriture que l'appelant vient
+  /// de terminer a chevauché un effacement en timing, et ne doit donc pas survivre. Fonction pure
+  /// (aucune E/S), testable sans plugin.
+  static bool wipedSince(int capturedGen) => _wipeGen != capturedGen;
 
   /// Non nul pendant toute la durée de [wipeLocal] (voir ce commentaire de [dbKey]) : fait
   /// attendre tout appel concurrent à [dbKey] — donc toute ouverture/recréation des trois bases
@@ -488,6 +510,10 @@ class Account {
   static Future<void> wipeLocal(Client? client) async {
     final lock = Completer<void>();
     _wipeLock = lock;
+    // Même ligne, avant tout premier `await` : voir [wipedSince] et le commentaire de [dbKey].
+    // Un appelant qui capture [wipeGeneration] avant cet instant verra forcément une valeur
+    // différente après, quelle que soit la suite de cette méthode.
+    _wipeGen++;
     try {
       // TOUT PREMIER : marqueur « effacement en cours », hors Keystore. Il autorise
       // [_loadOrCreateDbKey] à supprimer les bases restantes si l'effacement est interrompu, et

@@ -36,16 +36,38 @@ class CallOpsecStore {
     );
   }
 
+  /// Trouvé en audit interne (course entre un effacement et une écriture concurrente, voir le
+  /// commentaire de `Account.dbKey`) : un appel à [insert] déjà en vol au moment d'un effacement
+  /// (`Account.wipeLocal`, panique ou suppression de compte) peut rester bloqué dans
+  /// `Account.dbKey` pendant toute sa durée, puis reprendre une fois l'effacement terminé et
+  /// recréer cette base avec la ligne qu'il s'apprêtait à écrire — identifiant du correspondant
+  /// compris — alors que l'effacement est censé l'avoir fait disparaître. `Account.wipeGeneration`
+  /// est capturé AVANT d'écrire ; si `Account.wipedSince` dit qu'un effacement a eu lieu pendant
+  /// cette écriture, on supprime seulement la ligne qu'on vient d'insérer (jamais toute la base,
+  /// qui pourrait déjà contenir une écriture légitime postérieure à l'effacement). Best-effort,
+  /// comme le reste de cette méthode : un échec de ce nettoyage ne doit pas faire planter l'appel.
   static Future<void> insert(MissedCall call) async {
+    final gen = Account.wipeGeneration;
     final db = await _open();
+    int rowId;
     try {
-      await db.insert('missed_calls', {
+      rowId = await db.insert('missed_calls', {
         'room_id': call.roomId,
         'remote_user_id': call.remoteUserId,
         'ts': call.timestamp,
       });
     } finally {
       await db.close();
+    }
+    if (Account.wipedSince(gen)) {
+      try {
+        final db2 = await _open();
+        try {
+          await db2.delete('missed_calls', where: 'rowid = ?', whereArgs: [rowId]);
+        } finally {
+          await db2.close();
+        }
+      } catch (_) {}
     }
   }
 

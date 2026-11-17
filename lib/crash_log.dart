@@ -116,15 +116,27 @@ class CrashLogStore {
     }
   }
 
+  /// Trouvé en audit interne (course entre un effacement et une écriture concurrente, même défaut
+  /// que celui déjà corrigé dans `CallOpsecStore.insert` — voir le commentaire de
+  /// `Account.dbKey`) : un appel à [record] déjà en vol au moment d'un effacement
+  /// (`Account.wipeLocal`, panique ou suppression de compte) peut rester bloqué dans
+  /// `Account.dbKey` pendant toute sa durée, puis reprendre une fois l'effacement terminé et
+  /// recréer cette base avec l'entrée qu'il s'apprêtait à écrire — pour une erreur survenue
+  /// pendant l'effacement lui-même, typiquement. Même correctif : `Account.wipeGeneration` est
+  /// capturé AVANT d'écrire ; si `Account.wipedSince` dit qu'un effacement a eu lieu pendant cette
+  /// écriture, on supprime seulement la ligne qu'on vient d'insérer (jamais toute la base, qui
+  /// pourrait déjà contenir une entrée légitime postérieure à l'effacement).
   static Future<void> record({
     required String source,
     required Object error,
     StackTrace? stack,
   }) async {
+    final gen = Account.wipeGeneration;
     final db = await _open();
+    int rowId;
     try {
       final stackStr = (stack ?? StackTrace.current).toString();
-      await db.insert('crashes', {
+      rowId = await db.insert('crashes', {
         'ts': DateTime.now().millisecondsSinceEpoch,
         'source': source,
         'error_type': error.runtimeType.toString(),
@@ -134,6 +146,16 @@ class CrashLogStore {
       await _purge(db);
     } finally {
       await db.close();
+    }
+    if (Account.wipedSince(gen)) {
+      try {
+        final db2 = await _open();
+        try {
+          await db2.delete('crashes', where: 'id = ?', whereArgs: [rowId]);
+        } finally {
+          await db2.close();
+        }
+      } catch (_) {}
     }
   }
 
