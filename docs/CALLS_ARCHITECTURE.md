@@ -282,3 +282,36 @@ seule la lecture du code garantit que le chemin de suppression est maintenant co
 découverte ne clôt pas non plus la question de savoir si d'autres fichiers créés au fil des passes
 successives échappent de la même façon à `wipeLocal()` (caches, fichiers temporaires de médias
 hors `purgeMediaCache()`, etc.) — à vérifier dans une prochaine passe d'audit.
+
+### Suite de l'audit (tour suivant) : fichiers `image_picker` hors de `purgeMediaCache()`
+
+En répondant à la question laissée ouverte juste au-dessus (« d'autres fichiers... hors
+`purgeMediaCache()` ») lors d'un audit de la zone appels : trouvé en relisant le code source réel
+du plugin `image_picker_android` (`flutter/packages`, `ImagePickerDelegate.
+createTemporaryWritableFile`, `ImageResizer`, `FileUtils`) que la photo choisie dans la galerie ou
+recompressée par `ImagePicker.pickImage` (`ChatScreen._pickAndSendImage`, `lib/ui/
+rooms_screen.dart`) est écrite par ce plugin natif directement dans `context.getCacheDir()` —
+vérifié aussi, dans `path_provider_android`, qu'il s'agit EXACTEMENT du même répertoire que
+`getTemporaryDirectory()` côté Dart. `MediaCache.purgeAll()` (`lib/media.dart`), lui, n'énumérait
+que son propre sous-répertoire `murmure_media` : un plantage, un arrêt forcé par le système ou une
+saisie de l'appareil survenant entre le retour de `pickImage()` et le nettoyage explicite déjà fait
+par `_pickAndSendImage` (voir son commentaire) laissait donc cette copie — potentiellement avec les
+mêmes métadonnées EXIF que `stripExifAndReencode` existe pour retirer, `image_picker` ne garantissant
+pas leur retrait lors de sa propre recompression — survivre à la fois au démarrage suivant ET à un
+essuyage de panique (`Account.wipeLocal`, qui appelle `purgeMediaCache()` mais ne voyait, lui non
+plus, jamais ces fichiers).
+
+Corrigé par `MediaCache._purgeSystemCacheRoot()` : balaie aussi, en plus de `murmure_media`, toute
+la racine du répertoire que `getTemporaryDirectory()` renvoie (fichiers et sous-répertoires,
+`murmure_media` lui-même exclu) — volontairement large plutôt qu'une liste de motifs fragile,
+puisque ce répertoire est par contrat Android un cache que le système peut vider de lui-même à tout
+moment. Appelé automatiquement par `purgeAll()`, donc aux deux mêmes points déjà couverts
+(démarrage et `wipeLocal`), sans changement à ces deux call sites. Couvert par
+`test/media_test.dart` (groupe « MediaCache.purgeAll (balayage du cache système) »), avec un faux
+`PathProviderPlatform` plutôt qu'un appareil réel.
+
+LIMITE HONNÊTE identique à celle ci-dessus : pas vérifié par un essuyage réel suivi d'une
+inspection du système de fichiers sur un appareil physique. Ne couvre pas non plus une écriture
+`image_picker` qui serait encore EN COURS (code natif, hors de ce fichier Dart) au moment exact
+d'un essuyage de panique — scénario déjà hors de portée avant ce correctif (aucun balayage
+n'existait du tout) et non vérifiable sans appareil.

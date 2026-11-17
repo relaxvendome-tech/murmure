@@ -25,6 +25,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:murmure/media.dart';
 import 'package:path/path.dart' as p;
+// Dépendance transitive de `path_provider` (voir son pubspec.yaml), pas redéclarée dans celui de
+// ce dépôt : seule `PathProviderPlatform` (la classe à substituer pour les tests, voir
+// _FakePathProviderPlatform ci-dessous) y est définie — `package:path_provider/path_provider.dart`
+// ne la ré-exporte pas (vérifié dans son code source : il ré-exporte seulement `StorageDirectory`
+// de ce même paquet). Résolue par `flutter pub get` via `path_provider` quoi qu'il arrive ; aucune
+// contrainte de version à fixer ici, ce paquet n'étant jamais utilisé par le code de production.
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 void main() {
   group('stripExifAndReencode', () {
@@ -158,4 +165,93 @@ void main() {
       await expectLater(MediaCache.wipe(file), completes);
     });
   });
+
+  group('MediaCache.purgeAll (balayage du cache système)', () {
+    // Trouvé en audit interne (zone appels, étendu en relisant le code source réel du plugin
+    // `image_picker_android` — voir le commentaire de `MediaCache._purgeSystemCacheRoot` dans
+    // lib/media.dart) : `image_picker` écrit ses propres fichiers directement dans le répertoire
+    // que `getTemporaryDirectory()` renvoie (`context.getCacheDir()` côté Android, vérifié dans
+    // `path_provider_android`), pas dans le sous-répertoire `murmure_media` que [MediaCache]
+    // énumérait jusqu'ici seul. Ces tests simulent ce voisinage avec un faux
+    // [PathProviderPlatform] pointant vers un répertoire temporaire réel (pas d'accès à un
+    // appareil Android nécessaire : flutter_test exécute ces tests sur la VM Dart hôte, et
+    // `getTemporaryDirectory()` ne fait que lire `PathProviderPlatform.instance`).
+    late Directory fakeCacheRoot;
+    late PathProviderPlatform previousInstance;
+
+    setUp(() async {
+      previousInstance = PathProviderPlatform.instance;
+      fakeCacheRoot = await Directory.systemTemp.createTemp('murmure_fake_cache_root_');
+      PathProviderPlatform.instance = _FakePathProviderPlatform(fakeCacheRoot.path);
+    });
+
+    tearDown(() async {
+      PathProviderPlatform.instance = previousInstance;
+      if (await fakeCacheRoot.exists()) await fakeCacheRoot.delete(recursive: true);
+    });
+
+    test(
+        'efface un fichier laissé par un plugin tiers directement à la racine du cache '
+        '(ex. image_picker), hors de murmure_media', () async {
+      final stray = File(p.join(fakeCacheRoot.path, 'image_picker_stray.jpg'));
+      await stray.writeAsBytes(List<int>.filled(256, 0xCD));
+
+      await MediaCache.purgeAll();
+
+      expect(await stray.exists(), isFalse);
+    });
+
+    test(
+        'efface récursivement un sous-répertoire laissé par un plugin tiers '
+        '(ex. le schéma UUID de image_picker/FileUtils)', () async {
+      final strayDir = Directory(p.join(fakeCacheRoot.path, 'a1b2c3d4-uuid'));
+      await strayDir.create(recursive: true);
+      final strayFile = File(p.join(strayDir.path, 'photo.jpg'));
+      await strayFile.writeAsBytes(List<int>.filled(128, 0xEF));
+
+      await MediaCache.purgeAll();
+
+      expect(await strayDir.exists(), isFalse);
+    });
+
+    test('ne supprime pas le sous-répertoire murmure_media lui-même, seulement son contenu',
+        () async {
+      // Crée un fichier dans murmure_media via l'API publique, pour exercer le même chemin que
+      // l'appli réelle (voir [MediaCache.writeTemp]).
+      final written = await MediaCache.writeTemp(List<int>.filled(64, 0x11), extension: 'bin');
+      final mediaDir = written.parent;
+      expect(p.basename(mediaDir.path), 'murmure_media');
+
+      await MediaCache.purgeAll();
+
+      expect(await mediaDir.exists(), isTrue,
+          reason: 'murmure_media doit survivre : seul son contenu est écrasé par purgeAll, pas '
+              'le répertoire lui-même (voir _dir(), qui le recrée sinon à la prochaine écriture '
+              'de toute façon, mais sans raison de le supprimer ici).');
+      expect(await written.exists(), isFalse);
+    });
+
+    test('ne touche pas à un fichier légitime géré ailleurs par murmure_media pendant le '
+        'balayage du reste du cache (pas de collision entre les deux passes)', () async {
+      final written = await MediaCache.writeTemp(List<int>.filled(32, 0x22), extension: 'bin');
+      final stray = File(p.join(fakeCacheRoot.path, 'other_plugin.tmp'));
+      await stray.writeAsBytes(List<int>.filled(32, 0x33));
+
+      await MediaCache.purgeAll();
+
+      expect(await written.exists(), isFalse); // balayé par la passe murmure_media
+      expect(await stray.exists(), isFalse); // balayé par _purgeSystemCacheRoot
+    });
+  });
+}
+
+/// Faux [PathProviderPlatform] minimal : seul `getTemporaryPath()` est utilisé par
+/// `lib/media.dart`, donc seul lui est surchargé — les autres méthodes héritent du comportement
+/// par défaut de la classe de base (`UnimplementedError`), jamais appelé par ce fichier.
+class _FakePathProviderPlatform extends PathProviderPlatform {
+  _FakePathProviderPlatform(this._tempPath);
+  final String _tempPath;
+
+  @override
+  Future<String?> getTemporaryPath() async => _tempPath;
 }

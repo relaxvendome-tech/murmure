@@ -22,9 +22,14 @@ import 'package:path_provider/path_provider.dart';
 /// (coordonnées GPS, horodatage précis, modèle de l'appareil) qui survivraient telles quelles au
 /// chiffrement de bout en bout sinon.
 class MediaCache {
+  /// Nom du sous-répertoire dédié de [_dir], à l'intérieur de `getTemporaryDirectory()` — exclu
+  /// du balayage plus large de [_purgeSystemCacheRoot] (qui le traiterait sinon en doublon, sans
+  /// bénéficier de la protection contre les écritures en cours que [purgeAll] lui applique déjà).
+  static const _mediaSubdirName = 'murmure_media';
+
   static Future<Directory> _dir() async {
     final base = await getTemporaryDirectory();
-    final dir = Directory(p.join(base.path, 'murmure_media'));
+    final dir = Directory(p.join(base.path, _mediaSubdirName));
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
@@ -116,10 +121,12 @@ class MediaCache {
     try {
       await Future.wait(_activeWrites.map((c) => c.future));
       final dir = await _dir();
-      if (!await dir.exists()) return;
-      await for (final entity in dir.list()) {
-        if (entity is File) await wipe(entity);
+      if (await dir.exists()) {
+        await for (final entity in dir.list()) {
+          if (entity is File) await wipe(entity);
+        }
       }
+      await _purgeSystemCacheRoot();
     } finally {
       // `identical` plutôt qu'une simple affectation : si un second appel concurrent à [purgeAll]
       // a entre-temps remplacé [_purging] par SON propre verrou (ex. la purge de démarrage et un
@@ -129,6 +136,60 @@ class MediaCache {
       if (identical(_purging, purge)) _purging = null;
       purge.complete();
     }
+  }
+
+  /// Trouvé en audit interne (zone appels, étendu en relisant le code source réel du plugin
+  /// `image_picker_android` — paquet `image_picker` déclaré dans `pubspec.yaml`, utilisé par
+  /// `ChatScreen._pickAndSendImage` dans `lib/ui/rooms_screen.dart`) : `ImagePickerDelegate.
+  /// createTemporaryWritableFile` (capture caméra) et `ImageResizer`/`FileUtils` (recompression
+  /// d'une image de galerie, `imageQuality`/`maxWidth`/`maxHeight`) écrivent chacun leur copie
+  /// directement dans `context.getCacheDir()` côté Android — pas dans un sous-répertoire propre à
+  /// ce plugin, à sa racine ou dans un sous-répertoire nommé d'un UUID aléatoire selon le chemin
+  /// interne exact pris par le plugin. Vérifié aussi que `getTemporaryDirectory()` (utilisé par
+  /// [_dir] ci-dessus) renvoie EXACTEMENT ce même répertoire côté Android
+  /// (`path_provider_android`, `getApplicationCachePath` → `context.cacheDir`, pas un autre
+  /// chemin) : le fichier écrit par `image_picker` est donc un simple voisin du sous-répertoire
+  /// `murmure_media` ci-dessus, jamais DANS celui-ci — [purgeAll], qui n'énumère que
+  /// `murmure_media`, ne l'a donc jamais vu.
+  ///
+  /// Conséquence concrète : `_pickAndSendImage` efface déjà explicitement sa propre copie dans son
+  /// `finally` (voir ce commentaire dans `lib/ui/rooms_screen.dart`), mais un plantage, un arrêt
+  /// forcé par le système (OOM, restrictions d'arrière-plan) ou une saisie de l'appareil survenant
+  /// entre le retour de `pickImage()` et ce `finally` laisse ce fichier — potentiellement avec les
+  /// mêmes métadonnées EXIF (GPS, horodatage précis, modèle d'appareil) que [stripExifAndReencode]
+  /// existe pour retirer, `image_picker` ne garantissant pas leur retrait lors de sa propre
+  /// recompression — survivre intact, y compris à un essuyage de panique ultérieur
+  /// (`Account.wipeLocal`, qui appelle [purgeAll] mais ne voyait, lui non plus, jamais ces
+  /// fichiers avant ce correctif).
+  ///
+  /// Balayage volontairement large (toute la racine du répertoire de cache, fichiers ET
+  /// sous-répertoires, pas seulement les noms connus d'`image_picker`) plutôt qu'une liste de
+  /// motifs fragile : `getCacheDir()` est par contrat Android un répertoire que le système peut
+  /// vider de lui-même à tout moment sans que l'appli n'en souffre (documentation officielle de
+  /// `Context.getCacheDir()`) — aucun code de Murmure ni d'une dépendance ne devrait donc compter
+  /// sur la survie d'un fichier qui s'y trouve déjà. Seul [_mediaSubdirName] (déjà traité
+  /// ci-dessus, avec sa propre protection contre les écritures en cours) est exclu de ce balayage.
+  ///
+  /// LIMITE HONNÊTE : contrairement à [writeTemp]/[purgeAll] pour `murmure_media`, rien ici ne
+  /// peut détecter une écriture `image_picker` EN COURS (code natif hors de ce fichier) : un appel
+  /// de panique qui tomberait exactement pendant un `pickImage()` actif pourrait en théorie
+  /// manquer un fichier pas encore créé — scénario déjà hors de portée avant ce correctif (aucun
+  /// balayage n'existait du tout) et non vérifiable sans appareil physique.
+  static Future<void> _purgeSystemCacheRoot() async {
+    try {
+      final root = await getTemporaryDirectory();
+      if (!await root.exists()) return;
+      await for (final entity in root.list(followLinks: false)) {
+        if (p.basename(entity.path) == _mediaSubdirName) continue;
+        try {
+          if (entity is File) {
+            await wipe(entity);
+          } else if (entity is Directory) {
+            await entity.delete(recursive: true);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 }
 
