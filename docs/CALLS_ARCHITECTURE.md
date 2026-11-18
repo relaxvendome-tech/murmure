@@ -349,3 +349,27 @@ côté entrant (`voip.dart`, `onCallInvite`, vérifié au tag v16.0.2 épinglé 
 LIMITE HONNÊTE : corrigé par lecture du code (y compris celui du SDK épinglé, cloné et relu pour
 confirmer le moment exact où `_active` devient non-null), pas vérifié par un double appui réel sur
 un appareil physique — aucun appareil disponible dans ce bac à sable.
+
+### Suite de l'audit (tour suivant) : même défaut côté bouton « Décrocher » d'un appel entrant
+
+Le correctif précédent (double appui sur le bouton d'appel sortant) n'avait jamais été revérifié
+côté ENTRANT. `CallSessionScreen._accept` (`lib/calls/ui/call_session_screen.dart`) n'avait aucun
+garde-fou contre un second appui sur le bouton « Décrocher » avant que le premier n'ait fini :
+`setState(() => _answered = true)` retire bien ce bouton au prochain rendu, mais seulement à la
+prochaine frame — un second événement de pointeur déjà mis en file pour ce même bouton exécute
+`_accept` une seconde fois avant ce retrait.
+
+Vérifié contre le code source réel de `matrix-dart-sdk` au tag exact épinglé (v16.0.2, cloné pour
+l'occasion, `lib/src/voip/call_session.dart`, `CallSession.answer()`) : son propre garde-fou
+(`_inviteOrAnswerSent`) n'est posé qu'à la TOUTE FIN de la méthode — après
+`pc!.createAnswer`/`setLocalDescription`, un délai `Future.delayed(200ms)` ET l'aller-retour
+réseau de `sendAnswerCall` — jamais à l'entrée. Un second appel concurrent avant cette fin repasse
+donc entièrement par `createAnswer`/`setLocalDescription` sur la MÊME `RTCPeerConnection` et
+envoie un second `m.call.answer` dupliqué au correspondant : une fenêtre de course bien plus large
+qu'une seule frame Flutter, sur le seul appelant de `CallSession.answer()` dans ce dépôt.
+
+Corrigé par un garde-fou synchrone local (`if (_answered) return;`, premier appel) — symétrique à
+`CallManager._startingOutgoingCall` côté sortant, voir plus haut.
+
+LIMITE HONNÊTE identique à celle du correctif côté sortant : vérifié par lecture du code (y
+compris du SDK épinglé), pas par un double appui réel sur un appareil physique.

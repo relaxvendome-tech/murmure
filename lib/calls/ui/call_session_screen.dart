@@ -198,7 +198,28 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     }
   }
 
+  /// Trouvé en audit interne (zone appels de ce tour, même défaut que le double appui sur le
+  /// bouton d'appel SORTANT corrigé au tour précédent — `CallManager.startCall`,
+  /// `_startingOutgoingCall` — mais jamais revérifié côté ENTRANT jusqu'ici) : rien ici ne
+  /// protégeait contre un second appui sur ce même bouton « Décrocher » avant que le premier
+  /// n'ait fini. `setState(() => _answered = true)` retire bien le bouton du prochain rendu, mais
+  /// seulement à la prochaine frame — un second événement de pointeur déjà mis en file pour ce
+  /// même bouton (deux appuis tombés dans le même intervalle que Flutter met à traiter la
+  /// reconstruction) exécute [_accept] une seconde fois avant que ce retrait n'ait eu lieu.
+  ///
+  /// Vérifié contre le code source réel de `matrix-dart-sdk` au tag exact épinglé (v16.0.2, cloné
+  /// pour l'occasion, `lib/src/voip/call_session.dart`, `CallSession.answer()`) : son propre
+  /// garde-fou (`_inviteOrAnswerSent`) n'est posé qu'à la TOUTE FIN de la méthode, après
+  /// `pc!.createAnswer`/`setLocalDescription`, un délai `Future.delayed(200ms)` ET l'aller-retour
+  /// réseau de `sendAnswerCall` — pas à l'entrée. Un second appel concurrent avant cette fin
+  /// repasse donc entièrement par `createAnswer`/`setLocalDescription` sur la MÊME
+  /// `RTCPeerConnection` et envoie un second `m.call.answer` dupliqué au correspondant — une
+  /// fenêtre de course bien plus large qu'une seule frame Flutter, sur le seul appelant de
+  /// `CallSession.answer()` dans ce dépôt. Corrigé par un garde-fou synchrone local, posé avant
+  /// tout le reste (donc avant la moindre chance qu'un second appel concurrent s'y engage) :
+  /// symétrique à [_startingOutgoingCall] côté sortant.
   Future<void> _accept() async {
+    if (_answered) return;
     setState(() => _answered = true);
     await widget.session.answer();
   }
