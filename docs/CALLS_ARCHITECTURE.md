@@ -315,3 +315,37 @@ inspection du système de fichiers sur un appareil physique. Ne couvre pas non p
 `image_picker` qui serait encore EN COURS (code natif, hors de ce fichier Dart) au moment exact
 d'un essuyage de panique — scénario déjà hors de portée avant ce correctif (aucun balayage
 n'existait du tout) et non vérifiable sans appareil.
+
+### Suite de l'audit (tour suivant) : double appel sortant par appui rapproché sur le bouton d'appel
+
+Trouvé en relisant `CallManager.startCall`/`MurmureWebRTCDelegate` à froid (pas une proposition
+externe) : `ChatScreen._call` (`lib/ui/rooms_screen.dart`) n'attend ni ne désactive le bouton
+d'appel pendant que `startCall` est en vol. Rien, avant ce correctif, n'empêchait deux appuis
+rapprochés (double-tap, ou toute ré-entrance avant le premier rendu de `CallSessionScreen`) de
+déclencher deux appels à `startCall` presque simultanés : chacun passait les vérifications
+existantes (mode réseau, config ICE) puis appelait chacun `voip.inviteToCall` — deux VRAIS appels
+sortants distincts, chacun avec son propre `m.call.invite` envoyé et sa propre `CallSessionScreen`
+empilée par-dessus l'autre.
+
+`MurmureWebRTCDelegate._watchActive` n'est idempotent que pour une même session relue deux fois
+(cas normal appel sortant déjà documenté dans ce fichier) ; appelé avec une session DIFFÉRENTE
+alors que `_active` est déjà renseigné, il écrase silencieusement `_active` au profit de la
+seconde sans rien faire de spécial pour la première. La première session restait pourtant bien
+réelle (connexion WebRTC active, écran non fermé, micro potentiellement ouvert), mais
+`activeCallNotifier`/`CallManager.activeCallListenable` ne la reflétait plus une fois écrasé —
+exactement la garantie que `LockGate` lit avant de reverrouiller automatiquement pour ne jamais
+couper un appel en cours (voir plus haut dans ce document et le commentaire de
+`activeCallListenable`) : ce premier appel, bien réel, perdait silencieusement sa protection
+contre le relock automatique.
+
+`delegate.canHandleNewCall` (donc `_active`) ne suffit pas seul à fermer cette course : il ne
+devient non-null qu'après `_watchActive`, donc après `inviteToCall`/`initOutboundCall`
+(négociation SDP, `getUserMedia`) — après la fenêtre de course, pas avant. Corrigé par un verrou
+synchrone dédié (`CallManager._startingOutgoingCall`), posé avant tout `await` de `startCall` et
+retiré via `finally`, combiné à une vérification de `delegate.canHandleNewCall` dès l'entrée de la
+méthode — désormais symétrique à la vérification que `matrix-dart-sdk` applique déjà elle-même
+côté entrant (`voip.dart`, `onCallInvite`, vérifié au tag v16.0.2 épinglé par ce dépôt).
+
+LIMITE HONNÊTE : corrigé par lecture du code (y compris celui du SDK épinglé, cloné et relu pour
+confirmer le moment exact où `_active` devient non-null), pas vérifié par un double appui réel sur
+un appareil physique — aucun appareil disponible dans ce bac à sable.

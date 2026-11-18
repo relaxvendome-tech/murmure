@@ -549,6 +549,12 @@ class CallManager {
   final MurmureWebRTCDelegate delegate;
   late final VoIP voip;
 
+  /// Trouvé en audit interne (zone appels de ce tour, relecture à froid — pas une proposition
+  /// externe) : verrou synchrone contre un double appui rapide sur le bouton d'appel (voir
+  /// [startCall] ci-dessous pour le défaut qu'il corrige). Posé avant tout `await` dans
+  /// [startCall], jamais lu ni écrit ailleurs.
+  bool _startingOutgoingCall = false;
+
   /// Trouvé en audit interne (revue croisée à 5 IA, consensus unanime) : [LockGate] lit ceci
   /// avant de reverrouiller automatiquement, pour ne jamais couper un appel en cours (micro
   /// ouvert) juste parce que l'appli revient de l'arrière-plan après [kRelockAfter] — voir
@@ -585,35 +591,70 @@ class CallManager {
   /// créée par cette tentative. L'appel cible aussi explicitement le correspondant de la
   /// conversation directe (`userId`) : sans lui, n'importe quel membre du salon pouvait décrocher,
   /// et un salon non direct n'est pas pris en charge (retour `null`).
+  ///
+  /// Trouvé en audit interne (zone appels de ce tour, relecture à froid, pas une proposition
+  /// externe) : rien ici ne protégeait contre un double appui rapproché sur le bouton d'appel
+  /// (`ChatScreen._call`, `lib/ui/rooms_screen.dart`, qui n'attend ni ne se désactive pendant cet
+  /// appel). Deux appels à [startCall] quasi simultanés passaient chacun les vérifications
+  /// ci-dessus (aucune ne lit encore `delegate.canHandleNewCall`) puis appelaient chacun
+  /// `voip.inviteToCall` — deux VRAIS appels sortants distincts (deux `m.call.invite` envoyés),
+  /// chacun aboutissant à son propre `MurmureWebRTCDelegate.handleNewCall` puis
+  /// `_watchActive(session)` (code déjà en place, inchangé par ce correctif). `_watchActive`
+  /// n'est lui-même idempotent QUE pour une seule session relue deux fois (voir son commentaire) —
+  /// appelé avec une session DIFFÉRENTE alors que `_active` est déjà renseigné, il l'écrase
+  /// silencieusement sans rien faire de spécial pour l'ancienne : celle-ci continuait d'exister
+  /// (CallSessionScreen jamais fermé, connexion WebRTC bien réelle, potentiellement micro ouvert)
+  /// mais `_active`/[activeCallListenable] ne la reflétait plus — exactement la garantie que
+  /// `LockGate` lit avant de reverrouiller automatiquement (voir le commentaire de
+  /// [activeCallListenable] ci-dessus) : ce premier appel, bien réel, perdait silencieusement sa
+  /// protection contre le relock automatique, sans action explicite de l'utilisateur pour
+  /// l'expliquer.
+  ///
+  /// `delegate.canHandleNewCall` (donc `_active`) ne suffit pas à lui seul pour fermer cette
+  /// course : il ne devient non-null qu'une fois `_watchActive` appelé par `handleNewCall`, donc
+  /// après `inviteToCall`/`initOutboundCall` (négociation SDP, `getUserMedia`) — soit après la
+  /// fenêtre de course elle-même, pas avant. D'où [_startingOutgoingCall] : verrou synchrone posé
+  /// AVANT tout `await` de cette méthode (donc avant la moindre chance qu'un second appel
+  /// concurrent s'y engage), retiré dans tous les cas via `finally`. Combiné à la vérification de
+  /// `delegate.canHandleNewCall` (déjà lisible dès ce point, sans attendre quoi que ce soit) :
+  /// aucun appel sortant ne démarre plus tant qu'un autre est en train de démarrer OU déjà actif
+  /// (entrant ou sortant) — symétrique à la vérification que la version de `matrix-dart-sdk` ici
+  /// épinglée (voir `voip.dart`, `onCallInvite`) applique déjà elle-même côté entrant.
   Future<CallSession?> startCall(Room room, {required CallType type}) async {
-    final net = await NetConfig.load();
-    if (!CallPolicy.isAllowed(net.mode)) return null;
-    final peerId = room.directChatMatrixID;
-    if (peerId == null) return null;
-    final CallIceConfig? iceConfig;
+    if (_startingOutgoingCall || !delegate.canHandleNewCall) return null;
+    _startingOutgoingCall = true;
     try {
-      iceConfig = await CallPolicy.buildIceConfig(client: room.client, mode: net.mode);
-    } catch (_) {
-      return null;
-    }
-    if (iceConfig == null) return null;
-
-    final before = voip.calls.values.map((c) => c.callId).toSet();
-    try {
-      final session = await voip.inviteToCall(room, type, userId: peerId);
-      if (session.pc == null) {
-        // Refus tardif (TURN devenu indisponible entre la pré-vérification et la création de la
-        // connexion) sans exception remontée : même nettoyage que ci-dessous.
-        await _abortOutgoing(room, before, extra: session);
+      final net = await NetConfig.load();
+      if (!CallPolicy.isAllowed(net.mode)) return null;
+      final peerId = room.directChatMatrixID;
+      if (peerId == null) return null;
+      final CallIceConfig? iceConfig;
+      try {
+        iceConfig = await CallPolicy.buildIceConfig(client: room.client, mode: net.mode);
+      } catch (_) {
         return null;
       }
-      // Raccroché par handleNewCall (appli reverrouillée entre-temps) : rien à présenter.
-      if (session.callHasEnded) return null;
-      delegate._watchActive(session);
-      return session;
-    } catch (_) {
-      await _abortOutgoing(room, before);
-      return null;
+      if (iceConfig == null) return null;
+
+      final before = voip.calls.values.map((c) => c.callId).toSet();
+      try {
+        final session = await voip.inviteToCall(room, type, userId: peerId);
+        if (session.pc == null) {
+          // Refus tardif (TURN devenu indisponible entre la pré-vérification et la création de la
+          // connexion) sans exception remontée : même nettoyage que ci-dessous.
+          await _abortOutgoing(room, before, extra: session);
+          return null;
+        }
+        // Raccroché par handleNewCall (appli reverrouillée entre-temps) : rien à présenter.
+        if (session.callHasEnded) return null;
+        delegate._watchActive(session);
+        return session;
+      } catch (_) {
+        await _abortOutgoing(room, before);
+        return null;
+      }
+    } finally {
+      _startingOutgoingCall = false;
     }
   }
 
