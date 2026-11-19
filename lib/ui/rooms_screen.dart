@@ -808,9 +808,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver, Ro
 
   /// Retour sur cette conversation depuis l'écran qui la recouvrait : de nouveau réellement
   /// visible, voir [didPushNext].
+  ///
+  /// Trouvé en audit interne : ce retour ne renvoyait jamais le marqueur de lecture. Pendant que
+  /// l'écran au-dessus était affiché (recherche dans la conversation, vérification d'appareil,
+  /// infos du groupe, ou l'appel entrant poussé via `murmureNavigatorKey`), chaque nouveau message
+  /// reçu déclenchait bien `onUpdate` → `_maybeSendReadMarker`, mais celle-ci se taisait à chaque
+  /// fois à cause du même test `ModalRoute.isCurrent` que ce commentaire documente pour
+  /// `MessageNotifier` — exactement le comportement voulu tant que l'écran reste couvert. Le
+  /// problème est qu'au retour, rien ne redéclenchait cet appel : `didPopNext` corrigeait déjà
+  /// `activeRoomId` (donc les notifications reprenaient bien), mais le marqueur de lecture restait
+  /// bloqué sur le dernier message lu AVANT que l'écran ne soit recouvert, jusqu'à l'arrivée d'un
+  /// nouveau message — potentiellement jamais, si la conversation s'arrête là. Les deux seuls
+  /// écrans qui raccourcissaient déjà cet écart le faisaient chacun par un appel explicite après
+  /// leur propre `Navigator.push` (voir `_openDeviceVerification` et le bouton « Infos du groupe »
+  /// plus bas) : une correction au cas par cas qui ne couvrait ni la recherche ni l'appel entrant.
+  /// Appeler `_maybeSendReadMarker` ici couvre uniformément tous les écrans poussés par-dessus
+  /// cette conversation, présents et futurs — les deux appels explicites restants sont désormais
+  /// redondants avec celui-ci mais inoffensifs (idempotents via `_lastReadMarkerEventId`).
   @override
   void didPopNext() {
     MessageNotifier.activeRoomId = widget.room.id;
+    _maybeSendReadMarker();
   }
 
   /// Signale au homeserver (et donc, potentiellement, à l'interlocuteur — voir l'indicateur
