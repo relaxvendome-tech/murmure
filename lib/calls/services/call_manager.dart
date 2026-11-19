@@ -18,6 +18,28 @@ import 'call_foreground_service.dart';
 import 'call_opsec_notifier.dart';
 import 'call_opsec_store.dart';
 
+/// Logique pure (testable sans plugin ni client Matrix, voir
+/// test/call_foreground_sync_test.dart) de [MurmureWebRTCDelegate._syncForeground] : faut-il
+/// (re)démarrer le service de premier plan des appels (voir [CallForegroundService]), sachant
+/// qu'il a déjà démarré pour la session en cours ([started]) avec la caméra ([hasCamera]) ou sans,
+/// que l'appel est vidéo ([wantVideo]) et que `CAMERA` est accordée À CET INSTANT ([camNow] —
+/// sans objet si [wantVideo] est faux). RECORD_AUDIO est supposée déjà accordée par l'appelant
+/// ([MurmureWebRTCDelegate._syncForeground] ne relit pas même cette fonction sinon).
+///
+/// Jamais démarré encore pour cette session : toujours vrai (premier démarrage, avec ou sans
+/// caméra selon [camNow]). Déjà démarré : vrai SEULEMENT si l'appel est vidéo, que la caméra est
+/// accordée maintenant, et que le service ne l'avait pas encore (mise à niveau) — jamais pour
+/// retirer la caméra une fois obtenue, ni pour un appel audio déjà démarré.
+bool shouldStartForeground({
+  required bool started,
+  required bool hasCamera,
+  required bool wantVideo,
+  required bool camNow,
+}) {
+  if (!started) return true;
+  return wantVideo && camNow && !hasCamera;
+}
+
 /// Lancé par [MurmureWebRTCDelegate.createPeerConnection] quand la politique réseau interdit
 /// l'appel (voir [CallPolicy]). C'est le SEUL endroit par lequel `matrix-dart-sdk` (via `VoIP`/
 /// `CallSession`) crée réellement une `RTCPeerConnection` — que l'appel soit sortant ou qu'il
@@ -216,6 +238,11 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// tant qu'on l'a démarré pour la session [_fgSession].
   CallSession? _fgSession;
 
+  /// Vrai si le service a été démarré pour [_fgSession] avec le type caméra inclus (voir
+  /// [_syncForeground]). Distinct de [_fgSession] : un appel vidéo peut avoir démarré le service
+  /// SANS la caméra (CAMERA pas encore accordée à cet instant), et l'obtenir seulement plus tard.
+  bool _fgHasCamera = false;
+
   /// Démarre le service de premier plan quand l'appel devient « vivant » (sortant ou décroché, voir
   /// [hasLiveCall]) ; idempotent. Jamais d'exception : un échec ne doit pas casser l'appel.
   bool _fgStarting = false;
@@ -226,19 +253,49 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
   /// appel, la permission est demandée par getUserMedia ; on retente donc à chaque changement
   /// d'état (kConnecting/kConnected surviennent après getUserMedia). Le type caméra n'est demandé
   /// que si CAMERA est accordée, pour ne jamais perdre le micro à cause de la caméra.
+  ///
+  /// Trouvé en audit interne (zone appels, aucune passe précédente sur ce fichier) : pour un appel
+  /// SORTANT, [_watchActive] appelle cette méthode de façon SYNCHRONE dès la création de la
+  /// session — avant même que `getUserMedia` n'ait demandé quoi que ce soit côté WebRTC. Pour un
+  /// premier appel VIDÉO (RECORD_AUDIO déjà accordée par un appel audio précédent, mais CAMERA
+  /// jamais demandée jusqu'ici), `Permission.camera.isGranted` répondait donc `false` à cet instant
+  /// précis — pas parce que l'utilisateur l'aurait refusée, mais parce qu'elle n'avait simplement
+  /// pas encore été demandée. L'ancienne garde (`_fgSession == s` seule) démarrait alors le service
+  /// SANS le type caméra et verrouillait ce choix pour toute la durée de l'appel : une fois la
+  /// permission accordée (par `getUserMedia`, juste après), plus aucun appel ultérieur à cette
+  /// méthode ne redémarrait le service pour y ajouter la caméra, puisque `_fgSession == s` suffisait
+  /// à l'ignorer. Un appel vidéo mis en arrière-plan (écran éteint, autre appli au premier plan)
+  /// perdait alors silencieusement la caméra pendant toute sa durée — exactement le défaut que ce
+  /// service existe pour éviter, et précisément sur le cas le plus probable (premier appel vidéo
+  /// d'un appareil). Démarrer à nouveau le service AVEC le même ID de notification ne le relance
+  /// pas : `ContextCompat.startForegroundService` redélivre l'intent au service déjà actif
+  /// (`onStartCommand`, vérifié dans `MainActivity.kt`/`CallForegroundService.kt`), qui met à jour
+  /// son type de premier plan en conséquence — aucun changement natif nécessaire, seule la garde
+  /// Dart ci-dessous empêchait de le refaire. [_fgHasCamera] distingue maintenant « déjà démarré »
+  /// de « déjà démarré AVEC la caméra », pour permettre cette mise à niveau unique sans jamais
+  /// redémarrer inutilement (ni pour un appel audio, ni une fois la caméra obtenue).
   void _syncForeground() {
     final s = _active;
-    if (s == null || _fgSession == s || _fgStarting || !hasLiveCall) return;
+    if (s == null || _fgStarting || !hasLiveCall) return;
+    final wantVideo = s.type == CallType.kVideo;
+    // Court-circuit immédiat, sans même relire les permissions : appel audio déjà démarré pour
+    // cette session, ou appel vidéo déjà démarré AVEC la caméra — le cas de loin le plus fréquent,
+    // puisque [_syncForeground] est rappelée à chaque changement d'état de l'appel en cours.
+    if (_fgSession == s && (!wantVideo || _fgHasCamera)) return;
     _fgStarting = true;
     unawaited(() async {
       try {
         final mic = await Permission.microphone.isGranted;
-        if (!mic || _active != s || !hasLiveCall || _fgSession == s) return;
-        final wantVideo = s.type == CallType.kVideo;
-        final cam = wantVideo && await Permission.camera.isGranted;
+        if (!mic || _active != s || !hasLiveCall) return;
+        final camNow = wantVideo && await Permission.camera.isGranted;
+        if (!shouldStartForeground(
+            started: _fgSession == s, hasCamera: _fgHasCamera, wantVideo: wantVideo, camNow: camNow)) {
+          return; // rien de nouveau à apporter (voir [shouldStartForeground]).
+        }
         if (_active != s || !hasLiveCall) return;
         _fgSession = s;
-        await CallForegroundService.start(video: cam, calcMode: AppLock.lastKnownCalc);
+        _fgHasCamera = camNow;
+        await CallForegroundService.start(video: camNow, calcMode: AppLock.lastKnownCalc);
       } catch (_) {
         // Jamais d'exception qui casse l'appel.
       } finally {
@@ -252,6 +309,7 @@ class MurmureWebRTCDelegate extends WebRTCDelegate {
     try {
       if (_fgSession == null) return;
       _fgSession = null;
+      _fgHasCamera = false;
       unawaited(CallForegroundService.stop());
     } catch (_) {}
   }
