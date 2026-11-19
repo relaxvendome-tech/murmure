@@ -27,6 +27,24 @@ import 'verification/verification_manager.dart';
 /// appel, sans avoir à transporter un `BuildContext` jusque-là.
 final GlobalKey<NavigatorState> murmureNavigatorKey = GlobalKey<NavigatorState>();
 
+/// Trouvé en audit interne : `MessageNotifier._isForegroundUnlocked` (voir message_notifier.dart)
+/// affirme qu'une conversation marquée « active » (`ChatScreen.initState`/`dispose`) est
+/// RÉELLEMENT sous les yeux de l'utilisateur dès que l'appli est au premier plan et déverrouillée
+/// — faux dès qu'un autre écran est poussé PAR-DESSUS elle (infos du groupe, recherche dans la
+/// conversation, vérification d'appareil, ou l'écran d'appel entrant poussé via
+/// [murmureNavigatorKey] par `MurmureWebRTCDelegate`, sans rapport avec la pile de `ChatScreen`) :
+/// un message arrivant dans ce salon à ce moment-là ne notifiait jamais, alors que l'utilisateur
+/// ne le voit pas plus qu'un message dans n'importe quel autre salon fermé. `_maybeSendReadMarker`
+/// (rooms_screen.dart) évite déjà ce même piège pour les accusés de lecture via
+/// `ModalRoute.isCurrent`, mais ce test seul ne suffit pas ici : rien ne rappelle `ChatScreen`
+/// quand la route qui le recouvre est poussée ou dépilée (`isCurrent` n'est réévalué que lorsque
+/// quelque chose d'autre déclenche déjà une reconstruction). Ce `RouteObserver` notifie
+/// explicitement `_ChatScreenState` via `didPushNext`/`didPopNext` (voir rooms_screen.dart) :
+/// transmis à `RoomsScreen` depuis `MaterialApp.navigatorObservers` ci-dessous, jamais importé
+/// directement par les écrans eux-mêmes — même principe que [murmureNavigatorKey], passé en
+/// paramètre plutôt que lu via un import circulaire vers ce fichier.
+final RouteObserver<PageRoute<dynamic>> murmureRouteObserver = RouteObserver<PageRoute<dynamic>>();
+
 Future<void> main() async {
   // Tout en premier, avant même `ensureInitialized()` : voir crash_log.dart (journal de
   // plantages purement local, jamais transmis). Installé ici pour couvrir le plus de code
@@ -233,6 +251,7 @@ class _MurmureAppState extends State<MurmureApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: murmureNavigatorKey,
+      navigatorObservers: [murmureRouteObserver],
       title: 'Murmure',
       debugShowCheckedModeBanner: false,
       theme: murmureTheme(brightness: Brightness.light),
@@ -310,7 +329,13 @@ class _Home extends StatelessWidget {
         if (!client.encryptionEnabled) {
           return const _BootErrorScreen();
         }
-        return _PostUnlockInit(child: RoomsScreen(client: client, callManager: callManager));
+        return _PostUnlockInit(
+          child: RoomsScreen(
+            client: client,
+            callManager: callManager,
+            routeObserver: murmureRouteObserver,
+          ),
+        );
       },
     );
   }

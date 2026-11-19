@@ -100,9 +100,19 @@ String _roomsSignature(Client client) {
 /// Liste des conversations. Point d'entrée vers une discussion, l'ajout d'un contact, et les
 /// réglages (verrou, mode Bluetooth, réseau).
 class RoomsScreen extends StatefulWidget {
-  const RoomsScreen({super.key, required this.client, required this.callManager});
+  const RoomsScreen({
+    super.key,
+    required this.client,
+    required this.callManager,
+    required this.routeObserver,
+  });
   final Client client;
   final CallManager callManager;
+
+  /// Voir le commentaire de `murmureRouteObserver` (main.dart) : transmis jusqu'à `ChatScreen`
+  /// pour qu'il sache quand un autre écran est poussé par-dessus lui, jamais importé directement
+  /// depuis main.dart (même principe que [CallManager] ci-dessus).
+  final RouteObserver<PageRoute<dynamic>> routeObserver;
 
   @override
   State<RoomsScreen> createState() => _RoomsScreenState();
@@ -133,6 +143,7 @@ enum _DeleteFailedChoice { retry, wipeLocalOnly, cancel }
 class _RoomsScreenState extends State<RoomsScreen> {
   Client get client => widget.client;
   CallManager get callManager => widget.callManager;
+  RouteObserver<PageRoute<dynamic>> get routeObserver => widget.routeObserver;
 
   /// Flux créé une seule fois (et non à chaque `build`), pour que le rafraîchissement périodique
   /// ne réabonne pas le `StreamBuilder`.
@@ -400,7 +411,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
                             ),
                       ),
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => ChatScreen(room: room, callManager: callManager),
+                  builder: (_) =>
+                      ChatScreen(room: room, callManager: callManager, routeObserver: routeObserver),
                 )),
               );
             },
@@ -439,14 +451,19 @@ class _RoomsScreenState extends State<RoomsScreen> {
     switch (choice) {
       case _NewConversationKind.contact:
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => AddContactScreen(client: client, callManager: callManager),
+          builder: (_) => AddContactScreen(
+            client: client,
+            callManager: callManager,
+            routeObserver: routeObserver,
+          ),
         ));
       case _NewConversationKind.group:
         final room = await Navigator.of(context)
             .push<Room>(MaterialPageRoute(builder: (_) => NewGroupScreen(client: client)));
         if (room != null && context.mounted) {
           Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => ChatScreen(room: room, callManager: callManager),
+            builder: (_) =>
+                ChatScreen(room: room, callManager: callManager, routeObserver: routeObserver),
           ));
         }
     }
@@ -524,9 +541,18 @@ class _InviteTileState extends State<_InviteTile> {
 /// Ajout d'un contact par identifiant Matrix (collé ou scanné par QR) ; ouvre ou crée la
 /// conversation directe chiffrée (Megolm) avec lui.
 class AddContactScreen extends StatefulWidget {
-  const AddContactScreen({super.key, required this.client, required this.callManager});
+  const AddContactScreen({
+    super.key,
+    required this.client,
+    required this.callManager,
+    required this.routeObserver,
+  });
   final Client client;
   final CallManager callManager;
+
+  /// Transmis à `ChatScreen` à l'ouverture de la conversation créée — voir le commentaire de
+  /// `murmureRouteObserver` (main.dart).
+  final RouteObserver<PageRoute<dynamic>> routeObserver;
 
   @override
   State<AddContactScreen> createState() => _AddContactScreenState();
@@ -566,7 +592,11 @@ class _AddContactScreenState extends State<AddContactScreen> {
       if (room == null) throw Exception('Conversation introuvable après création');
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(
-        builder: (_) => ChatScreen(room: room, callManager: widget.callManager),
+        builder: (_) => ChatScreen(
+          room: room,
+          callManager: widget.callManager,
+          routeObserver: widget.routeObserver,
+        ),
       ));
     } catch (e) {
       if (!mounted) return;
@@ -635,15 +665,25 @@ class _AddContactScreenState extends State<AddContactScreen> {
 /// Conversation chiffrée (Olm/Megolm via vodozemac, géré en interne par le SDK Matrix — voir le
 /// commentaire détaillé dans main.dart sur vodozemac et le refus de démarrer sans chiffrement).
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.room, required this.callManager});
+  const ChatScreen({
+    super.key,
+    required this.room,
+    required this.callManager,
+    required this.routeObserver,
+  });
   final Room room;
   final CallManager callManager;
+
+  /// Voir le commentaire de `murmureRouteObserver` (main.dart) : permet à [_ChatScreenState] de
+  /// savoir quand un autre écran est poussé par-dessus cette conversation (ou dépilé), pour
+  /// corriger `MessageNotifier.activeRoomId` en conséquence.
+  final RouteObserver<PageRoute<dynamic>> routeObserver;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver, RouteAware {
   final _textCtrl = TextEditingController();
   Timeline? _timeline;
   bool _sendingMedia = false;
@@ -739,6 +779,38 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(EphemeralService.instance.sweepRoom(widget.room));
     _refreshTypingUsers();
     _typingSub = widget.room.client.onSync.stream.listen((_) => _refreshTypingUsers());
+  }
+
+  /// Abonnement à [ChatScreen.routeObserver], voir [didPushNext]/[didPopNext] ci-dessous.
+  /// `didChangeDependencies` (plutôt que `initState`) : `ModalRoute.of(context)` a besoin que cet
+  /// état soit déjà raccroché à l'arbre, pas garanti avant.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<dynamic>) widget.routeObserver.subscribe(this, route);
+  }
+
+  /// Trouvé en audit interne : `MessageNotifier._isForegroundUnlocked` (message_notifier.dart)
+  /// considère cette conversation comme réellement affichée tant que [MessageNotifier.activeRoomId]
+  /// vaut `widget.room.id` et que l'appli est au premier plan déverrouillée — vrai à l'ouverture,
+  /// mais plus du tout dès qu'un autre écran (infos du groupe, recherche, vérification d'appareil,
+  /// ou l'appel entrant poussé via `murmureNavigatorKey`) est poussé PAR-DESSUS cet écran : un
+  /// message arrivant dans ce salon à ce moment-là ne notifiait jamais, comme si l'utilisateur le
+  /// lisait, alors qu'il ne voit plus cette conversation. Même principe que `_maybeSendReadMarker`
+  /// ci-dessous (`ModalRoute.isCurrent`), mais ce test seul ne suffit pas : rien ne le redéclenche
+  /// à chaque fois que la route au-dessus change — `didPushNext`/`didPopNext` (RouteAware) sont
+  /// appelés exactement à ces moments-là.
+  @override
+  void didPushNext() {
+    if (MessageNotifier.activeRoomId == widget.room.id) MessageNotifier.activeRoomId = null;
+  }
+
+  /// Retour sur cette conversation depuis l'écran qui la recouvrait : de nouveau réellement
+  /// visible, voir [didPushNext].
+  @override
+  void didPopNext() {
+    MessageNotifier.activeRoomId = widget.room.id;
   }
 
   /// Signale au homeserver (et donc, potentiellement, à l'interlocuteur — voir l'indicateur
@@ -1032,6 +1104,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     if (MessageNotifier.activeRoomId == widget.room.id) MessageNotifier.activeRoomId = null;
+    widget.routeObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
     _expiryTimer?.cancel();
     _scrollCtrl.removeListener(_onScroll);
