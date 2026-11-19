@@ -71,8 +71,11 @@ class CallOpsecStore {
     }
   }
 
-  /// Les plus récents d'abord — pour un futur écran d'historique (non implémenté dans cette
-  /// passe, voir docs/CALLS_ARCHITECTURE.md).
+  /// Les plus récents d'abord — pour l'écran d'historique. Trouvé en audit interne (commentaire
+  /// périmé, pas le code) : ce commentaire affirmait encore qu'aucun écran n'appelait [list] («
+  /// non implémenté dans cette passe »), alors que `lib/calls/ui/missed_calls_screen.dart`
+  /// l'utilise déjà (accessible depuis `ui/rooms_screen.dart`) — voir docs/CALLS_ARCHITECTURE.md,
+  /// qui, lui, était déjà à jour.
   static Future<List<MissedCall>> list() async {
     final db = await _open();
     try {
