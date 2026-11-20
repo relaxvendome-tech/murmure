@@ -268,6 +268,47 @@ bool isExpired(Event event, Room room, {DateTime? now}) => isExpiredAt(
       enabledAt: ephemeralEnabledAt(room),
     );
 
+/// Logique pure : horodatage à utiliser pour décider si un événement doit être considéré expiré
+/// par le balayage. Pour une ÉDITION (`m.relates_to.rel_type == "m.replace"`, voir
+/// [RelationshipTypes.edit]), on ignore son PROPRE horodatage (celui de la frappe de l'édition)
+/// au profit de celui du message ORIGINAL qu'elle remplace ([originalTs], quand il est connu) :
+/// une édition n'est pas un nouveau message, c'est le même message, dont le TTL doit continuer à
+/// courir depuis son envoi initial, pas repartir de zéro à chaque modification.
+///
+/// Trouvé en audit interne (zone messages éphémères, jamais revérifiée depuis l'ajout de
+/// l'édition de message, commit 53c91fc) : [EphemeralService.sweepRoom] calculait `expired` pour
+/// CHAQUE événement avec SA PROPRE `originServerTs`, y compris pour une édition. Vérifié contre
+/// le SDK matrix-dart épinglé (`event.dart`, tag v16.0.2) : `Event.getDisplayEvent` renvoie bien
+/// l'événement ORIGINAL (donc un contenu vide) dès qu'il est rédigé — `if (redacted) return this;`
+/// AVANT même de regarder les éditions — l'affichage dans l'appli disparaît donc correctement dès
+/// l'expiration du message original. Mais l'événement d'ÉDITION lui-même (qui porte, dans
+/// `m.new_content`, le texte RÉELLEMENT affiché depuis la modification) est un événement Matrix
+/// séparé, présent dans `timeline.events` au même titre que n'importe quel autre message (vérifié
+/// dans `timeline.dart` : `addAggregatedEvent` indexe l'événement SANS JAMAIS le retirer de la
+/// liste principale, `chunk.events`, où il a été ajouté juste avant par le même appelant) et donc
+/// visité par ce même balayage — avec SA PROPRE date, forcément égale ou postérieure à celle de
+/// l'original. Éditer un message juste avant son expiration repoussait donc d'autant la
+/// disparition RÉELLE de son contenu (local ET serveur, via `redactEvent`) : un message
+/// « éphémère 1 heure » édité à la 59e minute gardait son texte actuel lisible sur le serveur
+/// jusqu'à PRESQUE DEUX heures après l'envoi initial — près du double de la durée annoncée à
+/// l'utilisateur — sans que rien ne le montre dans l'appli, puisque la bulle, elle, disparaît
+/// correctement au bout d'une heure (conséquence de [getDisplayEvent] ci-dessus). Une personne qui
+/// compte sur le TTL pour qu'un message disparaisse réellement du serveur avant une saisie/
+/// perquisition pouvait donc se tromper de près du double sur ce délai pour tout message édité en
+/// fin de fenêtre.
+///
+/// LIMITE HONNÊTE : si l'événement original n'est pas dans la fenêtre de timeline chargée par ce
+/// balayage ([originalTs] alors `null`), on retombe sur l'ancien comportement (propre horodatage
+/// de l'édition) plutôt que de bloquer le balayage — un cas qui ne devrait pas se produire en
+/// pratique (une édition référence un message déjà visible, donc déjà chargé dans la même page),
+/// mais jamais vérifié par une édition réelle vieille de plusieurs milliers de messages.
+DateTime effectiveTsForSweep({
+  required bool isEdit,
+  required DateTime ownTs,
+  DateTime? originalTs,
+}) =>
+    isEdit && originalTs != null ? originalTs : ownTs;
+
 /// Pagination du balayage : au plus 50 pages de 100 événements par conversation et par balayage.
 const int kSweepMaxPages = 50;
 const int kSweepPageSize = 100;
@@ -394,19 +435,34 @@ class EphemeralService {
         }
       }
       final now = DateTime.now();
-      final expired = timeline.events.where((e) => shouldSweep(
-            type: e.type,
-            senderId: e.senderId,
-            me: me,
-            redacted: e.redacted,
-            sent: e.status.isSent,
-            expired: isExpiredAt(
-              originServerTs: e.originServerTs,
-              ttlSeconds: ttl,
-              now: now,
-              enabledAt: enabledAt,
-            ),
-          ));
+      // Voir [effectiveTsForSweep] : une édition doit expirer avec le message qu'elle remplace,
+      // pas repartir de zéro à sa propre date. `relationshipEventId` (édition -> original) est
+      // toujours l'identifiant d'un événement de cette même conversation ; cherché ici dans la
+      // page actuellement chargée plutôt qu'avec une requête réseau par édition.
+      final tsById = <String, DateTime>{
+        for (final e in timeline.events) e.eventId: e.originServerTs,
+      };
+      final expired = timeline.events.where((e) {
+        final isEdit = e.relationshipType == RelationshipTypes.edit;
+        final effectiveTs = effectiveTsForSweep(
+          isEdit: isEdit,
+          ownTs: e.originServerTs,
+          originalTs: isEdit ? tsById[e.relationshipEventId] : null,
+        );
+        return shouldSweep(
+          type: e.type,
+          senderId: e.senderId,
+          me: me,
+          redacted: e.redacted,
+          sent: e.status.isSent,
+          expired: isExpiredAt(
+            originServerTs: effectiveTs,
+            ttlSeconds: ttl,
+            now: now,
+            enabledAt: enabledAt,
+          ),
+        );
+      });
       var failed = false;
       for (final e in expired.toList()) {
         if (!_inFlight.add(e.eventId)) {

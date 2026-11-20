@@ -223,5 +223,57 @@ void main() {
       final older = handledBeforeAfterSweep(now, 300).subtract(const Duration(seconds: 1));
       expect(isExpiredAt(originServerTs: older, ttlSeconds: 300, now: now), isTrue);
     });
+
+    // Correctif de ce tour : une édition doit expirer avec le message qu'elle remplace, pas
+    // reprendre son propre horodatage de frappe (voir le commentaire de [effectiveTsForSweep]).
+    group('effectiveTsForSweep (édition expire avec son original, pas sa propre date)', () {
+      final original = DateTime.utc(2026, 1, 1, 12, 0);
+      final editedLater = DateTime.utc(2026, 1, 1, 12, 59); // édition à la 59e minute
+
+      test('pas une édition : son propre horodatage, inchangé', () {
+        expect(
+          effectiveTsForSweep(isEdit: false, ownTs: editedLater, originalTs: original),
+          editedLater,
+        );
+      });
+
+      test('édition, original connu : hérite de l\'horodatage de l\'original', () {
+        expect(
+          effectiveTsForSweep(isEdit: true, ownTs: editedLater, originalTs: original),
+          original,
+        );
+      });
+
+      test('édition, original inconnu (hors de la page chargée) : repli sur sa propre date', () {
+        expect(
+          effectiveTsForSweep(isEdit: true, ownTs: editedLater, originalTs: null),
+          editedLater,
+        );
+      });
+
+      test(
+          'scénario du défaut : un message "1 heure" édité à la 59e minute expire quand même à '
+          'h+1, pas à (h+59min)+1h', () {
+        const ttl = 3600; // 1 heure
+        // 65 minutes après l'original : au-delà de son TTL + tolérance (61 min), donc il aurait
+        // déjà dû expirer et disparaître — mais toujours moins de 65 min après l'ÉDITION, donc
+        // encore "fraîche" si on se basait (à tort) sur son propre horodatage.
+        final past = original.add(const Duration(minutes: 65));
+        // Avec l'ancien comportement (propre horodatage de l'édition), l'édition ne serait pas
+        // encore expirée à cet instant : seulement 6 minutes se sont écoulées depuis sa frappe.
+        expect(
+          isExpiredAt(originServerTs: editedLater, ttlSeconds: ttl, now: past),
+          isFalse,
+          reason: 'démontre le défaut : sans le correctif, l\'édition semblerait encore fraîche',
+        );
+        // Avec le correctif (horodatage de l'original), l'édition expire au même instant que le
+        // message qu'elle remplace aurait expiré lui-même.
+        final effective = effectiveTsForSweep(isEdit: true, ownTs: editedLater, originalTs: original);
+        expect(
+          isExpiredAt(originServerTs: effective, ttlSeconds: ttl, now: past),
+          isTrue,
+        );
+      });
+    });
   });
 }
