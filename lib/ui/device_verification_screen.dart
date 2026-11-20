@@ -5,8 +5,19 @@ import 'sas_verification_screen.dart';
 
 /// Vérification des appareils d'un contact — par empreinte (manuelle, hors bande) OU par SAS
 /// (comparaison interactive d'émojis) — voir `docs/E2EE_VERIFICATION.md` pour le constat d'audit
-/// initial et pour l'API SAS, désormais vérifiée directement contre le code source de
-/// `matrix-dart-sdk` (tag `v0.29.0`, pas devinée depuis une documentation ou une IA externe).
+/// initial, fait en lisant directement le code source de `matrix-dart-sdk` (tag `v0.29.0`, pas
+/// devinée depuis une documentation ou une IA externe), plutôt que de le supposer inchangé.
+///
+/// Trouvé en audit interne (zone vérification, après la migration matrix 0.29 -> 16, commit
+/// 3ac025a) : ce commentaire citait encore le tag `v0.29.0` sans jamais avoir été repassé en
+/// revue après la migration — exactement la lacune déjà corrigée pour `reactions.dart` et
+/// `message_notifier.dart`. Re-vérifié directement contre le code source de `matrix-dart-sdk` au
+/// tag `v16.0.2` réellement épinglé (`pubspec.yaml`) : `DeviceKeysList.startVerification` (y
+/// compris la création de la conversation directe via `Client.startDirectChat` quand elle
+/// n'existe pas déjà), `DeviceKeys.setVerified`/`.ed25519Key`/`.verified` et l'énumération
+/// `KeyVerificationState` ([SasVerificationScreen]) sont inchangés mot pour mot entre les deux
+/// tags — l'API utilisée ici reste donc exacte, mais ce n'était plus vérifié depuis la migration,
+/// seulement supposé.
 ///
 /// Le SAS authentifie en plus l'absence d'un adversaire actif au moment même de l'échange de
 /// clés — la comparaison d'empreinte seule ne protège pas contre ce cas précis. Les deux méthodes

@@ -85,9 +85,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   }
 
   /// La vérification par émojis (SAS) d'un AUTRE utilisateur passe par une conversation directe
-  /// (SDK v0.29.0, `DeviceKeysList.startVerification` → `Client.startDirectChat`) : elle est créée
-  /// si elle n'existe pas encore. On prévient avant d'ouvrir l'écran ; la comparaison d'empreinte
-  /// seule n'ouvre rien.
+  /// (`DeviceKeysList.startVerification` → `Client.startDirectChat`, re-vérifié contre le tag
+  /// `v16.0.2` réellement épinglé — voir `device_verification_screen.dart`, inchangé depuis le
+  /// `v0.29.0` d'origine) : elle est créée si elle n'existe pas encore. On prévient avant d'ouvrir
+  /// l'écran ; la comparaison d'empreinte seule n'ouvre rien.
   Future<void> _openVerification(User u) async {
     if (widget.room.client.getDirectChatFromUserId(u.id) == null) {
       final go = await showDialog<bool>(
